@@ -31,8 +31,6 @@ public class MyKVStorageTest {
         });
     }
 
-    private enum Type {BASIC, FLOOR_CEIL,  DELETE_RANGE }
-
     private static final String DIR = "/tmp/bookkeeper/testing";
     private KeyValueStorage dataStore;
     private final int keyToCheck;
@@ -67,7 +65,6 @@ public class MyKVStorageTest {
     @After
     public void tearDown() throws Exception {
         this.dataStore.close();
-
     }
 
     @Test
