@@ -8,10 +8,12 @@ import org.apache.bookkeeper.bookie.BookieException;
 import org.apache.bookkeeper.bookie.EntryLocation;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.conf.TestBKConfiguration;
+import org.apache.bookkeeper.proto.BookieProtocol;
 import org.apache.commons.io.FileUtils;
 import org.junit.*;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
@@ -21,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
+import static java.lang.Math.abs;
 import static org.junit.Assert.assertEquals;
 
 @RunWith(Parameterized.class)
@@ -38,11 +41,11 @@ public class MySingleDirectoryDBLedgerStorageTest {
     public static Collection<InputTest> data() {
         List<InputTest> list = new ArrayList<>();
 
-        list.add(new InputTest(1, 1, 2, "content", "key"));
-        list.add(new InputTest(0, 1, 2, "", ""));
-        list.add(new InputTest(-1, 1, 1, "content", "key"));
-        list.add(new InputTest(1, 2, 2, "content", ""));
 
+        list.add(new InputTest(1, 2, 1, "content", "key"));
+        list.add(new InputTest(0, 2,  1, "", ""));
+        list.add(new InputTest(-1, 1, 1, "content", "key"));
+        //list.add(new InputTest(1, 2, 2, "content", "k"));
         return list;
 
     }
@@ -50,9 +53,9 @@ public class MySingleDirectoryDBLedgerStorageTest {
     private static final String DIR = "/tmp/bookkeeper/testing";
     private SingleDirectoryDbLedgerStorage storage;
     private File dir;
-    private final int ledgerId;
-    private final int entryId1;
-    private final int entryId2;
+    private final long ledgerId;
+    private final long entryId1;
+    private final long entryId2;
     private final String content;
     private final String masterKey;
 
@@ -74,10 +77,10 @@ public class MySingleDirectoryDBLedgerStorageTest {
         ServerConfiguration conf = TestBKConfiguration.newServerConfiguration();
         conf.setGcWaitTime(gcWaitTime);
         conf.setLedgerStorageClass(DbLedgerStorage.class.getName());
-        conf.setLedgerDirNames(new String[] { this.dir.toString() });
+        conf.setLedgerDirNames(new String[]{this.dir.toString()});
         Bookie bookie = new Bookie(conf);
 
-        storage = ( (DbLedgerStorage) bookie.getLedgerStorage()).getLedgerStorageList().get(0);
+        storage = ((DbLedgerStorage) bookie.getLedgerStorage()).getLedgerStorageList().get(0);
 
     }
 
@@ -92,6 +95,7 @@ public class MySingleDirectoryDBLedgerStorageTest {
         Assume.assumeTrue(ledgerId >= 0);
         storage.setMasterKey(ledgerId, masterKey.getBytes());
         ByteBuf buf2, buf1, buf3;
+
         //buffer1 initialization
         buf1 = initializeBuffer(ledgerId, entryId1, content);
         storage.addEntry(buf1);
@@ -105,29 +109,30 @@ public class MySingleDirectoryDBLedgerStorageTest {
         resBuf = storage.getEntry(ledgerId, entryId2);
         assertEquals("should find:" + buf2, buf2, resBuf);
 
-        if (entryId1 == entryId2){
+        if (entryId1 == entryId2) {
             // they are simply the same
-            assertEquals(storage.getEntry(ledgerId, entryId1), resBuf);
+            assertEquals(storage.getEntry(ledgerId, entryId1), storage.getLastEntry(ledgerId));
         }
 
         // same entryId of buf1 but different content
         buf3 = initializeBuffer(ledgerId, entryId1, content + ":" + content);
-        //add by using the logger
+        //add using the logger
         long newLocationId = storage.getEntryLogger().addEntry(ledgerId, buf3, false);
         // output of get should be buf1
         assertEquals("should find:" + buf1, buf1, storage.getEntry(ledgerId, entryId1));
 
-
         EntryLocation newLocation = new EntryLocation(ledgerId, entryId1, newLocationId);
         // from now on entryId1 will point to the new location corresponding to buf3
         storage.updateEntriesLocations(Lists.newArrayList(newLocation));
+        storage.flushEntriesLocationsIndex();
+
         resBuf = storage.getEntry(ledgerId, entryId1);
         assertEquals("should find:" + buf3, buf3, resBuf);
 
-        if (entryId1 == entryId2){
+        if (entryId1 == entryId2) {
             // they were the same before, so I should see the update
             assertEquals("should find:" + buf3, resBuf, storage.getEntry(ledgerId, entryId2));
-        }else{
+        } else {
             //buf2 remains the same
             resBuf = storage.getEntry(ledgerId, entryId2);
             assertEquals("should find:" + buf2, buf2, resBuf);
@@ -135,15 +140,15 @@ public class MySingleDirectoryDBLedgerStorageTest {
 
     }
 
-    private ByteBuf initializeBuffer(long ledgerId, long entryId, String content){
-        ByteBuf buf =  Unpooled.buffer(1024);
+    private ByteBuf initializeBuffer(long ledgerId, long entryId, String content) {
+        ByteBuf buf = Unpooled.buffer(1024);
         buf.writeLong(ledgerId);
         buf.writeLong(entryId);
         buf.writeBytes(content.getBytes());
         return buf;
     }
 
-   @Test(expected = Exception.class)
+    @Test(expected = Exception.class)
     public void testIllegalKey() throws IOException, BookieException {
         Assume.assumeTrue(ledgerId < 0);
         try {
@@ -155,42 +160,42 @@ public class MySingleDirectoryDBLedgerStorageTest {
             throw e;
         }
 
-   }
+    }
 
-   private static class InputTest{
-       private final int ledgerId;
-       private final int entryId1;
-       private final int entryId2;
-       private final String content;
-       private final String masterKey;
+    private static class InputTest {
+        private final long ledgerId;
+        private final long entryId1;
+        private final long entryId2;
+        private final String content;
+        private final String masterKey;
 
-       public InputTest(int ledgerId, int entryId1, int entryId2, String content, String masterKey) {
-           this.ledgerId = ledgerId;
-           this.entryId1 = entryId1;
-           this.entryId2 = entryId2;
-           this.content = content;
-           this.masterKey = masterKey;
-       }
+        public InputTest(long ledgerId, long entryId1, long entryId2, String content, String masterKey) {
+            this.ledgerId = ledgerId;
+            this.entryId1 = entryId1;
+            this.entryId2 = entryId2;
+            this.content = content;
+            this.masterKey = masterKey;
+        }
 
-       public int getLedgerId() {
-           return ledgerId;
-       }
+        public long getLedgerId() {
+            return ledgerId;
+        }
 
-       public int getEntryId1() {
-           return entryId1;
-       }
+        public long getEntryId1() {
+            return entryId1;
+        }
 
-       public int getEntryId2() {
-           return entryId2;
-       }
+        public long getEntryId2() {
+            return entryId2;
+        }
 
-       public String getContent() {
-           return content;
-       }
+        public String getContent() {
+            return content;
+        }
 
-       public String getMasterKey() {
-           return masterKey;
-       }
-   }
+        public String getMasterKey() {
+            return masterKey;
+        }
+    }
 
 }
