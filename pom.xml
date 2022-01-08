@@ -923,7 +923,7 @@
                     <reuseForks>false</reuseForks>
                      <!-- <trimStackTrace>false</trimStackTrace> -->
                     <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
-                    <rerunFailingTestsCount>${testRetryCount}</rerunFailingTestsCount>
+                    <rerunFailingTestsCount>0</rerunFailingTestsCount>
                 </configuration>
             </plugin>
             <plugin>

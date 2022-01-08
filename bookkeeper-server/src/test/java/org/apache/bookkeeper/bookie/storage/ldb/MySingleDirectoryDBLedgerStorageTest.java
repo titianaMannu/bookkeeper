@@ -5,6 +5,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import org.apache.bookkeeper.bookie.Bookie;
 import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.bookie.CheckpointSource;
 import org.apache.bookkeeper.bookie.EntryLocation;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.conf.TestBKConfiguration;
@@ -13,7 +14,6 @@ import org.apache.commons.io.FileUtils;
 import org.junit.*;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
-import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
@@ -22,8 +22,10 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
-import static java.lang.Math.abs;
 import static org.junit.Assert.assertEquals;
 
 @RunWith(Parameterized.class)
@@ -35,6 +37,7 @@ public class MySingleDirectoryDBLedgerStorageTest {
         this.entryId2 = input.getEntryId2();
         this.content = input.getContent();
         this.masterKey = input.getMasterKey();
+        this.poolSize = input.getPoolSize();
     }
 
     @Parameterized.Parameters
@@ -42,10 +45,10 @@ public class MySingleDirectoryDBLedgerStorageTest {
         List<InputTest> list = new ArrayList<>();
 
 
-        list.add(new InputTest(1, 2, 1, "content", "key"));
-        list.add(new InputTest(0, 2,  1, "", ""));
-        list.add(new InputTest(-1, 1, 1, "content", "key"));
-        //list.add(new InputTest(1, 2, 2, "content", "k"));
+        list.add(new InputTest(1, 2, 1, "content", "key", 1));
+        list.add(new InputTest(0, 2, 1, "", "", 200));
+        list.add(new InputTest(-1, 1, 1, "content", "key", 1));
+        list.add(new InputTest(1, 2, 2, "content", "k", 1));
         return list;
 
     }
@@ -58,29 +61,35 @@ public class MySingleDirectoryDBLedgerStorageTest {
     private final long entryId2;
     private final String content;
     private final String masterKey;
+    private ExecutorService pool;
+    private final int poolSize;
 
     @BeforeClass
     public static void beforeClass() throws Exception {
+        System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "trace");
         Files.createDirectories(Paths.get(DIR));
     }
 
     @Before
     public void setUp() throws Exception {
 
+        pool = Executors.newFixedThreadPool(poolSize);
+
         this.dir = new File(DIR);
         FileUtils.cleanDirectory(this.dir);
 
-        File curDir = Bookie.getCurrentDirectory(this.dir);
-        Bookie.checkDirectoryStructure(curDir);
+        File directory = Bookie.getCurrentDirectory(this.dir);
+        Bookie.checkDirectoryStructure(directory);
 
-        int gcWaitTime = 1000;
-        ServerConfiguration conf = TestBKConfiguration.newServerConfiguration();
-        conf.setGcWaitTime(gcWaitTime);
-        conf.setLedgerStorageClass(DbLedgerStorage.class.getName());
-        conf.setLedgerDirNames(new String[]{this.dir.toString()});
-        Bookie bookie = new Bookie(conf);
+        int gcTime = 1000;
+        ServerConfiguration configuration = TestBKConfiguration.newServerConfiguration();
+        configuration.setGcWaitTime(gcTime);
+        configuration.setLedgerStorageClass(DbLedgerStorage.class.getName());
+        configuration.setLedgerDirNames(new String[]{this.dir.toString()});
+        Bookie bookie = new Bookie(configuration);
 
         storage = ((DbLedgerStorage) bookie.getLedgerStorage()).getLedgerStorageList().get(0);
+
 
     }
 
@@ -111,7 +120,7 @@ public class MySingleDirectoryDBLedgerStorageTest {
 
         if (entryId1 == entryId2) {
             // they are simply the same
-            assertEquals(storage.getEntry(ledgerId, entryId1), storage.getLastEntry(ledgerId));
+            assertEquals(storage.getEntry(ledgerId, entryId1), storage.getEntry(ledgerId, BookieProtocol.LAST_ADD_CONFIRMED));
         }
 
         // same entryId of buf1 but different content
@@ -125,7 +134,6 @@ public class MySingleDirectoryDBLedgerStorageTest {
         // from now on entryId1 will point to the new location corresponding to buf3
         storage.updateEntriesLocations(Lists.newArrayList(newLocation));
         storage.flushEntriesLocationsIndex();
-
         resBuf = storage.getEntry(ledgerId, entryId1);
         assertEquals("should find:" + buf3, buf3, resBuf);
 
@@ -162,19 +170,65 @@ public class MySingleDirectoryDBLedgerStorageTest {
 
     }
 
+    @Test
+    public void addEntriesConcurrently() throws IOException, BookieException, InterruptedException {
+        Assume.assumeTrue(ledgerId >= 0);
+        storage.setMasterKey(ledgerId, masterKey.getBytes());
+        for (int i = 0; i < poolSize; i++) {
+            final int j = i;
+            pool.execute(new Runnable() {
+                @Override
+                public void run() {
+                    //buffer1 initialization
+                    ByteBuf buf1 = initializeBuffer(ledgerId, j, content);
+                    try {
+                        storage.setMasterKey(ledgerId, masterKey.getBytes());
+                        storage.addEntry(buf1);
+                        storage.flush();
+
+                        storage.flushEntriesLocationsIndex();
+                        ByteBuf resBuf = storage.getEntry(ledgerId, j);
+
+                        assertEquals("should find:" + buf1, buf1, resBuf);
+
+                        storage.deleteLedger(ledgerId);
+                        storage.flush();
+
+                    } catch (IOException | BookieException e) {
+                        e.printStackTrace();
+                    }
+                }
+            });
+        }
+
+        pool.shutdown();
+        if (pool.awaitTermination(1, TimeUnit.MINUTES)) {
+            System.out.println("entries correctly added.");
+        }
+    }
+
+    @Test(expected = Bookie.NoEntryException.class)
+    public void getInvalidEntry() throws IOException {
+        Assume.assumeTrue(ledgerId >= 0);
+        storage.setMasterKey(ledgerId, masterKey.getBytes());
+        storage.getEntry(ledgerId, entryId1);
+    }
+
     private static class InputTest {
         private final long ledgerId;
         private final long entryId1;
         private final long entryId2;
         private final String content;
         private final String masterKey;
+        private final int poolSize;
 
-        public InputTest(long ledgerId, long entryId1, long entryId2, String content, String masterKey) {
+        public InputTest(long ledgerId, long entryId1, long entryId2, String content, String masterKey, int poolSize) {
             this.ledgerId = ledgerId;
             this.entryId1 = entryId1;
             this.entryId2 = entryId2;
             this.content = content;
             this.masterKey = masterKey;
+            this.poolSize = poolSize;
         }
 
         public long getLedgerId() {
@@ -195,6 +249,10 @@ public class MySingleDirectoryDBLedgerStorageTest {
 
         public String getMasterKey() {
             return masterKey;
+        }
+
+        public int getPoolSize() {
+            return poolSize;
         }
     }
 

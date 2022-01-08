@@ -104,13 +104,15 @@ public class MyKVStorageTest {
 
     @Test
     public void getFloorTest() throws IOException {
-
         byte[] first;
         byte[] second;
         byte[] check;
         byte[] toCheck;
         //simple insert two arbitrary values and check floor output
         first = ByteBuffer.allocate(bufferSize).putInt(this.start).array();
+        //case empty db to improve condition coverage
+        assertNull(dataStore.getFloor(first));
+
         dataStore.put(first, first);
         second = ByteBuffer.allocate(bufferSize).putInt(this.end).array();
         dataStore.put(second, second);
@@ -192,17 +194,16 @@ public class MyKVStorageTest {
         //populate db
         for (int i = this.start;  i <= this.end; i++) {
             b = ByteBuffer.allocate(bufferSize).putInt(i).array();
+            check = new byte[bufferSize];
             //insert value
             this.dataStore.put(b, b);
-            check = new byte[bufferSize];
             // check insert success
             res = this.dataStore.get(b, check);
             assertNotEquals(-1, res);
-
-            batch.remove(b);
-            batch.flush();
+            dataStore.delete(b);
             //check remove success
             res = this.dataStore.get(b, check);
+            //case NOT_FOUND
             assertEquals(-1, res);
 
         }
@@ -211,7 +212,7 @@ public class MyKVStorageTest {
         b = ByteBuffer.allocate(bufferSize).putInt(this.start).array();
         //insert value
         dataStore.put(b, b);
-        //use ad-hoc small array
+        //use ad-hoc small array improve statement
         check = new byte[bufferSize - 1];
         // trigger exception
         dataStore.get(b, check);
@@ -230,7 +231,8 @@ public class MyKVStorageTest {
     public void deleteRangeTest() throws IOException, UnexpectedBehaviorException {
         byte[] beginKey, endKey;
         long sizeBefore = dataStore.count();
-
+        //datastore is empty
+        assertEquals(0, sizeBefore);
         KeyValueStorage.Batch batch = dataStore.newBatch();
         beginKey = ByteBuffer.allocate(bufferSize).putInt(start).array();
         endKey = ByteBuffer.allocate(bufferSize).putInt(end).array();
