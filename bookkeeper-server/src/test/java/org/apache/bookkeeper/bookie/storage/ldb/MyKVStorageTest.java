@@ -24,26 +24,29 @@ public class MyKVStorageTest {
     @Parameterized.Parameters
     public static Collection<Object[]> data() {
         return Arrays.asList(new Object[][]{
-                {KeyValueStorageFactory.DbConfigType.Small, 5, 1, 5, 4},
-                {KeyValueStorageFactory.DbConfigType.Huge,  1, 1, 5, HUGE_SIZE},
-                {KeyValueStorageFactory.DbConfigType.Small,  6, 1, 5, HUGE_SIZE},
-                {KeyValueStorageFactory.DbConfigType.Small,  1, 2, 5, 4},
+                //{dbConfigType, keyToCheck, startKey, endKey, bufferSize}
+                {KeyValueStorageFactory.DbConfigType.Small, 0, 1, 2, SMALL_SIZE},
+                {KeyValueStorageFactory.DbConfigType.Huge, 1, 1, 2, HUGE_SIZE},
+                {KeyValueStorageFactory.DbConfigType.Small, 2, 1, 2, SMALL_SIZE},
+                {KeyValueStorageFactory.DbConfigType.Small, 3, 1, 2, HUGE_SIZE},
+                {KeyValueStorageFactory.DbConfigType.Small, 1, 1, 1, SMALL_SIZE},
         });
     }
 
     private static final String DIR = "/tmp/bookkeeper/testing";
     private KeyValueStorage dataStore;
     private final int keyToCheck;
-    private final int start;
-    private final int end;
+    private final int startKey;
+    private final int endKey;
     private final KeyValueStorageFactory.DbConfigType dbConfigType;
     private final int bufferSize;
     private static final int HUGE_SIZE = 64 * 1024 * 1024;
+    private static final int SMALL_SIZE = 4;
 
-    public MyKVStorageTest( KeyValueStorageFactory.DbConfigType dbConfigType, int k, int start, int end, int bufferSize) {
-        this.keyToCheck = k;
-        this.start = start;
-        this.end = end;
+    public MyKVStorageTest(KeyValueStorageFactory.DbConfigType dbConfigType, int keyToCheck, int startKey, int endKey, int bufferSize) {
+        this.keyToCheck = keyToCheck;
+        this.startKey = startKey;
+        this.endKey = endKey;
         this.dbConfigType = dbConfigType;
         this.bufferSize = bufferSize;
     }
@@ -75,7 +78,7 @@ public class MyKVStorageTest {
         byte[] b;
         byte[] check;
         //populate db
-        for (int i = 0; i < this.end; i++) {
+        for (int i = 0; i < this.endKey; i++) {
             //before insert
             b = ByteBuffer.allocate(bufferSize).putInt(i).array();
             check = this.dataStore.get(b);
@@ -89,7 +92,7 @@ public class MyKVStorageTest {
         }
 
         KeyValueStorage.Batch batch = dataStore.newBatch();
-        for (int i = 0; i < this.end; i++) {
+        for (int i = 0; i < this.endKey; i++) {
             b = ByteBuffer.allocate(bufferSize).putInt(i).array();
             batch.remove(b);
             //removal will take place atomically when batch.flush is called
@@ -109,21 +112,21 @@ public class MyKVStorageTest {
         byte[] check;
         byte[] toCheck;
         //simple insert two arbitrary values and check floor output
-        first = ByteBuffer.allocate(bufferSize).putInt(this.start).array();
+        first = ByteBuffer.allocate(bufferSize).putInt(this.startKey).array();
         //case empty db to improve condition coverage
         assertNull(dataStore.getFloor(first));
 
         dataStore.put(first, first);
-        second = ByteBuffer.allocate(bufferSize).putInt(this.end).array();
+        second = ByteBuffer.allocate(bufferSize).putInt(this.endKey).array();
         dataStore.put(second, second);
         toCheck = ByteBuffer.allocate(bufferSize).putInt(this.keyToCheck).array();
-        if ( this.keyToCheck > end) {
+        if (this.keyToCheck > endKey) {
             check = dataStore.getFloor(toCheck).getKey();
             assertArrayEquals(check, second);
-        } else if (this.keyToCheck > start) {
+        } else if (this.keyToCheck > startKey) {
             check = dataStore.getFloor(toCheck).getKey();
             assertArrayEquals(check, first);
-        }   else{
+        } else {
             assertNull(dataStore.getFloor(toCheck));
         }
     }
@@ -132,21 +135,21 @@ public class MyKVStorageTest {
     public void getCeilTest() throws IOException {
         byte[] first, second, check, toCheck;
         //simple insert two arbitrary values and check ceil output
-        first = ByteBuffer.allocate(bufferSize).putInt(this.start).array();
+        first = ByteBuffer.allocate(bufferSize).putInt(this.startKey).array();
         dataStore.put(first, first);
-        second = ByteBuffer.allocate(bufferSize).putInt(this.end).array();
+        second = ByteBuffer.allocate(bufferSize).putInt(this.endKey).array();
         dataStore.put(second, second);
         toCheck = ByteBuffer.allocate(bufferSize).putInt(this.keyToCheck).array();
 
 
-        if (keyToCheck > start && keyToCheck <= this.end) {
+        if (keyToCheck > startKey && keyToCheck <= this.endKey) {
             check = dataStore.getCeil(toCheck).getKey();
             assertArrayEquals(check, second);
-        } else if (keyToCheck <= start){
+        } else if (keyToCheck <= startKey) {
             check = dataStore.getCeil(toCheck).getKey();
             assertArrayEquals(check, first);
-        }else {
-            assertNull( dataStore.getCeil(toCheck));
+        } else {
+            assertNull(dataStore.getCeil(toCheck));
         }
     }
 
@@ -154,7 +157,7 @@ public class MyKVStorageTest {
     public void keysSpanningTest() throws IOException {
         byte[] current, last, check, b;
         //populate db
-        for (int i = start; i < end; i++) {
+        for (int i = startKey; i < endKey; i++) {
             //before insert
             b = ByteBuffer.allocate(bufferSize).putInt(i).array();
             check = this.dataStore.get(b);
@@ -167,10 +170,10 @@ public class MyKVStorageTest {
 
         }
 
-        assertEquals(end - start, dataStore.count());
-        int counter = this.start;
+        assertEquals(endKey - startKey, dataStore.count());
+        int counter = this.startKey;
         current = ByteBuffer.allocate(bufferSize).putInt(counter).array();
-        last = ByteBuffer.allocate(bufferSize).putInt(end ).array();
+        last = ByteBuffer.allocate(bufferSize).putInt(endKey).array();
 
         KeyValueStorage.CloseableIterator<byte[]> keyIterator = dataStore.keys(current, last);
         while (keyIterator.hasNext()) {
@@ -189,10 +192,9 @@ public class MyKVStorageTest {
     public void insertGetRemoveRepeatedly() throws IOException {
         byte[] b;
         byte[] check;
-        KeyValueStorage.Batch batch = dataStore.newBatch();
         int res;
         //populate db
-        for (int i = this.start;  i <= this.end; i++) {
+        for (int i = this.startKey; i <= this.endKey; i++) {
             b = ByteBuffer.allocate(bufferSize).putInt(i).array();
             check = new byte[bufferSize];
             //insert value
@@ -207,9 +209,8 @@ public class MyKVStorageTest {
             assertEquals(-1, res);
 
         }
-        batch.close();
 
-        b = ByteBuffer.allocate(bufferSize).putInt(this.start).array();
+        b = ByteBuffer.allocate(bufferSize).putInt(this.startKey).array();
         //insert value
         dataStore.put(b, b);
         //use ad-hoc small array improve statement
@@ -220,29 +221,31 @@ public class MyKVStorageTest {
     }
 
 
-    public static class UnexpectedBehaviorException extends Exception {
-        public UnexpectedBehaviorException(String errorMessage) {
-            super(errorMessage);
-            System.out.println(errorMessage);
-        }
-    }
 
-    @Test(expected = UnexpectedBehaviorException.class)
-    public void deleteRangeTest() throws IOException, UnexpectedBehaviorException {
+    @Test
+    public void deleteRangeTest() throws IOException {
         byte[] beginKey, endKey;
         long sizeBefore = dataStore.count();
         //datastore is empty
         assertEquals(0, sizeBefore);
+        beginKey = ByteBuffer.allocate(bufferSize).putInt(startKey).array();
+        endKey = ByteBuffer.allocate(bufferSize).putInt(this.endKey).array();
         KeyValueStorage.Batch batch = dataStore.newBatch();
-        beginKey = ByteBuffer.allocate(bufferSize).putInt(start).array();
-        endKey = ByteBuffer.allocate(bufferSize).putInt(end).array();
-        batch.deleteRange(beginKey, endKey); // <----- failure deleteRange should do nothing here; why a put operation is performed ?!
+        if (this.startKey != this.endKey){
+            // insert values to the datastore
+            dataStore.put(beginKey, beginKey);
+            dataStore.put(endKey, endKey);
+            assertEquals(2, dataStore.count());
+        }
+        endKey = ByteBuffer.allocate(bufferSize).putInt(this.endKey + 1).array();
+        batch.deleteRange(beginKey, endKey);
         batch.flush();
         batch.close();
-        long sizeAfter = dataStore.count();
-        if ( sizeAfter != sizeBefore){
-            throw new UnexpectedBehaviorException("deleteRangeTest: The datastore should be empty.");
-        }
+        assertNull(dataStore.get(beginKey));
+        assertNull(dataStore.get(endKey));
+        //db should be empty
+        assertEquals(0, dataStore.count());// <----- failure deleteRange should do nothing here; why a put operation is performed ?!
+
     }
 
 }

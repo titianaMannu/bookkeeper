@@ -347,7 +347,7 @@
             <id>ba-dua</id>
             <activation>
                 <!--todo change this to trigger ba-dua -->
-                <activeByDefault>true</activeByDefault>
+                <activeByDefault>false</activeByDefault>
             </activation>
             <build>
                 <plugins>
