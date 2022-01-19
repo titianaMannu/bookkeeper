@@ -1,0 +1,16 @@
+language: java
+
+notifications:
+ email: false
+
+addons:
+  sonarcloud:
+    organization: "titianamannu"
+    token:
+      secure: "CCqypao6SovpozgWYz4PxbsRb2sHFNqVQse95NIDGH8CIABOWykkSQmfR/ZzjbVukLOP09wA7ZZwENWVnvLXAGQ/moi3m/+iG1SPrY0ckEStgWtabjhRA0cJmCXUqK0u60eNKH3cxFmPyhYuTEHXCvoLZWJ4plQTtvF4l3+jPDxeyBJT5bJqZ5XXL5ehtn6MPGhs26xaofLJNtg9CeOchLStSh8UkpdyM/QRaPfsHnBMJ7V4qv0JX5NqHgheZquPjLIlajvxFI0MnA8AxbHjh0Qdu8RayRn8VGnhkD1R4x22ItJsXuaOQ6gvvdKYgSGlxlospFEUnpsH14hYOJbydvWeVldVUsQyOGFJLzPzWh76OxTz1KKn7WVj1c2+hechegWV2M7iXrDmQ87HYKyZzsoKj8cjnXTOqtvzYC1Xs3/sUibA7yTb+YwuAYpHlBstlOsORBZNTPvBNCMe7kA8Gl07IcoLOXfP/NDZWVffX7YzPhyTUXTnBcYhh5bfoIcXPA8SAjEH6uSnxWJBWmAY1vyUZ0aKMVz227kCcSzINw5C5VIKwMKIgHOaXt8C3bhJDzN357BaqJyYUwqDW7tulsj8Vvgwj3/hKWMwSxvjX1LF0ZZdhhHRUGCTyStXBmyFWy47ipu7ZwdBmxjicSu/joiaRPUfc2vxvDJ3GX8SKB8="
+
+script:  
+  # the following command line builds the project, runs the tests with coverage and then execute the SonarCloud analysis
+  - mvn clean org.jacoco:jacoco-maven-plugin:prepare-agent verify sonar:sonar -Dsonar.projectKey=titianaMannu_bookkeeper
+
+

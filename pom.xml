@@ -204,6 +204,12 @@
         <aggregate.report.dir>tests/target/site/jacoco-aggregate/jacoco.xml</aggregate.report.dir>
         <ba-dua-dir>${session.executionRootDirectory}/resources</ba-dua-dir>
         <sonar.java.coveragePlugin>jacoco</sonar.java.coveragePlugin>
+
+        <sonar.projectKey>titianamannu:${project.groupId}:${project.artifactId}</sonar.projectKey>
+        <sonar.links.homepage>https://github.com/titianaMannu/bookkeeper</sonar.links.homepage>
+        <sonar.links.ci> https://app.travis-ci.com/titianaMannu/bookkeeper</sonar.links.ci>
+        <sonar.links.scm>https://github.com/titianaMannu/bookkeeper</sonar.links.scm>
+        <sonar.links.issue>https://github.com/titianaMannu/bookkeeper/issues</sonar.links.issue>
     </properties>
 
     <!-- dependency definitions -->
