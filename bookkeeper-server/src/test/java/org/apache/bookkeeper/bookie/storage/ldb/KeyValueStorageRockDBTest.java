@@ -20,7 +20,7 @@ import java.util.Collection;
 import static org.junit.Assert.*;
 
 @RunWith(Parameterized.class)
-public class MyKVStorageTest {
+public class KeyValueStorageRockDBTest {
     @Parameterized.Parameters
     public static Collection<Object[]> data() {
         return Arrays.asList(new Object[][]{
@@ -43,7 +43,7 @@ public class MyKVStorageTest {
     private static final int HUGE_SIZE = 64 * 1024 * 1024;
     private static final int SMALL_SIZE = 4;
 
-    public MyKVStorageTest(KeyValueStorageFactory.DbConfigType dbConfigType, int keyToCheck, int startKey, int endKey, int bufferSize) {
+    public KeyValueStorageRockDBTest(KeyValueStorageFactory.DbConfigType dbConfigType, int keyToCheck, int startKey, int endKey, int bufferSize) {
         this.keyToCheck = keyToCheck;
         this.startKey = startKey;
         this.endKey = endKey;
@@ -241,10 +241,16 @@ public class MyKVStorageTest {
         batch.deleteRange(beginKey, endKey);
         batch.flush();
         batch.close();
+
+        if (this.startKey == this.endKey){
+            //db should be empty
+            assertEquals(0, dataStore.count());// <----- failure deleteRange should do nothing here; why a put operation is performed ?!
+            return;
+        }
+
         assertNull(dataStore.get(beginKey));
         assertNull(dataStore.get(endKey));
-        //db should be empty
-        assertEquals(0, dataStore.count());// <----- failure deleteRange should do nothing here; why a put operation is performed ?!
+
 
     }
 

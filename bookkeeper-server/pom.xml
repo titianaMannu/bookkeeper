@@ -318,8 +318,8 @@
                                 <param>org.apache.bookkeeper.bookie.storage.ldb.SingleDirectoryDbLedgerStorage</param>
                             </targetClasses>
                             <targetTests>
-                                <param>org.apache.bookkeeper.bookie.storage.ldb.MyKVStorageTest</param>
-                                <param>org.apache.bookkeeper.bookie.storage.ldb.MySingleDirectoryDBLedgerStorageTest</param>
+                                <param>org.apache.bookkeeper.bookie.storage.ldb.KeyValueStorageRockDBTest</param>
+                                <param>org.apache.bookkeeper.bookie.storage.ldb.SingleDirectoryDBLedgerStorageTest</param>
                             </targetTests>
                             <threads>3</threads>
                             <avoidCallsTo>

@@ -5,7 +5,6 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import org.apache.bookkeeper.bookie.Bookie;
 import org.apache.bookkeeper.bookie.BookieException;
-import org.apache.bookkeeper.bookie.CheckpointSource;
 import org.apache.bookkeeper.bookie.EntryLocation;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.conf.TestBKConfiguration;
@@ -29,9 +28,9 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.Assert.assertEquals;
 
 @RunWith(Parameterized.class)
-public class MySingleDirectoryDBLedgerStorageTest {
+public class SingleDirectoryDBLedgerStorageTest {
 
-    public MySingleDirectoryDBLedgerStorageTest(InputTest input) {
+    public SingleDirectoryDBLedgerStorageTest(InputTest input) {
         this.ledgerId = input.getLedgerId();
         this.entryId1 = input.getEntryId1();
         this.entryId2 = input.getEntryId2();
@@ -44,11 +43,11 @@ public class MySingleDirectoryDBLedgerStorageTest {
     public static Collection<InputTest> data() {
         List<InputTest> list = new ArrayList<>();
 
-
-        list.add(new InputTest(1, 2, 1, "content", "key", 1));
-        list.add(new InputTest(0, 2, 1, "", "", 200));
-        list.add(new InputTest(-1, 1, 1, "content", "key", 1));
-        list.add(new InputTest(1, 2, 2, "content", "k", 1));
+        /*ledgerId, entryId1, entryId2, content, masterKey, threadPoolSize*/
+        list.add(new InputTest(1, 0, 1, "content", "key", 1));
+        list.add(new InputTest(0, 1, 2, "", "", 200));
+        list.add(new InputTest(-1, -1, 1, "content", "key", 1));
+        list.add(new InputTest(1, 1, 1, "content", "key", 1));
         return list;
 
     }
@@ -101,7 +100,7 @@ public class MySingleDirectoryDBLedgerStorageTest {
 
     @Test
     public void basicAddAndUpdate() throws Exception {
-        Assume.assumeTrue(ledgerId >= 0);
+        Assume.assumeTrue(ledgerId >= 0 && entryId1 >= 0 && entryId2 >= 0);
         storage.setMasterKey(ledgerId, masterKey.getBytes());
         ByteBuf buf2, buf1, buf3;
 
@@ -171,32 +170,30 @@ public class MySingleDirectoryDBLedgerStorageTest {
     }
 
     @Test
-    public void addEntriesConcurrently() throws IOException, BookieException, InterruptedException {
-        Assume.assumeTrue(ledgerId >= 0);
+    public void addEntriesConcurrently() throws IOException, InterruptedException {
+        Assume.assumeTrue(ledgerId >= 0 && entryId2 >= 0 && entryId1 >= 0);
         storage.setMasterKey(ledgerId, masterKey.getBytes());
         for (int i = 0; i < poolSize; i++) {
             final int j = i;
-            pool.execute(new Runnable() {
-                @Override
-                public void run() {
-                    //buffer1 initialization
-                    ByteBuf buf1 = initializeBuffer(ledgerId, j, content);
-                    try {
-                        storage.setMasterKey(ledgerId, masterKey.getBytes());
-                        storage.addEntry(buf1);
-                        storage.flush();
+            pool.execute(() -> {
+                //buffer1 initialization
+                ByteBuf buf1 = initializeBuffer(ledgerId, j, content);
+                try {
+                    storage.setMasterKey(ledgerId, masterKey.getBytes());
+                    storage.addEntry(buf1);
+                    //cache rotation
+                    storage.flush();
 
-                        storage.flushEntriesLocationsIndex();
-                        ByteBuf resBuf = storage.getEntry(ledgerId, j);
+                    storage.flushEntriesLocationsIndex();
+                    ByteBuf resBuf = storage.getEntry(ledgerId, j);
 
-                        assertEquals("should find:" + buf1, buf1, resBuf);
+                    assertEquals("should find:" + buf1, buf1, resBuf);
 
-                        storage.deleteLedger(ledgerId);
-                        storage.flush();
+                    storage.deleteLedger(ledgerId);
+                    storage.flush();
 
-                    } catch (IOException | BookieException e) {
-                        e.printStackTrace();
-                    }
+                } catch (IOException | BookieException e) {
+                    e.printStackTrace();
                 }
             });
         }
