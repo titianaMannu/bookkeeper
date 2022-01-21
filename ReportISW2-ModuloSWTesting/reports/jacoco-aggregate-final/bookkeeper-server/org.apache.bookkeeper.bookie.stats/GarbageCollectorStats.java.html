@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>GarbageCollectorStats.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.stats</a> &gt; <span class="el_source">GarbageCollectorStats.java</span></div><h1>GarbageCollectorStats.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.bookkeeper.bookie.stats;
+
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ACTIVE_ENTRY_LOG_COUNT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ACTIVE_ENTRY_LOG_SPACE_BYTES;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.ACTIVE_LEDGER_COUNT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.BOOKIE_SCOPE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.CATEGORY_SERVER;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.DELETED_LEDGER_COUNT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.MAJOR_COMPACTION_COUNT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.MINOR_COMPACTION_COUNT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.RECLAIMED_COMPACTION_SPACE_BYTES;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.RECLAIMED_DELETION_SPACE_BYTES;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.THREAD_RUNTIME;
+
+import java.util.function.Supplier;
+import lombok.Getter;
+import org.apache.bookkeeper.stats.Counter;
+import org.apache.bookkeeper.stats.Gauge;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.stats.annotations.StatsDoc;
+
+/**
+ * A umbrella class for gc stats.
+ */
+@StatsDoc(
+    name = BOOKIE_SCOPE,
+    category = CATEGORY_SERVER,
+    help = &quot;Garbage Collector related stats&quot;
+)
+@Getter
+public class GarbageCollectorStats {
+
+<span class="nc" id="L53">    final StatsLogger statsLogger;</span>
+    @StatsDoc(
+        name = MINOR_COMPACTION_COUNT,
+        help = &quot;Number of minor compactions&quot;
+    )
+<span class="nc" id="L58">    private final Counter minorCompactionCounter;</span>
+    @StatsDoc(
+        name = MAJOR_COMPACTION_COUNT,
+        help = &quot;Number of major compactions&quot;
+    )
+<span class="nc" id="L63">    private final Counter majorCompactionCounter;</span>
+    @StatsDoc(
+        name = RECLAIMED_DELETION_SPACE_BYTES,
+        help = &quot;Number of disk space bytes reclaimed via deleting entry log files&quot;
+    )
+<span class="nc" id="L68">    private final Counter reclaimedSpaceViaDeletes;</span>
+    @StatsDoc(
+        name = RECLAIMED_COMPACTION_SPACE_BYTES,
+        help = &quot;Number of disk space bytes reclaimed via compacting entry log files&quot;
+    )
+<span class="nc" id="L73">    private final Counter reclaimedSpaceViaCompaction;</span>
+    @StatsDoc(
+        name = DELETED_LEDGER_COUNT,
+        help = &quot;Number of ledgers deleted by garbage collection&quot;
+    )
+<span class="nc" id="L78">    private final Counter deletedLedgerCounter;</span>
+    @StatsDoc(
+        name = THREAD_RUNTIME,
+        help = &quot;Operation stats of garbage collections&quot;
+    )
+<span class="nc" id="L83">    private final OpStatsLogger gcThreadRuntime;</span>
+    @StatsDoc(
+        name = ACTIVE_ENTRY_LOG_COUNT,
+        help = &quot;Current number of active entry log files&quot;
+    )
+<span class="nc" id="L88">    private final Gauge&lt;Integer&gt; activeEntryLogCountGauge;</span>
+    @StatsDoc(
+        name = ACTIVE_ENTRY_LOG_SPACE_BYTES,
+        help = &quot;Current number of active entry log space bytes&quot;
+    )
+<span class="nc" id="L93">    private final Gauge&lt;Long&gt; activeEntryLogSpaceBytesGauge;</span>
+    @StatsDoc(
+        name = ACTIVE_LEDGER_COUNT,
+        help = &quot;Current number of active ledgers&quot;
+    )
+<span class="nc" id="L98">    private final Gauge&lt;Integer&gt; activeLedgerCountGauge;</span>
+
+    public GarbageCollectorStats(StatsLogger statsLogger,
+                                 Supplier&lt;Integer&gt; activeEntryLogCountSupplier,
+                                 Supplier&lt;Long&gt; activeEntryLogSpaceBytesSupplier,
+<span class="fc" id="L103">                                 Supplier&lt;Integer&gt; activeLedgerCountSupplier) {</span>
+<span class="fc" id="L104">        this.statsLogger = statsLogger;</span>
+
+<span class="fc" id="L106">        this.minorCompactionCounter = statsLogger.getCounter(MINOR_COMPACTION_COUNT);</span>
+<span class="fc" id="L107">        this.majorCompactionCounter = statsLogger.getCounter(MAJOR_COMPACTION_COUNT);</span>
+<span class="fc" id="L108">        this.reclaimedSpaceViaCompaction = statsLogger.getCounter(RECLAIMED_COMPACTION_SPACE_BYTES);</span>
+<span class="fc" id="L109">        this.reclaimedSpaceViaDeletes = statsLogger.getCounter(RECLAIMED_DELETION_SPACE_BYTES);</span>
+<span class="fc" id="L110">        this.gcThreadRuntime = statsLogger.getOpStatsLogger(THREAD_RUNTIME);</span>
+<span class="fc" id="L111">        this.deletedLedgerCounter = statsLogger.getCounter(DELETED_LEDGER_COUNT);</span>
+
+<span class="fc" id="L113">        this.activeEntryLogCountGauge = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L116">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L121">                return activeEntryLogCountSupplier.get();</span>
+            }
+        };
+<span class="fc" id="L124">        statsLogger.registerGauge(ACTIVE_ENTRY_LOG_COUNT, activeEntryLogCountGauge);</span>
+<span class="fc" id="L125">        this.activeEntryLogSpaceBytesGauge = new Gauge&lt;Long&gt;() {</span>
+            @Override
+            public Long getDefaultValue() {
+<span class="nc" id="L128">                return 0L;</span>
+            }
+
+            @Override
+            public Long getSample() {
+<span class="nc" id="L133">                return activeEntryLogSpaceBytesSupplier.get();</span>
+            }
+        };
+<span class="fc" id="L136">        statsLogger.registerGauge(ACTIVE_ENTRY_LOG_SPACE_BYTES, activeEntryLogSpaceBytesGauge);</span>
+<span class="fc" id="L137">        this.activeLedgerCountGauge = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L140">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L145">                return activeLedgerCountSupplier.get();</span>
+            }
+        };
+<span class="fc" id="L148">        statsLogger.registerGauge(ACTIVE_LEDGER_COUNT, activeLedgerCountGauge);</span>
+<span class="fc" id="L149">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

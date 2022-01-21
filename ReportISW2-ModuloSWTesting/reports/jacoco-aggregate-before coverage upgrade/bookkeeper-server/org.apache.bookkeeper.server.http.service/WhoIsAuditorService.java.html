@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>WhoIsAuditorService.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.server.http.service</a> &gt; <span class="el_source">WhoIsAuditorService.java</span></div><h1>WhoIsAuditorService.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.server.http.service;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.http.HttpServer;
+import org.apache.bookkeeper.http.service.HttpEndpointService;
+import org.apache.bookkeeper.http.service.HttpServiceRequest;
+import org.apache.bookkeeper.http.service.HttpServiceResponse;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.replication.AuditorElector;
+import org.apache.zookeeper.ZooKeeper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * HttpEndpointService that handle Bookkeeper who is auditor related http request.
+ *
+ * &lt;p&gt;The GET method will get the auditor bookie address
+ */
+public class WhoIsAuditorService implements HttpEndpointService {
+
+<span class="nc" id="L41">    static final Logger LOG = LoggerFactory.getLogger(WhoIsAuditorService.class);</span>
+
+    protected ServerConfiguration conf;
+    protected ZooKeeper zk;
+
+<span class="nc" id="L46">    public WhoIsAuditorService(ServerConfiguration conf, ZooKeeper zk) {</span>
+<span class="nc" id="L47">        checkNotNull(conf);</span>
+<span class="nc" id="L48">        this.conf = conf;</span>
+<span class="nc" id="L49">        this.zk = zk;</span>
+<span class="nc" id="L50">    }</span>
+
+    /*
+     * Print the node which holds the auditor lock.
+     */
+    @Override
+    public HttpServiceResponse handle(HttpServiceRequest request) throws Exception {
+<span class="nc" id="L57">        HttpServiceResponse response = new HttpServiceResponse();</span>
+
+<span class="nc bnc" id="L59" title="All 2 branches missed.">        if (HttpServer.Method.GET == request.getMethod()) {</span>
+<span class="nc" id="L60">            BookieId bookieId = null;</span>
+            try {
+<span class="nc" id="L62">                bookieId = AuditorElector.getCurrentAuditor(conf, zk);</span>
+
+<span class="nc bnc" id="L64" title="All 2 branches missed.">                if (bookieId == null) {</span>
+<span class="nc" id="L65">                    response.setCode(HttpServer.StatusCode.NOT_FOUND);</span>
+<span class="nc" id="L66">                    response.setBody(&quot;No auditor elected&quot;);</span>
+<span class="nc" id="L67">                    return response;</span>
+                }
+<span class="nc" id="L69">            } catch (Exception e) {</span>
+<span class="nc" id="L70">                LOG.error(&quot;Meet Exception: &quot;, e);</span>
+<span class="nc" id="L71">                response.setCode(HttpServer.StatusCode.NOT_FOUND);</span>
+<span class="nc" id="L72">                response.setBody(&quot;Exception when get.&quot; + e.getMessage());</span>
+<span class="nc" id="L73">                return response;</span>
+<span class="nc" id="L74">            }</span>
+
+<span class="nc" id="L76">            response.setCode(HttpServer.StatusCode.OK);</span>
+<span class="nc" id="L77">            response.setBody(&quot;Auditor: &quot; + bookieId);</span>
+<span class="nc" id="L78">            LOG.debug(&quot;response body:&quot; + response.getBody());</span>
+<span class="nc" id="L79">            return response;</span>
+        } else {
+<span class="nc" id="L81">            response.setCode(HttpServer.StatusCode.NOT_FOUND);</span>
+<span class="nc" id="L82">            response.setBody(&quot;Not found method. Should be GET method&quot;);</span>
+<span class="nc" id="L83">            return response;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

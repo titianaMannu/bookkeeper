@@ -1,0 +1,358 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>DNS.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.net</a> &gt; <span class="el_source">DNS.java</span></div><h1>DNS.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+// This code has been copied from hadoop-common 2.0.4-alpha
+package org.apache.bookkeeper.net;
+
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
+import java.net.UnknownHostException;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.LinkedHashSet;
+import java.util.Vector;
+
+import javax.naming.NamingException;
+import javax.naming.directory.Attribute;
+import javax.naming.directory.Attributes;
+import javax.naming.directory.DirContext;
+import javax.naming.directory.InitialDirContext;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A class that provides direct and reverse lookup functionalities, allowing
+ * the querying of specific network interfaces or nameservers.
+ */
+<span class="nc" id="L43">public class DNS {</span>
+
+<span class="fc" id="L45">    private static final Logger LOG = LoggerFactory.getLogger(DNS.class);</span>
+
+    /**
+     * The cached hostname -initially null.
+     */
+
+<span class="fc" id="L51">    private static final String cachedHostname = resolveLocalHostname();</span>
+<span class="fc" id="L52">    private static final String cachedHostAddress = resolveLocalHostIPAddress();</span>
+    private static final String LOCALHOST = &quot;localhost&quot;;
+
+    /**
+     * Returns the hostname associated with the specified IP address by the
+     * provided nameserver.
+     * &lt;p/&gt;
+     * Loopback addresses
+     *
+     * @param hostIp The address to reverse lookup
+     * @param ns     The host name of a reachable DNS server
+     * @return The host name associated with the provided IP
+     * @throws NamingException If a NamingException is encountered
+     */
+    public static String reverseDns(InetAddress hostIp, String ns)
+            throws NamingException {
+        //
+        // Builds the reverse IP lookup form
+        // This is formed by reversing the IP numbers and appending in-addr.arpa
+        //
+<span class="fc" id="L72">        String[] parts = hostIp.getHostAddress().split(&quot;\\.&quot;);</span>
+<span class="pc bpc" id="L73" title="1 of 2 branches missed.">        if (parts.length != 4) {</span>
+            //Not proper address. May be IPv6
+<span class="nc" id="L75">            throw new NamingException(&quot;IPV6&quot;);</span>
+        }
+<span class="fc" id="L77">        String reverseIP = parts[3] + &quot;.&quot; + parts[2] + &quot;.&quot; + parts[1] + &quot;.&quot;</span>
+                + parts[0] + &quot;.in-addr.arpa&quot;;
+
+<span class="fc" id="L80">        DirContext ictx = new InitialDirContext();</span>
+        Attributes attribute;
+        try {
+<span class="pc bpc" id="L83" title="1 of 2 branches missed.">            attribute = ictx.getAttributes(&quot;dns://&quot;               // Use &quot;dns:///&quot; if the default</span>
+                    + ((ns == null) ? &quot;&quot; : ns)
+                    // nameserver is to be used
+                    + &quot;/&quot; + reverseIP, new String[]{&quot;PTR&quot;});
+        } finally {
+<span class="fc" id="L88">            ictx.close();</span>
+        }
+
+<span class="pc bpc" id="L91" title="1 of 2 branches missed.">        if (null == attribute) {</span>
+<span class="nc" id="L92">            throw new NamingException(&quot;No attribute is found&quot;);</span>
+        }
+
+<span class="fc" id="L95">        Attribute ptrAttr = attribute.get(&quot;PTR&quot;);</span>
+<span class="pc bpc" id="L96" title="1 of 2 branches missed.">        if (null == ptrAttr) {</span>
+<span class="fc" id="L97">            throw new NamingException(&quot;No PTR attribute is found&quot;);</span>
+        }
+
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        if (null == ptrAttr.get()) {</span>
+<span class="nc" id="L101">            throw new NamingException(&quot;PTR attribute value is null&quot;);</span>
+        }
+
+<span class="nc" id="L104">        return ptrAttr.get().toString();</span>
+    }
+
+    /**
+     * @return NetworkInterface for the given subinterface name (eg eth0:0)
+     * or null if no interface with the given name can be found
+     */
+    private static NetworkInterface getSubinterface(String strInterface)
+            throws SocketException {
+        Enumeration&lt;NetworkInterface&gt; nifs =
+<span class="nc" id="L114">                NetworkInterface.getNetworkInterfaces();</span>
+
+<span class="nc bnc" id="L116" title="All 2 branches missed.">        while (nifs.hasMoreElements()) {</span>
+<span class="nc" id="L117">            Enumeration&lt;NetworkInterface&gt; subNifs =</span>
+<span class="nc" id="L118">                    nifs.nextElement().getSubInterfaces();</span>
+
+<span class="nc bnc" id="L120" title="All 2 branches missed.">            while (subNifs.hasMoreElements()) {</span>
+<span class="nc" id="L121">                NetworkInterface nif = subNifs.nextElement();</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">                if (nif.getName().equals(strInterface)) {</span>
+<span class="nc" id="L123">                    return nif;</span>
+                }
+<span class="nc" id="L125">            }</span>
+<span class="nc" id="L126">        }</span>
+<span class="nc" id="L127">        return null;</span>
+    }
+
+    /**
+     * @param nif network interface to get addresses for
+     * @return set containing addresses for each subinterface of nif,
+     * see below for the rationale for using an ordered set
+     */
+    private static LinkedHashSet&lt;InetAddress&gt; getSubinterfaceInetAddrs(
+            NetworkInterface nif) {
+<span class="nc" id="L137">        LinkedHashSet&lt;InetAddress&gt; addrs = new LinkedHashSet&lt;InetAddress&gt;();</span>
+<span class="nc" id="L138">        Enumeration&lt;NetworkInterface&gt; subNifs = nif.getSubInterfaces();</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">        while (subNifs.hasMoreElements()) {</span>
+<span class="nc" id="L140">            NetworkInterface subNif = subNifs.nextElement();</span>
+<span class="nc" id="L141">            addrs.addAll(Collections.list(subNif.getInetAddresses()));</span>
+<span class="nc" id="L142">        }</span>
+<span class="nc" id="L143">        return addrs;</span>
+    }
+
+    /**
+     * Like {@link DNS#getIPs(String, boolean)}, but returns all
+     * IPs associated with the given interface and its subinterfaces.
+     */
+    public static String[] getIPs(String strInterface)
+            throws UnknownHostException {
+<span class="fc" id="L152">        return getIPs(strInterface, true);</span>
+    }
+
+    /**
+     * Returns all the IPs associated with the provided interface, if any, in
+     * textual form.
+     *
+     * @param strInterface        The name of the network interface or sub-interface to query
+     *                            (eg eth0 or eth0:0) or the string &quot;default&quot;
+     * @param returnSubinterfaces Whether to return IPs associated with subinterfaces of
+     *                            the given interface
+     * @return A string vector of all the IPs associated with the provided
+     * interface. The local host IP is returned if the interface
+     * name &quot;default&quot; is specified or there is an I/O error looking
+     * for the given interface.
+     * @throws UnknownHostException If the given interface is invalid
+     */
+    public static String[] getIPs(String strInterface,
+                                  boolean returnSubinterfaces) throws UnknownHostException {
+<span class="pc bpc" id="L171" title="1 of 2 branches missed.">        if (&quot;default&quot;.equals(strInterface)) {</span>
+<span class="nc" id="L172">            return new String[]{cachedHostAddress};</span>
+        }
+        NetworkInterface netIf;
+        try {
+<span class="fc" id="L176">            netIf = NetworkInterface.getByName(strInterface);</span>
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">            if (netIf == null) {</span>
+<span class="nc" id="L178">                netIf = getSubinterface(strInterface);</span>
+            }
+<span class="nc" id="L180">        } catch (SocketException e) {</span>
+<span class="nc" id="L181">            LOG.warn(&quot;I/O error finding interface {}: {}&quot;, strInterface, e.getMessage());</span>
+<span class="nc" id="L182">            return new String[]{cachedHostAddress};</span>
+<span class="fc" id="L183">        }</span>
+<span class="pc bpc" id="L184" title="1 of 2 branches missed.">        if (netIf == null) {</span>
+<span class="nc" id="L185">            throw new UnknownHostException(&quot;No such interface &quot; + strInterface);</span>
+        }
+
+        // NB: Using a LinkedHashSet to preserve the order for callers
+        // that depend on a particular element being 1st in the array.
+        // For example, getDefaultIP always returns the first element.
+<span class="fc" id="L191">        LinkedHashSet&lt;InetAddress&gt; allAddrs = new LinkedHashSet&lt;InetAddress&gt;();</span>
+<span class="fc" id="L192">        allAddrs.addAll(Collections.list(netIf.getInetAddresses()));</span>
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">        if (!returnSubinterfaces) {</span>
+<span class="nc" id="L194">            allAddrs.removeAll(getSubinterfaceInetAddrs(netIf));</span>
+        }
+
+<span class="fc" id="L197">        String[] ips = new String[allAddrs.size()];</span>
+<span class="fc" id="L198">        int i = 0;</span>
+<span class="fc bfc" id="L199" title="All 2 branches covered.">        for (InetAddress addr : allAddrs) {</span>
+<span class="fc" id="L200">            ips[i++] = addr.getHostAddress();</span>
+<span class="fc" id="L201">        }</span>
+<span class="fc" id="L202">        return ips;</span>
+    }
+
+
+    /**
+     * Returns the first available IP address associated with the provided
+     * network interface or the local host IP if &quot;default&quot; is given.
+     *
+     * @param strInterface The name of the network interface or subinterface to query
+     *                     (e.g. eth0 or eth0:0) or the string &quot;default&quot;
+     * @return The IP address in text form, the local host IP is returned
+     * if the interface name &quot;default&quot; is specified
+     * @throws UnknownHostException If the given interface is invalid
+     */
+    public static String getDefaultIP(String strInterface)
+            throws UnknownHostException {
+<span class="nc" id="L218">        String[] ips = getIPs(strInterface);</span>
+<span class="nc" id="L219">        return ips[0];</span>
+    }
+
+    /**
+     * Returns all the host names associated by the provided nameserver with the
+     * address bound to the specified network interface.
+     *
+     * @param strInterface The name of the network interface or subinterface to query
+     *                     (e.g. eth0 or eth0:0)
+     * @param nameserver   The DNS host name
+     * @return A string vector of all host names associated with the IPs tied to
+     * the specified interface
+     * @throws UnknownHostException if the given interface is invalid
+     */
+    public static String[] getHosts(String strInterface, String nameserver)
+            throws UnknownHostException {
+<span class="fc" id="L235">        String[] ips = getIPs(strInterface);</span>
+<span class="fc" id="L236">        Vector&lt;String&gt; hosts = new Vector&lt;String&gt;();</span>
+<span class="fc bfc" id="L237" title="All 2 branches covered.">        for (int ctr = 0; ctr &lt; ips.length; ctr++) {</span>
+            try {
+<span class="nc" id="L239">                hosts.add(reverseDns(InetAddress.getByName(ips[ctr]),</span>
+                        nameserver));
+<span class="nc" id="L241">            } catch (UnknownHostException ignored) {</span>
+<span class="fc" id="L242">            } catch (NamingException ignored) {</span>
+<span class="nc" id="L243">            }</span>
+        }
+<span class="pc bpc" id="L245" title="1 of 2 branches missed.">        if (hosts.isEmpty()) {</span>
+<span class="fc" id="L246">            LOG.warn(&quot;Unable to determine hostname for interface &quot; + strInterface);</span>
+<span class="fc" id="L247">            return new String[]{cachedHostname};</span>
+        } else {
+<span class="nc" id="L249">            return hosts.toArray(new String[hosts.size()]);</span>
+        }
+    }
+
+
+    /**
+     * Determine the local hostname; retrieving it from cache if it is known
+     * If we cannot determine our host name, return &quot;localhost&quot;.
+     *
+     * @return the local hostname or &quot;localhost&quot;
+     */
+    private static String resolveLocalHostname() {
+        String localhost;
+        try {
+<span class="fc" id="L263">            localhost = InetAddress.getLocalHost().getCanonicalHostName();</span>
+<span class="nc" id="L264">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L265">            LOG.warn(&quot;Unable to determine local hostname &quot;</span>
+                    + &quot;-falling back to \&quot;&quot; + LOCALHOST + &quot;\&quot;&quot;, e);
+<span class="nc" id="L267">            localhost = LOCALHOST;</span>
+<span class="fc" id="L268">        }</span>
+<span class="fc" id="L269">        return localhost;</span>
+    }
+
+
+    /**
+     * Get the IPAddress of the local host as a string.
+     * This will be a loop back value if the local host address cannot be
+     * determined.
+     * If the loopback address of &quot;localhost&quot; does not resolve, then the system's
+     * network is in such a state that nothing is going to work. A message is
+     * logged at the error level and a null pointer returned, a pointer
+     * which will trigger failures later on the application
+     *
+     * @return the IPAddress of the local host or null for a serious problem.
+     */
+    private static String resolveLocalHostIPAddress() {
+        String address;
+        try {
+<span class="fc" id="L287">            address = InetAddress.getLocalHost().getHostAddress();</span>
+<span class="nc" id="L288">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L289">            LOG.warn(&quot;Unable to determine address of the host&quot;</span>
+                    + &quot;-falling back to \&quot;&quot; + LOCALHOST + &quot;\&quot; address&quot;, e);
+            try {
+<span class="nc" id="L292">                address = InetAddress.getByName(LOCALHOST).getHostAddress();</span>
+<span class="nc" id="L293">            } catch (UnknownHostException noLocalHostAddressException) {</span>
+                //at this point, deep trouble
+<span class="nc" id="L295">                LOG.error(&quot;Unable to determine local loopback address &quot;</span>
+                        + &quot;of \&quot;&quot; + LOCALHOST + &quot;\&quot; &quot;
+                        + &quot;-this system's network configuration is unsupported&quot;, e);
+<span class="nc" id="L298">                address = null;</span>
+<span class="nc" id="L299">            }</span>
+<span class="fc" id="L300">        }</span>
+<span class="fc" id="L301">        return address;</span>
+    }
+
+    /**
+     * Returns all the host names associated by the default nameserver with the
+     * address bound to the specified network interface.
+     *
+     * @param strInterface The name of the network interface to query (e.g. eth0)
+     * @return The list of host names associated with IPs bound to the network
+     * interface
+     * @throws UnknownHostException If one is encountered while querying the default interface
+     */
+    public static String[] getHosts(String strInterface)
+            throws UnknownHostException {
+<span class="nc" id="L315">        return getHosts(strInterface, null);</span>
+    }
+
+    /**
+     * Returns the default (first) host name associated by the provided
+     * nameserver with the address bound to the specified network interface.
+     *
+     * @param strInterface The name of the network interface to query (e.g. eth0)
+     * @param nameserver   The DNS host name
+     * @return The default host names associated with IPs bound to the network
+     * interface
+     * @throws UnknownHostException If one is encountered while querying the default interface
+     */
+    public static String getDefaultHost(String strInterface, String nameserver)
+            throws UnknownHostException {
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">        if (&quot;default&quot;.equals(strInterface)) {</span>
+<span class="nc" id="L331">            return cachedHostname;</span>
+        }
+
+<span class="pc bpc" id="L334" title="1 of 2 branches missed.">        if (&quot;default&quot;.equals(nameserver)) {</span>
+<span class="nc" id="L335">            return getDefaultHost(strInterface);</span>
+        }
+
+<span class="fc" id="L338">        String[] hosts = getHosts(strInterface, nameserver);</span>
+<span class="fc" id="L339">        return hosts[0];</span>
+    }
+
+    /**
+     * Returns the default (first) host name associated by the default
+     * nameserver with the address bound to the specified network interface.
+     *
+     * @param strInterface The name of the network interface to query (e.g. eth0).
+     *                     Must not be null.
+     * @return The default host name associated with IPs bound to the network
+     * interface
+     * @throws UnknownHostException If one is encountered while querying the default interface
+     */
+    public static String getDefaultHost(String strInterface)
+            throws UnknownHostException {
+<span class="fc" id="L354">        return getDefaultHost(strInterface, null);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

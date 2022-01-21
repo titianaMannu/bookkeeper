@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>SyncThread.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">SyncThread.java</span></div><h1>SyncThread.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import com.google.common.annotations.VisibleForTesting;
+import io.netty.util.concurrent.DefaultThreadFactory;
+import java.io.IOException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
+import lombok.AccessLevel;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.bookie.CheckpointSource.Checkpoint;
+import org.apache.bookkeeper.bookie.LedgerDirsManager.LedgerDirsListener;
+import org.apache.bookkeeper.bookie.LedgerDirsManager.NoWritableLedgerDirException;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+
+/**
+ * SyncThread is a background thread which help checkpointing ledger storage
+ * when a checkpoint is requested. After a ledger storage is checkpointed,
+ * the journal files added before checkpoint will be garbage collected.
+ * &lt;p&gt;
+ * After all data has been persisted to ledger index files and entry
+ * loggers, it is safe to complete a checkpoint by persisting the log marker
+ * to disk. If bookie failed after persist log mark, bookie is able to relay
+ * journal entries started from last log mark without losing any entries.
+ * &lt;/p&gt;
+ * &lt;p&gt;
+ * Those journal files whose id are less than the log id in last log mark,
+ * could be removed safely after persisting last log mark. We provide a
+ * setting to let user keeping number of old journal files which may be used
+ * for manual recovery in critical disaster.
+ * &lt;/p&gt;
+ */
+<span class="fc" id="L57">@Slf4j</span>
+class SyncThread implements Checkpointer {
+
+<span class="nc" id="L60">    @Getter(AccessLevel.PACKAGE)</span>
+    final ScheduledExecutorService executor;
+    final LedgerStorage ledgerStorage;
+    final LedgerDirsListener dirsListener;
+    final CheckpointSource checkpointSource;
+
+<span class="fc" id="L66">    private final Object suspensionLock = new Object();</span>
+<span class="fc" id="L67">    private boolean suspended = false;</span>
+<span class="fc" id="L68">    private boolean disableCheckpoint = false;</span>
+
+    public SyncThread(ServerConfiguration conf,
+                      LedgerDirsListener dirsListener,
+                      LedgerStorage ledgerStorage,
+<span class="fc" id="L73">                      CheckpointSource checkpointSource) {</span>
+<span class="fc" id="L74">        this.dirsListener = dirsListener;</span>
+<span class="fc" id="L75">        this.ledgerStorage = ledgerStorage;</span>
+<span class="fc" id="L76">        this.checkpointSource = checkpointSource;</span>
+<span class="fc" id="L77">        this.executor = Executors.newSingleThreadScheduledExecutor(new DefaultThreadFactory(&quot;SyncThread&quot;));</span>
+<span class="fc" id="L78">    }</span>
+
+    @Override
+    public void startCheckpoint(Checkpoint checkpoint) {
+<span class="nc" id="L82">        doCheckpoint(checkpoint);</span>
+<span class="nc" id="L83">    }</span>
+
+    protected void doCheckpoint(Checkpoint checkpoint) {
+<span class="nc" id="L86">        executor.submit(() -&gt; {</span>
+            try {
+<span class="nc" id="L88">                synchronized (suspensionLock) {</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">                    while (suspended) {</span>
+                        try {
+<span class="nc" id="L91">                            suspensionLock.wait();</span>
+<span class="nc" id="L92">                        } catch (InterruptedException e) {</span>
+<span class="nc" id="L93">                            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L94">                            continue;</span>
+<span class="nc" id="L95">                        }</span>
+                    }
+<span class="nc" id="L97">                }</span>
+<span class="nc bnc" id="L98" title="All 2 branches missed.">                if (!disableCheckpoint) {</span>
+<span class="nc" id="L99">                    checkpoint(checkpoint);</span>
+                }
+<span class="nc" id="L101">            } catch (Throwable t) {</span>
+<span class="nc" id="L102">                log.error(&quot;Exception in SyncThread&quot;, t);</span>
+<span class="nc" id="L103">                dirsListener.fatalError();</span>
+<span class="nc" id="L104">            }</span>
+<span class="nc" id="L105">        });</span>
+<span class="nc" id="L106">    }</span>
+
+    public Future requestFlush() {
+<span class="nc" id="L109">        return executor.submit(() -&gt; {</span>
+            try {
+<span class="nc" id="L111">                flush();</span>
+<span class="nc" id="L112">            } catch (Throwable t) {</span>
+<span class="nc" id="L113">                log.error(&quot;Exception flushing ledgers &quot;, t);</span>
+<span class="nc" id="L114">            }</span>
+<span class="nc" id="L115">        });</span>
+    }
+
+    private void flush() {
+<span class="nc" id="L119">        Checkpoint checkpoint = checkpointSource.newCheckpoint();</span>
+        try {
+<span class="nc" id="L121">            ledgerStorage.flush();</span>
+<span class="nc" id="L122">        } catch (NoWritableLedgerDirException e) {</span>
+<span class="nc" id="L123">            log.error(&quot;No writeable ledger directories&quot;, e);</span>
+<span class="nc" id="L124">            dirsListener.allDisksFull(true);</span>
+<span class="nc" id="L125">            return;</span>
+<span class="nc" id="L126">        } catch (IOException e) {</span>
+<span class="nc" id="L127">            log.error(&quot;Exception flushing ledgers&quot;, e);</span>
+<span class="nc" id="L128">            return;</span>
+<span class="nc" id="L129">        }</span>
+
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        if (disableCheckpoint) {</span>
+<span class="nc" id="L132">            return;</span>
+        }
+
+<span class="nc" id="L135">        log.info(&quot;Flush ledger storage at checkpoint {}.&quot;, checkpoint);</span>
+        try {
+<span class="nc" id="L137">            checkpointSource.checkpointComplete(checkpoint, false);</span>
+<span class="nc" id="L138">        } catch (IOException e) {</span>
+<span class="nc" id="L139">            log.error(&quot;Exception marking checkpoint as complete&quot;, e);</span>
+<span class="nc" id="L140">            dirsListener.allDisksFull(true);</span>
+<span class="nc" id="L141">        }</span>
+<span class="nc" id="L142">    }</span>
+
+    @VisibleForTesting
+    public void checkpoint(Checkpoint checkpoint) {
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        if (null == checkpoint) {</span>
+            // do nothing if checkpoint is null
+<span class="nc" id="L148">            return;</span>
+        }
+
+        try {
+<span class="nc" id="L152">            ledgerStorage.checkpoint(checkpoint);</span>
+<span class="nc" id="L153">        } catch (NoWritableLedgerDirException e) {</span>
+<span class="nc" id="L154">            log.error(&quot;No writeable ledger directories&quot;, e);</span>
+<span class="nc" id="L155">            dirsListener.allDisksFull(true);</span>
+<span class="nc" id="L156">            return;</span>
+<span class="nc" id="L157">        } catch (IOException e) {</span>
+<span class="nc" id="L158">            log.error(&quot;Exception flushing ledgers&quot;, e);</span>
+<span class="nc" id="L159">            return;</span>
+<span class="nc" id="L160">        }</span>
+
+        try {
+<span class="nc" id="L163">            checkpointSource.checkpointComplete(checkpoint, true);</span>
+<span class="nc" id="L164">        } catch (IOException e) {</span>
+<span class="nc" id="L165">            log.error(&quot;Exception marking checkpoint as complete&quot;, e);</span>
+<span class="nc" id="L166">            dirsListener.allDisksFull(true);</span>
+<span class="nc" id="L167">        }</span>
+<span class="nc" id="L168">    }</span>
+
+    @Override
+    public void start() {
+        // no-op
+<span class="nc" id="L173">    }</span>
+
+    /**
+     * Suspend sync thread. (for testing)
+     */
+    @VisibleForTesting
+    public void suspendSync() {
+<span class="nc" id="L180">        synchronized (suspensionLock) {</span>
+<span class="nc" id="L181">            suspended = true;</span>
+<span class="nc" id="L182">        }</span>
+<span class="nc" id="L183">    }</span>
+
+    /**
+     * Resume sync thread. (for testing)
+     */
+    @VisibleForTesting
+    public void resumeSync() {
+<span class="nc" id="L190">        synchronized (suspensionLock) {</span>
+<span class="nc" id="L191">            suspended = false;</span>
+<span class="nc" id="L192">            suspensionLock.notify();</span>
+<span class="nc" id="L193">        }</span>
+<span class="nc" id="L194">    }</span>
+
+    @VisibleForTesting
+    public void disableCheckpoint() {
+<span class="nc" id="L198">        disableCheckpoint = true;</span>
+<span class="nc" id="L199">    }</span>
+
+    // shutdown sync thread
+    void shutdown() throws InterruptedException {
+<span class="nc" id="L203">        log.info(&quot;Shutting down SyncThread&quot;);</span>
+<span class="nc" id="L204">        requestFlush();</span>
+
+<span class="nc" id="L206">        executor.shutdown();</span>
+<span class="nc" id="L207">        long start = System.currentTimeMillis();</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">        while (!executor.awaitTermination(5, TimeUnit.MINUTES)) {</span>
+<span class="nc" id="L209">            long now = System.currentTimeMillis();</span>
+<span class="nc" id="L210">            log.info(&quot;SyncThread taking a long time to shutdown. Has taken {}&quot;</span>
+<span class="nc" id="L211">                    + &quot; milliseconds so far&quot;, now - start);</span>
+<span class="nc" id="L212">        }</span>
+<span class="nc" id="L213">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

@@ -1,0 +1,485 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>AuthHandler.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto</a> &gt; <span class="el_source">AuthHandler.java</span></div><h1>AuthHandler.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.proto;
+
+import static org.apache.bookkeeper.auth.AuthProviderFactoryFactory.AUTHENTICATION_DISABLED_PLUGIN_NAME;
+
+import com.google.protobuf.ByteString;
+
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelDuplexHandler;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
+import io.netty.handler.ssl.SslHandler;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicLong;
+
+import javax.net.ssl.SSLSession;
+
+import org.apache.bookkeeper.auth.AuthCallbacks;
+import org.apache.bookkeeper.auth.AuthToken;
+import org.apache.bookkeeper.auth.BookieAuthProvider;
+import org.apache.bookkeeper.auth.ClientAuthProvider;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.AuthMessage;
+import org.apache.http.conn.ssl.DefaultHostnameVerifier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+<span class="nc" id="L53">class AuthHandler {</span>
+<span class="nc" id="L54">    static final Logger LOG = LoggerFactory.getLogger(AuthHandler.class);</span>
+<span class="nc" id="L55">    private static final DefaultHostnameVerifier HOSTNAME_VERIFIER = new DefaultHostnameVerifier();</span>
+
+<span class="nc bnc" id="L57" title="All 2 branches missed.">    static class ServerSideHandler extends ChannelInboundHandlerAdapter {</span>
+<span class="nc" id="L58">        volatile boolean authenticated = false;</span>
+        final BookieAuthProvider.Factory authProviderFactory;
+        final BookieConnectionPeer connectionPeer;
+        BookieAuthProvider authProvider;
+
+<span class="nc" id="L63">        ServerSideHandler(BookieConnectionPeer connectionPeer, BookieAuthProvider.Factory authProviderFactory) {</span>
+<span class="nc" id="L64">            this.authProviderFactory = authProviderFactory;</span>
+<span class="nc" id="L65">            this.connectionPeer = connectionPeer;</span>
+<span class="nc" id="L66">            authProvider = null;</span>
+<span class="nc" id="L67">        }</span>
+
+        @Override
+        public void channelActive(ChannelHandlerContext ctx) throws Exception {
+<span class="nc" id="L71">            authProvider = authProviderFactory.newProvider(connectionPeer, new AuthHandshakeCompleteCallback());</span>
+<span class="nc" id="L72">            super.channelActive(ctx);</span>
+<span class="nc" id="L73">        }</span>
+
+        @Override
+        public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+<span class="nc bnc" id="L77" title="All 2 branches missed.">            if (authProvider != null) {</span>
+<span class="nc" id="L78">                authProvider.close();</span>
+            }
+<span class="nc" id="L80">            super.channelInactive(ctx);</span>
+<span class="nc" id="L81">        }</span>
+
+        @Override
+        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+<span class="nc bnc" id="L85" title="All 2 branches missed.">            if (authProvider == null) {</span>
+                // close the channel, authProvider should only be
+                // null if the other end of line is an InetSocketAddress
+                // anything else is strange, and we don't want to deal
+                // with it
+<span class="nc" id="L90">                ctx.channel().close();</span>
+<span class="nc" id="L91">                return;</span>
+            }
+
+<span class="nc bnc" id="L94" title="All 2 branches missed.">            if (authenticated) {</span>
+<span class="nc" id="L95">                super.channelRead(ctx, msg);</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">            } else if (msg instanceof BookieProtocol.AuthRequest) { // pre-PB-client</span>
+<span class="nc" id="L97">                BookieProtocol.AuthRequest req = (BookieProtocol.AuthRequest) msg;</span>
+<span class="nc bnc" id="L98" title="All 4 branches missed.">                assert (req.getOpCode() == BookieProtocol.AUTH);</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">                if (checkAuthPlugin(req.getAuthMessage(), ctx.channel())) {</span>
+<span class="nc" id="L100">                    byte[] payload = req</span>
+<span class="nc" id="L101">                        .getAuthMessage()</span>
+<span class="nc" id="L102">                        .getPayload()</span>
+<span class="nc" id="L103">                        .toByteArray();</span>
+<span class="nc" id="L104">                    authProvider.process(AuthToken.wrap(payload),</span>
+<span class="nc" id="L105">                                new AuthResponseCallbackLegacy(req, ctx.channel()));</span>
+<span class="nc" id="L106">                } else {</span>
+<span class="nc" id="L107">                    ctx.channel().close();</span>
+                }
+<span class="nc bnc" id="L109" title="All 2 branches missed.">            } else if (msg instanceof BookieProtocol.Request) {</span>
+<span class="nc" id="L110">                BookieProtocol.Request req = (BookieProtocol.Request) msg;</span>
+<span class="nc bnc" id="L111" title="All 2 branches missed.">                if (req.getOpCode() == BookieProtocol.ADDENTRY) {</span>
+<span class="nc" id="L112">                    ctx.channel().writeAndFlush(</span>
+<span class="nc" id="L113">                            BookieProtocol.AddResponse.create(</span>
+<span class="nc" id="L114">                                    req.getProtocolVersion(), BookieProtocol.EUA,</span>
+<span class="nc" id="L115">                                    req.getLedgerId(), req.getEntryId()));</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                } else if (req.getOpCode() == BookieProtocol.READENTRY) {</span>
+<span class="nc" id="L117">                    ctx.channel().writeAndFlush(</span>
+                            new BookieProtocol.ReadResponse(
+<span class="nc" id="L119">                                    req.getProtocolVersion(), BookieProtocol.EUA,</span>
+<span class="nc" id="L120">                                    req.getLedgerId(), req.getEntryId()));</span>
+                } else {
+<span class="nc" id="L122">                    ctx.channel().close();</span>
+                }
+<span class="nc bnc" id="L124" title="All 2 branches missed.">            } else if (msg instanceof BookkeeperProtocol.Request) { // post-PB-client</span>
+<span class="nc" id="L125">                BookkeeperProtocol.Request req = (BookkeeperProtocol.Request) msg;</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">                if (req.getHeader().getOperation() == BookkeeperProtocol.OperationType.AUTH</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                        &amp;&amp; req.hasAuthRequest()</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">                        &amp;&amp; checkAuthPlugin(req.getAuthRequest(), ctx.channel())) {</span>
+<span class="nc" id="L129">                    byte[] payload = req</span>
+<span class="nc" id="L130">                        .getAuthRequest()</span>
+<span class="nc" id="L131">                        .getPayload()</span>
+<span class="nc" id="L132">                        .toByteArray();</span>
+<span class="nc" id="L133">                    authProvider.process(AuthToken.wrap(payload),</span>
+<span class="nc" id="L134">                            new AuthResponseCallback(req, ctx.channel(), authProviderFactory.getPluginName()));</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">                } else if (req.getHeader().getOperation() == BookkeeperProtocol.OperationType.START_TLS</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">                        &amp;&amp; req.hasStartTLSRequest()) {</span>
+<span class="nc" id="L137">                    super.channelRead(ctx, msg);</span>
+                } else {
+<span class="nc" id="L139">                    BookkeeperProtocol.Response.Builder builder = BookkeeperProtocol.Response.newBuilder()</span>
+<span class="nc" id="L140">                        .setHeader(req.getHeader())</span>
+<span class="nc" id="L141">                        .setStatus(BookkeeperProtocol.StatusCode.EUA);</span>
+
+<span class="nc" id="L143">                    ctx.channel().writeAndFlush(builder.build());</span>
+                }
+<span class="nc" id="L145">            } else {</span>
+                // close the channel, junk coming over it
+<span class="nc" id="L147">                ctx.channel().close();</span>
+            }
+<span class="nc" id="L149">        }</span>
+
+        private boolean checkAuthPlugin(AuthMessage am, final Channel src) {
+<span class="nc bnc" id="L152" title="All 4 branches missed.">            if (!am.hasAuthPluginName() || !am.getAuthPluginName().equals(authProviderFactory.getPluginName())) {</span>
+<span class="nc" id="L153">                LOG.error(&quot;Received message from incompatible auth plugin. Local = {},&quot; + &quot; Remote = {}, Channel = {}&quot;,</span>
+<span class="nc" id="L154">                        authProviderFactory.getPluginName(), am.getAuthPluginName());</span>
+<span class="nc" id="L155">                return false;</span>
+            }
+<span class="nc" id="L157">            return true;</span>
+        }
+
+        public boolean isAuthenticated() {
+<span class="nc" id="L161">            return authenticated;</span>
+        }
+
+        static class AuthResponseCallbackLegacy implements AuthCallbacks.GenericCallback&lt;AuthToken&gt; {
+            final BookieProtocol.AuthRequest req;
+            final Channel channel;
+
+<span class="nc" id="L168">            AuthResponseCallbackLegacy(BookieProtocol.AuthRequest req, Channel channel) {</span>
+<span class="nc" id="L169">                this.req = req;</span>
+<span class="nc" id="L170">                this.channel = channel;</span>
+<span class="nc" id="L171">            }</span>
+
+            @Override
+            public void operationComplete(int rc, AuthToken newam) {
+<span class="nc bnc" id="L175" title="All 2 branches missed.">                if (rc != BKException.Code.OK) {</span>
+<span class="nc" id="L176">                    LOG.error(&quot;Error processing auth message, closing connection&quot;);</span>
+<span class="nc" id="L177">                    channel.close();</span>
+<span class="nc" id="L178">                    return;</span>
+                }
+<span class="nc" id="L180">                AuthMessage message = AuthMessage.newBuilder().setAuthPluginName(req.authMessage.getAuthPluginName())</span>
+<span class="nc" id="L181">                        .setPayload(ByteString.copyFrom(newam.getData())).build();</span>
+<span class="nc" id="L182">                channel.writeAndFlush(new BookieProtocol.AuthResponse(req.getProtocolVersion(), message));</span>
+<span class="nc" id="L183">            }</span>
+        }
+
+        static class AuthResponseCallback implements AuthCallbacks.GenericCallback&lt;AuthToken&gt; {
+            final BookkeeperProtocol.Request req;
+            final Channel channel;
+            final String pluginName;
+
+<span class="nc" id="L191">            AuthResponseCallback(BookkeeperProtocol.Request req, Channel channel, String pluginName) {</span>
+<span class="nc" id="L192">                this.req = req;</span>
+<span class="nc" id="L193">                this.channel = channel;</span>
+<span class="nc" id="L194">                this.pluginName = pluginName;</span>
+<span class="nc" id="L195">            }</span>
+
+            @Override
+            public void operationComplete(int rc, AuthToken newam) {
+<span class="nc" id="L199">                BookkeeperProtocol.Response.Builder builder = BookkeeperProtocol.Response.newBuilder()</span>
+<span class="nc" id="L200">                        .setHeader(req.getHeader());</span>
+
+<span class="nc bnc" id="L202" title="All 2 branches missed.">                if (rc != BKException.Code.OK) {</span>
+<span class="nc" id="L203">                    LOG.error(&quot;Error processing auth message, closing connection&quot;);</span>
+
+<span class="nc" id="L205">                    builder.setStatus(BookkeeperProtocol.StatusCode.EUA);</span>
+<span class="nc" id="L206">                    channel.writeAndFlush(builder.build());</span>
+<span class="nc" id="L207">                    channel.close();</span>
+<span class="nc" id="L208">                    return;</span>
+                } else {
+<span class="nc" id="L210">                    AuthMessage message = AuthMessage.newBuilder().setAuthPluginName(pluginName)</span>
+<span class="nc" id="L211">                            .setPayload(ByteString.copyFrom(newam.getData())).build();</span>
+<span class="nc" id="L212">                    builder.setStatus(BookkeeperProtocol.StatusCode.EOK).setAuthResponse(message);</span>
+<span class="nc" id="L213">                    channel.writeAndFlush(builder.build());</span>
+                }
+<span class="nc" id="L215">            }</span>
+        }
+
+<span class="nc" id="L218">        class AuthHandshakeCompleteCallback implements AuthCallbacks.GenericCallback&lt;Void&gt; {</span>
+            @Override
+            public void operationComplete(int rc, Void v) {
+<span class="nc bnc" id="L221" title="All 2 branches missed.">                if (rc == BKException.Code.OK) {</span>
+<span class="nc" id="L222">                    authenticated = true;</span>
+<span class="nc" id="L223">                    LOG.info(&quot;Authentication success on server side&quot;);</span>
+                } else {
+<span class="nc bnc" id="L225" title="All 2 branches missed.">                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L226">                        LOG.debug(&quot;Authentication failed on server side&quot;);</span>
+                    }
+                }
+<span class="nc" id="L229">            }</span>
+        }
+    }
+
+<span class="nc bnc" id="L233" title="All 2 branches missed.">    static class ClientSideHandler extends ChannelDuplexHandler {</span>
+<span class="nc" id="L234">        volatile boolean authenticated = false;</span>
+        final ClientAuthProvider.Factory authProviderFactory;
+        ClientAuthProvider authProvider;
+        final AtomicLong transactionIdGenerator;
+<span class="nc" id="L238">        final Queue&lt;Object&gt; waitingForAuth = new ConcurrentLinkedQueue&lt;&gt;();</span>
+        final ClientConnectionPeer connectionPeer;
+
+        private final boolean isUsingV2Protocol;
+
+        public ClientAuthProvider getAuthProvider() {
+<span class="nc" id="L244">            return authProvider;</span>
+        }
+
+        ClientSideHandler(ClientAuthProvider.Factory authProviderFactory, AtomicLong transactionIdGenerator,
+<span class="nc" id="L248">                ClientConnectionPeer connectionPeer, boolean isUsingV2Protocol) {</span>
+<span class="nc" id="L249">            this.authProviderFactory = authProviderFactory;</span>
+<span class="nc" id="L250">            this.transactionIdGenerator = transactionIdGenerator;</span>
+<span class="nc" id="L251">            this.connectionPeer = connectionPeer;</span>
+<span class="nc" id="L252">            authProvider = null;</span>
+<span class="nc" id="L253">            this.isUsingV2Protocol = isUsingV2Protocol;</span>
+<span class="nc" id="L254">        }</span>
+
+        @Override
+        public void channelActive(ChannelHandlerContext ctx) throws Exception {
+<span class="nc" id="L258">            authProvider = authProviderFactory.newProvider(connectionPeer, new AuthHandshakeCompleteCallback(ctx));</span>
+<span class="nc" id="L259">            authProvider.init(new AuthRequestCallback(ctx, authProviderFactory.getPluginName()));</span>
+
+<span class="nc" id="L261">            super.channelActive(ctx);</span>
+<span class="nc" id="L262">        }</span>
+
+        @Override
+        public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+<span class="nc bnc" id="L266" title="All 2 branches missed.">            if (authProvider != null) {</span>
+<span class="nc" id="L267">                authProvider.close();</span>
+            }
+<span class="nc" id="L269">            super.channelInactive(ctx);</span>
+<span class="nc" id="L270">        }</span>
+
+        @Override
+        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+<span class="nc bnc" id="L274" title="All 4 branches missed.">            assert (authProvider != null);</span>
+
+<span class="nc bnc" id="L276" title="All 2 branches missed.">            if (authenticated) {</span>
+<span class="nc" id="L277">                super.channelRead(ctx, msg);</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">            } else if (msg instanceof BookkeeperProtocol.Response) {</span>
+<span class="nc" id="L279">                BookkeeperProtocol.Response resp = (BookkeeperProtocol.Response) msg;</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">                if (null == resp.getHeader().getOperation()) {</span>
+<span class="nc" id="L281">                    LOG.info(&quot;dropping received malformed message {} from bookie {}&quot;, msg, ctx.channel());</span>
+                    // drop the message without header
+                } else {
+<span class="nc bnc" id="L284" title="All 3 branches missed.">                    switch (resp.getHeader().getOperation()) {</span>
+                    case START_TLS:
+<span class="nc" id="L286">                        super.channelRead(ctx, msg);</span>
+<span class="nc" id="L287">                        break;</span>
+                    case AUTH:
+<span class="nc bnc" id="L289" title="All 2 branches missed.">                        if (resp.getStatus() != BookkeeperProtocol.StatusCode.EOK) {</span>
+<span class="nc" id="L290">                            authenticationError(ctx, resp.getStatus().getNumber());</span>
+                        } else {
+<span class="nc bnc" id="L292" title="All 4 branches missed.">                            assert (resp.hasAuthResponse());</span>
+<span class="nc" id="L293">                            BookkeeperProtocol.AuthMessage am = resp.getAuthResponse();</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">                            if (AUTHENTICATION_DISABLED_PLUGIN_NAME.equals(am.getAuthPluginName())){</span>
+<span class="nc" id="L295">                                SocketAddress remote = ctx.channel().remoteAddress();</span>
+<span class="nc" id="L296">                                LOG.info(&quot;Authentication is not enabled.&quot;</span>
+                                    + &quot;Considering this client {} authenticated&quot;, remote);
+<span class="nc" id="L298">                                AuthHandshakeCompleteCallback cb = new AuthHandshakeCompleteCallback(ctx);</span>
+<span class="nc" id="L299">                                cb.operationComplete(BKException.Code.OK, null);</span>
+<span class="nc" id="L300">                                return;</span>
+                            }
+<span class="nc" id="L302">                            byte[] payload = am.getPayload().toByteArray();</span>
+<span class="nc" id="L303">                            authProvider.process(AuthToken.wrap(payload), new AuthRequestCallback(ctx,</span>
+<span class="nc" id="L304">                                authProviderFactory.getPluginName()));</span>
+                        }
+<span class="nc" id="L306">                        break;</span>
+                    default:
+<span class="nc" id="L308">                        LOG.warn(&quot;dropping received message {} from bookie {}&quot;, msg, ctx.channel());</span>
+                        // else just drop the message,
+                        // we're not authenticated so nothing should be coming through
+                        break;
+                    }
+                }
+<span class="nc bnc" id="L314" title="All 2 branches missed.">            } else if (msg instanceof BookieProtocol.Response) {</span>
+<span class="nc" id="L315">                BookieProtocol.Response resp = (BookieProtocol.Response) msg;</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">                switch (resp.opCode) {</span>
+                case BookieProtocol.AUTH:
+<span class="nc bnc" id="L318" title="All 2 branches missed.">                    if (resp.errorCode != BookieProtocol.EOK) {</span>
+<span class="nc" id="L319">                        authenticationError(ctx, resp.errorCode);</span>
+                    } else {
+<span class="nc" id="L321">                        BookkeeperProtocol.AuthMessage am = ((BookieProtocol.AuthResponse) resp).authMessage;</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">                        if (AUTHENTICATION_DISABLED_PLUGIN_NAME.equals(am.getAuthPluginName())) {</span>
+<span class="nc" id="L323">                            SocketAddress remote = ctx.channel().remoteAddress();</span>
+<span class="nc" id="L324">                            LOG.info(&quot;Authentication is not enabled.&quot;</span>
+                                    + &quot;Considering this client {} authenticated&quot;, remote);
+<span class="nc" id="L326">                            AuthHandshakeCompleteCallback cb = new AuthHandshakeCompleteCallback(ctx);</span>
+<span class="nc" id="L327">                            cb.operationComplete(BKException.Code.OK, null);</span>
+<span class="nc" id="L328">                            return;</span>
+                        }
+<span class="nc" id="L330">                        byte[] payload = am.getPayload().toByteArray();</span>
+<span class="nc" id="L331">                        authProvider.process(AuthToken.wrap(payload), new AuthRequestCallback(ctx,</span>
+<span class="nc" id="L332">                                authProviderFactory.getPluginName()));</span>
+                    }
+<span class="nc" id="L334">                    break;</span>
+                default:
+<span class="nc" id="L336">                    LOG.warn(&quot;dropping received message {} from bookie {}&quot;, msg, ctx.channel());</span>
+                    // else just drop the message, we're not authenticated so nothing should be coming
+                    // through
+                    break;
+                }
+            }
+<span class="nc" id="L342">        }</span>
+
+        @Override
+        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+<span class="nc" id="L346">            synchronized (this) {</span>
+<span class="nc bnc" id="L347" title="All 2 branches missed.">                if (authenticated) {</span>
+<span class="nc" id="L348">                    super.write(ctx, msg, promise);</span>
+<span class="nc" id="L349">                    super.flush(ctx);</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">                } else if (msg instanceof BookkeeperProtocol.Request) {</span>
+                    // let auth messages through, queue the rest
+<span class="nc" id="L352">                    BookkeeperProtocol.Request req = (BookkeeperProtocol.Request) msg;</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">                    if (req.getHeader().getOperation()</span>
+                            == BookkeeperProtocol.OperationType.AUTH
+<span class="nc bnc" id="L355" title="All 2 branches missed.">                        || req.getHeader().getOperation() == BookkeeperProtocol.OperationType.START_TLS) {</span>
+<span class="nc" id="L356">                        super.write(ctx, msg, promise);</span>
+<span class="nc" id="L357">                        super.flush(ctx);</span>
+                    } else {
+<span class="nc" id="L359">                        waitingForAuth.add(msg);</span>
+                    }
+<span class="nc bnc" id="L361" title="All 2 branches missed.">                } else if (msg instanceof BookieProtocol.Request) {</span>
+                    // let auth messages through, queue the rest
+<span class="nc" id="L363">                    BookieProtocol.Request req = (BookieProtocol.Request) msg;</span>
+<span class="nc bnc" id="L364" title="All 2 branches missed.">                    if (BookieProtocol.AUTH == req.getOpCode()) {</span>
+<span class="nc" id="L365">                        super.write(ctx, msg, promise);</span>
+<span class="nc" id="L366">                        super.flush(ctx);</span>
+                    } else {
+<span class="nc" id="L368">                        waitingForAuth.add(msg);</span>
+                    }
+<span class="nc" id="L370">                } else {</span>
+<span class="nc" id="L371">                    LOG.info(&quot;dropping write of message {}&quot;, msg);</span>
+                }
+<span class="nc" id="L373">            }</span>
+<span class="nc" id="L374">        }</span>
+
+        long newTxnId() {
+<span class="nc" id="L377">            return transactionIdGenerator.incrementAndGet();</span>
+        }
+
+        void authenticationError(ChannelHandlerContext ctx, int errorCode) {
+<span class="nc" id="L381">            LOG.error(&quot;Error processing auth message, erroring connection {}&quot;, errorCode);</span>
+<span class="nc" id="L382">            ctx.fireExceptionCaught(new AuthenticationException(&quot;Auth failed with error &quot; + errorCode));</span>
+<span class="nc" id="L383">        }</span>
+
+        class AuthRequestCallback implements AuthCallbacks.GenericCallback&lt;AuthToken&gt; {
+            Channel channel;
+            ChannelHandlerContext ctx;
+            String pluginName;
+
+<span class="nc" id="L390">            AuthRequestCallback(ChannelHandlerContext ctx, String pluginName) {</span>
+<span class="nc" id="L391">                this.channel = ctx.channel();</span>
+<span class="nc" id="L392">                this.ctx = ctx;</span>
+<span class="nc" id="L393">                this.pluginName = pluginName;</span>
+<span class="nc" id="L394">            }</span>
+
+            @Override
+            public void operationComplete(int rc, AuthToken newam) {
+<span class="nc bnc" id="L398" title="All 2 branches missed.">                if (rc != BKException.Code.OK) {</span>
+<span class="nc" id="L399">                    authenticationError(ctx, rc);</span>
+<span class="nc" id="L400">                    return;</span>
+                }
+
+<span class="nc" id="L403">                AuthMessage message = AuthMessage.newBuilder().setAuthPluginName(pluginName)</span>
+<span class="nc" id="L404">                        .setPayload(ByteString.copyFrom(newam.getData())).build();</span>
+
+<span class="nc bnc" id="L406" title="All 2 branches missed.">                if (isUsingV2Protocol) {</span>
+<span class="nc" id="L407">                    channel.writeAndFlush(</span>
+                            new BookieProtocol.AuthRequest(BookieProtocol.CURRENT_PROTOCOL_VERSION, message),
+<span class="nc" id="L409">                            channel.voidPromise());</span>
+                } else {
+                    // V3 protocol
+<span class="nc" id="L412">                    BookkeeperProtocol.BKPacketHeader header = BookkeeperProtocol.BKPacketHeader.newBuilder()</span>
+<span class="nc" id="L413">                            .setVersion(BookkeeperProtocol.ProtocolVersion.VERSION_THREE)</span>
+<span class="nc" id="L414">                            .setOperation(BookkeeperProtocol.OperationType.AUTH).setTxnId(newTxnId()).build();</span>
+<span class="nc" id="L415">                    BookkeeperProtocol.Request.Builder builder = BookkeeperProtocol.Request.newBuilder()</span>
+<span class="nc" id="L416">                            .setHeader(header)</span>
+<span class="nc" id="L417">                            .setAuthRequest(message);</span>
+<span class="nc" id="L418">                    channel.writeAndFlush(builder.build());</span>
+                }
+<span class="nc" id="L420">            }</span>
+        }
+
+        class AuthHandshakeCompleteCallback implements AuthCallbacks.GenericCallback&lt;Void&gt; {
+            ChannelHandlerContext ctx;
+
+<span class="nc" id="L426">            AuthHandshakeCompleteCallback(ChannelHandlerContext ctx) {</span>
+<span class="nc" id="L427">                this.ctx = ctx;</span>
+<span class="nc" id="L428">            }</span>
+
+            @Override
+            public void operationComplete(int rc, Void v) {
+<span class="nc bnc" id="L432" title="All 2 branches missed.">                if (rc == BKException.Code.OK) {</span>
+<span class="nc" id="L433">                    synchronized (this) {</span>
+<span class="nc" id="L434">                        authenticated = true;</span>
+<span class="nc" id="L435">                        Object msg = waitingForAuth.poll();</span>
+<span class="nc bnc" id="L436" title="All 2 branches missed.">                        while (msg != null) {</span>
+<span class="nc" id="L437">                            ctx.writeAndFlush(msg);</span>
+<span class="nc" id="L438">                            msg = waitingForAuth.poll();</span>
+                        }
+<span class="nc" id="L440">                    }</span>
+                } else {
+<span class="nc" id="L442">                    LOG.warn(&quot;Client authentication failed&quot;);</span>
+<span class="nc" id="L443">                    authenticationError(ctx, rc);</span>
+                }
+<span class="nc" id="L445">            }</span>
+        }
+
+        public boolean verifyTlsHostName(Channel channel) {
+<span class="nc" id="L449">            SslHandler sslHandler = channel.pipeline().get(SslHandler.class);</span>
+<span class="nc bnc" id="L450" title="All 2 branches missed.">            if (sslHandler == null) {</span>
+<span class="nc bnc" id="L451" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L452">                    LOG.debug(&quot;can't perform hostname-verification on non-ssl channel {}&quot;, channel);</span>
+                }
+<span class="nc" id="L454">                return true;</span>
+            }
+<span class="nc" id="L456">            SSLSession sslSession = sslHandler.engine().getSession();</span>
+<span class="nc" id="L457">            String hostname = null;</span>
+<span class="nc bnc" id="L458" title="All 2 branches missed.">            if (channel.remoteAddress() instanceof InetSocketAddress) {</span>
+<span class="nc" id="L459">                hostname = ((InetSocketAddress) channel.remoteAddress()).getHostName();</span>
+            } else {
+<span class="nc bnc" id="L461" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L462">                    LOG.debug(&quot;can't get remote hostName on ssl session {}&quot;, channel);</span>
+                }
+<span class="nc" id="L464">                return true;</span>
+            }
+<span class="nc bnc" id="L466" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L467">                LOG.debug(&quot;Verifying HostName for {}, Cipher {}, Protocols {}, on {}&quot;, hostname,</span>
+<span class="nc" id="L468">                        sslSession.getCipherSuite(), sslSession.getProtocol(), channel);</span>
+            }
+<span class="nc" id="L470">            boolean verification = HOSTNAME_VERIFIER.verify(hostname, sslSession);</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">            if (!verification) {</span>
+<span class="nc" id="L472">                LOG.warn(&quot;Failed to validate hostname verification {} on {}&quot;, hostname, channel);</span>
+            }
+<span class="nc" id="L474">            return verification;</span>
+        }
+    }
+
+    @SuppressWarnings(&quot;serial&quot;)
+    static class AuthenticationException extends IOException {
+        AuthenticationException(String reason) {
+<span class="nc" id="L481">            super(reason);</span>
+<span class="nc" id="L482">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

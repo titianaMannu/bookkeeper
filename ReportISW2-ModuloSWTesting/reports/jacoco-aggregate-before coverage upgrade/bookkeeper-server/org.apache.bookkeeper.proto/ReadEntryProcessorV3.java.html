@@ -1,0 +1,354 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ReadEntryProcessorV3.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto</a> &gt; <span class="el_source">ReadEntryProcessorV3.java</span></div><h1>ReadEntryProcessorV3.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.proto;
+
+import com.google.common.base.Stopwatch;
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.SettableFuture;
+import com.google.protobuf.ByteString;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.Channel;
+import io.netty.util.ReferenceCountUtil;
+
+import java.io.IOException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.bookkeeper.bookie.Bookie;
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.ReadRequest;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.ReadResponse;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.Request;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.Response;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.StatusCode;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.util.MathUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+class ReadEntryProcessorV3 extends PacketProcessorBaseV3 {
+
+<span class="nc" id="L48">    private static final Logger LOG = LoggerFactory.getLogger(ReadEntryProcessorV3.class);</span>
+
+    protected Stopwatch lastPhaseStartTime;
+    private final ExecutorService fenceThreadPool;
+
+<span class="nc" id="L53">    private SettableFuture&lt;Boolean&gt; fenceResult = null;</span>
+
+    protected final ReadRequest readRequest;
+    protected final long ledgerId;
+    protected final long entryId;
+
+    // Stats
+    protected final OpStatsLogger readStats;
+    protected final OpStatsLogger reqStats;
+
+    public ReadEntryProcessorV3(Request request,
+                                Channel channel,
+                                BookieRequestProcessor requestProcessor,
+                                ExecutorService fenceThreadPool) {
+<span class="nc" id="L67">        super(request, channel, requestProcessor);</span>
+<span class="nc" id="L68">        requestProcessor.onReadRequestStart(channel);</span>
+
+<span class="nc" id="L70">        this.readRequest = request.getReadRequest();</span>
+<span class="nc" id="L71">        this.ledgerId = readRequest.getLedgerId();</span>
+<span class="nc" id="L72">        this.entryId = readRequest.getEntryId();</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        if (RequestUtils.isFenceRequest(this.readRequest)) {</span>
+<span class="nc" id="L74">            this.readStats = requestProcessor.getRequestStats().getFenceReadEntryStats();</span>
+<span class="nc" id="L75">            this.reqStats = requestProcessor.getRequestStats().getFenceReadRequestStats();</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">        } else if (readRequest.hasPreviousLAC()) {</span>
+<span class="nc" id="L77">            this.readStats = requestProcessor.getRequestStats().getLongPollReadStats();</span>
+<span class="nc" id="L78">            this.reqStats = requestProcessor.getRequestStats().getLongPollReadRequestStats();</span>
+        } else {
+<span class="nc" id="L80">            this.readStats = requestProcessor.getRequestStats().getReadEntryStats();</span>
+<span class="nc" id="L81">            this.reqStats = requestProcessor.getRequestStats().getReadRequestStats();</span>
+        }
+
+<span class="nc" id="L84">        this.fenceThreadPool = fenceThreadPool;</span>
+<span class="nc" id="L85">        lastPhaseStartTime = Stopwatch.createStarted();</span>
+<span class="nc" id="L86">    }</span>
+
+    protected Long getPreviousLAC() {
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        if (readRequest.hasPreviousLAC()) {</span>
+<span class="nc" id="L90">            return readRequest.getPreviousLAC();</span>
+        } else {
+<span class="nc" id="L92">            return null;</span>
+        }
+    }
+
+    /**
+     * Handle read result for fence read.
+     *
+     * @param entryBody
+     *          read result
+     * @param readResponseBuilder
+     *          read response builder
+     * @param entryId
+     *          entry id
+     * @param startTimeSw
+     *          timer for the read request
+     */
+    protected void handleReadResultForFenceRead(
+        final ByteBuf entryBody,
+        final ReadResponse.Builder readResponseBuilder,
+        final long entryId,
+        final Stopwatch startTimeSw) {
+        // reset last phase start time to measure fence result waiting time
+<span class="nc" id="L114">        lastPhaseStartTime.reset().start();</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        if (null != fenceThreadPool) {</span>
+<span class="nc" id="L116">            Futures.addCallback(fenceResult, new FutureCallback&lt;Boolean&gt;() {</span>
+                @Override
+                public void onSuccess(Boolean result) {
+<span class="nc" id="L119">                    sendFenceResponse(readResponseBuilder, entryBody, result, startTimeSw);</span>
+<span class="nc" id="L120">                }</span>
+
+                @Override
+                public void onFailure(Throwable t) {
+<span class="nc" id="L124">                    LOG.error(&quot;Fence request for ledgerId {} entryId {} encountered exception&quot;,</span>
+<span class="nc" id="L125">                            ledgerId, entryId, t);</span>
+<span class="nc" id="L126">                    sendFenceResponse(readResponseBuilder, entryBody, false, startTimeSw);</span>
+<span class="nc" id="L127">                }</span>
+            }, fenceThreadPool);
+        } else {
+<span class="nc" id="L130">            boolean success = false;</span>
+            try {
+<span class="nc" id="L132">                success = fenceResult.get(1000, TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L133">            } catch (Throwable t) {</span>
+<span class="nc" id="L134">                LOG.error(&quot;Fence request for ledgerId {} entryId {} encountered exception : &quot;,</span>
+<span class="nc" id="L135">                        readRequest.getLedgerId(), readRequest.getEntryId(), t);</span>
+<span class="nc" id="L136">            }</span>
+<span class="nc" id="L137">            sendFenceResponse(readResponseBuilder, entryBody, success, startTimeSw);</span>
+        }
+<span class="nc" id="L139">    }</span>
+
+    /**
+     * Read a specific entry.
+     *
+     * @param readResponseBuilder
+     *          read response builder.
+     * @param entryId
+     *          entry to read
+     * @param startTimeSw
+     *          stop watch to measure the read operation.
+     * @return read response or null if it is a fence read operation.
+     * @throws IOException
+     */
+    protected ReadResponse readEntry(ReadResponse.Builder readResponseBuilder,
+                                     long entryId,
+                                     Stopwatch startTimeSw)
+        throws IOException {
+<span class="nc" id="L157">        return readEntry(readResponseBuilder, entryId, false, startTimeSw);</span>
+    }
+
+    /**
+     * Read a specific entry.
+     *
+     * @param readResponseBuilder
+     *          read response builder.
+     * @param entryId
+     *          entry to read
+     * @param startTimeSw
+     *          stop watch to measure the read operation.
+     * @return read response or null if it is a fence read operation.
+     * @throws IOException
+     */
+    protected ReadResponse readEntry(ReadResponse.Builder readResponseBuilder,
+                                     long entryId,
+                                     boolean readLACPiggyBack,
+                                     Stopwatch startTimeSw)
+        throws IOException {
+<span class="nc" id="L177">        ByteBuf entryBody = requestProcessor.getBookie().readEntry(ledgerId, entryId);</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">        if (null != fenceResult) {</span>
+<span class="nc" id="L179">            handleReadResultForFenceRead(entryBody, readResponseBuilder, entryId, startTimeSw);</span>
+<span class="nc" id="L180">            return null;</span>
+        } else {
+            try {
+<span class="nc" id="L183">                readResponseBuilder.setBody(ByteString.copyFrom(entryBody.nioBuffer()));</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">                if (readLACPiggyBack) {</span>
+<span class="nc" id="L185">                    readResponseBuilder.setEntryId(entryId);</span>
+                } else {
+<span class="nc" id="L187">                    long knownLAC = requestProcessor.getBookie().readLastAddConfirmed(ledgerId);</span>
+<span class="nc" id="L188">                    readResponseBuilder.setMaxLAC(knownLAC);</span>
+                }
+<span class="nc" id="L190">                registerSuccessfulEvent(readStats, startTimeSw);</span>
+<span class="nc" id="L191">                readResponseBuilder.setStatus(StatusCode.EOK);</span>
+<span class="nc" id="L192">                return readResponseBuilder.build();</span>
+            } finally {
+<span class="nc" id="L194">                ReferenceCountUtil.release(entryBody);</span>
+            }
+        }
+    }
+
+    protected ReadResponse getReadResponse() {
+<span class="nc" id="L200">        final Stopwatch startTimeSw = Stopwatch.createStarted();</span>
+
+<span class="nc" id="L202">        final ReadResponse.Builder readResponse = ReadResponse.newBuilder()</span>
+<span class="nc" id="L203">            .setLedgerId(ledgerId)</span>
+<span class="nc" id="L204">            .setEntryId(entryId);</span>
+        try {
+            // handle fence reqest
+<span class="nc bnc" id="L207" title="All 2 branches missed.">            if (RequestUtils.isFenceRequest(readRequest)) {</span>
+<span class="nc" id="L208">                LOG.info(&quot;Ledger fence request received for ledger: {} from address: {}&quot;, ledgerId,</span>
+<span class="nc" id="L209">                    channel.remoteAddress());</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">                if (!readRequest.hasMasterKey()) {</span>
+<span class="nc" id="L211">                    LOG.error(</span>
+                        &quot;Fence ledger request received without master key for ledger:{} from address: {}&quot;,
+<span class="nc" id="L213">                        ledgerId, channel.remoteAddress());</span>
+<span class="nc" id="L214">                    throw BookieException.create(BookieException.Code.UnauthorizedAccessException);</span>
+                } else {
+<span class="nc" id="L216">                    byte[] masterKey = readRequest.getMasterKey().toByteArray();</span>
+<span class="nc" id="L217">                    fenceResult = requestProcessor.bookie.fenceLedger(ledgerId, masterKey);</span>
+                }
+            }
+<span class="nc" id="L220">            return readEntry(readResponse, entryId, startTimeSw);</span>
+<span class="nc" id="L221">        } catch (Bookie.NoLedgerException e) {</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">            if (RequestUtils.isFenceRequest(readRequest)) {</span>
+<span class="nc" id="L223">                LOG.info(&quot;No ledger found reading entry {} when fencing ledger {}&quot;, entryId, ledgerId);</span>
+<span class="nc bnc" id="L224" title="All 2 branches missed.">            } else if (entryId != BookieProtocol.LAST_ADD_CONFIRMED) {</span>
+<span class="nc" id="L225">                LOG.info(&quot;No ledger found while reading entry: {} from ledger: {}&quot;, entryId, ledgerId);</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">            } else if (LOG.isDebugEnabled()) {</span>
+                // this is the case of a reader which is calling readLastAddConfirmed and the ledger is empty
+<span class="nc" id="L228">                LOG.debug(&quot;No ledger found while reading entry: {} from ledger: {}&quot;, entryId, ledgerId);</span>
+            }
+<span class="nc" id="L230">            return buildResponse(readResponse, StatusCode.ENOLEDGER, startTimeSw);</span>
+<span class="nc" id="L231">        } catch (Bookie.NoEntryException e) {</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L233">                LOG.debug(&quot;No entry found while reading entry: {} from ledger: {}&quot;, entryId, ledgerId);</span>
+            }
+<span class="nc" id="L235">            return buildResponse(readResponse, StatusCode.ENOENTRY, startTimeSw);</span>
+<span class="nc" id="L236">        } catch (IOException e) {</span>
+<span class="nc" id="L237">            LOG.error(&quot;IOException while reading entry: {} from ledger {} &quot;, entryId, ledgerId, e);</span>
+<span class="nc" id="L238">            return buildResponse(readResponse, StatusCode.EIO, startTimeSw);</span>
+<span class="nc" id="L239">        } catch (BookieException e) {</span>
+<span class="nc" id="L240">            LOG.error(</span>
+                &quot;Unauthorized access to ledger:{} while reading entry:{} in request from address: {}&quot;,
+<span class="nc" id="L242">                    ledgerId, entryId, channel.remoteAddress());</span>
+<span class="nc" id="L243">            return buildResponse(readResponse, StatusCode.EUA, startTimeSw);</span>
+        }
+    }
+
+    @Override
+    public void safeRun() {
+<span class="nc" id="L249">        requestProcessor.getRequestStats().getReadEntrySchedulingDelayStats().registerSuccessfulEvent(</span>
+<span class="nc" id="L250">            MathUtils.elapsedNanos(enqueueNanos), TimeUnit.NANOSECONDS);</span>
+
+<span class="nc bnc" id="L252" title="All 2 branches missed.">        if (!isVersionCompatible()) {</span>
+<span class="nc" id="L253">            ReadResponse readResponse = ReadResponse.newBuilder()</span>
+<span class="nc" id="L254">                .setLedgerId(ledgerId)</span>
+<span class="nc" id="L255">                .setEntryId(entryId)</span>
+<span class="nc" id="L256">                .setStatus(StatusCode.EBADVERSION)</span>
+<span class="nc" id="L257">                .build();</span>
+<span class="nc" id="L258">            sendResponse(readResponse);</span>
+<span class="nc" id="L259">            return;</span>
+        }
+
+<span class="nc" id="L262">        executeOp();</span>
+<span class="nc" id="L263">    }</span>
+
+    protected void executeOp() {
+<span class="nc" id="L266">        ReadResponse readResponse = getReadResponse();</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        if (null != readResponse) {</span>
+<span class="nc" id="L268">            sendResponse(readResponse);</span>
+        }
+<span class="nc" id="L270">    }</span>
+
+    private void getFenceResponse(ReadResponse.Builder readResponse,
+                                  ByteBuf entryBody,
+                                  boolean fenceResult) {
+        StatusCode status;
+<span class="nc bnc" id="L276" title="All 2 branches missed.">        if (!fenceResult) {</span>
+<span class="nc" id="L277">            status = StatusCode.EIO;</span>
+<span class="nc" id="L278">            registerFailedEvent(requestProcessor.getRequestStats().getFenceReadWaitStats(), lastPhaseStartTime);</span>
+        } else {
+<span class="nc" id="L280">            status = StatusCode.EOK;</span>
+<span class="nc" id="L281">            readResponse.setBody(ByteString.copyFrom(entryBody.nioBuffer()));</span>
+<span class="nc" id="L282">            registerSuccessfulEvent(requestProcessor.getRequestStats().getFenceReadWaitStats(), lastPhaseStartTime);</span>
+        }
+
+<span class="nc bnc" id="L285" title="All 2 branches missed.">        if (null != entryBody) {</span>
+<span class="nc" id="L286">            ReferenceCountUtil.release(entryBody);</span>
+        }
+
+<span class="nc" id="L289">        readResponse.setStatus(status);</span>
+<span class="nc" id="L290">    }</span>
+
+    private void sendFenceResponse(ReadResponse.Builder readResponse,
+                                   ByteBuf entryBody,
+                                   boolean fenceResult,
+                                   Stopwatch startTimeSw) {
+        // build the fence read response
+<span class="nc" id="L297">        getFenceResponse(readResponse, entryBody, fenceResult);</span>
+        // register fence read stat
+<span class="nc bnc" id="L299" title="All 2 branches missed.">        registerEvent(!fenceResult, requestProcessor.getRequestStats().getFenceReadEntryStats(), startTimeSw);</span>
+        // send the fence read response
+<span class="nc" id="L301">        sendResponse(readResponse.build());</span>
+<span class="nc" id="L302">    }</span>
+
+    protected ReadResponse buildResponse(
+            ReadResponse.Builder readResponseBuilder,
+            StatusCode statusCode,
+            Stopwatch startTimeSw) {
+<span class="nc bnc" id="L308" title="All 2 branches missed.">        registerEvent(!statusCode.equals(StatusCode.EOK), readStats, startTimeSw);</span>
+<span class="nc" id="L309">        readResponseBuilder.setStatus(statusCode);</span>
+<span class="nc" id="L310">        return readResponseBuilder.build();</span>
+    }
+
+    protected void sendResponse(ReadResponse readResponse) {
+<span class="nc" id="L314">        Response.Builder response = Response.newBuilder()</span>
+<span class="nc" id="L315">                .setHeader(getHeader())</span>
+<span class="nc" id="L316">                .setStatus(readResponse.getStatus())</span>
+<span class="nc" id="L317">                .setReadResponse(readResponse);</span>
+<span class="nc" id="L318">        sendResponse(response.getStatus(),</span>
+<span class="nc" id="L319">                     response.build(),</span>
+                     reqStats);
+<span class="nc" id="L321">        requestProcessor.onReadRequestFinish();</span>
+<span class="nc" id="L322">    }</span>
+
+    //
+    // Stats Methods
+    //
+
+    protected void registerSuccessfulEvent(OpStatsLogger statsLogger, Stopwatch startTime) {
+<span class="nc" id="L329">        registerEvent(false, statsLogger, startTime);</span>
+<span class="nc" id="L330">    }</span>
+
+    protected void registerFailedEvent(OpStatsLogger statsLogger, Stopwatch startTime) {
+<span class="nc" id="L333">        registerEvent(true, statsLogger, startTime);</span>
+<span class="nc" id="L334">    }</span>
+
+    protected void registerEvent(boolean failed, OpStatsLogger statsLogger, Stopwatch startTime) {
+<span class="nc bnc" id="L337" title="All 2 branches missed.">        if (failed) {</span>
+<span class="nc" id="L338">            statsLogger.registerFailedEvent(startTime.elapsed(TimeUnit.NANOSECONDS), TimeUnit.NANOSECONDS);</span>
+        } else {
+<span class="nc" id="L340">            statsLogger.registerSuccessfulEvent(startTime.elapsed(TimeUnit.NANOSECONDS), TimeUnit.NANOSECONDS);</span>
+        }
+<span class="nc" id="L342">    }</span>
+
+    /**
+     * this toString method filters out masterKey from the output. masterKey
+     * contains the password of the ledger.
+     */
+    @Override
+    public String toString() {
+<span class="nc" id="L350">        return RequestUtils.toSafeString(request);</span>
+    }
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

@@ -1,0 +1,255 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>RackawareEnsemblePlacementPolicy.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">RackawareEnsemblePlacementPolicy.java</span></div><h1>RackawareEnsemblePlacementPolicy.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.client;
+
+import io.netty.util.HashedWheelTimer;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.bookkeeper.client.BKException.BKNotEnoughBookiesException;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.net.BookieNode;
+import org.apache.bookkeeper.net.DNSToSwitchMapping;
+import org.apache.bookkeeper.net.Node;
+import org.apache.bookkeeper.proto.BookieAddressResolver;
+import org.apache.bookkeeper.stats.StatsLogger;
+
+/**
+ * A placement policy implementation use rack information for placing ensembles.
+ *
+ * @see EnsemblePlacementPolicy
+ */
+public class RackawareEnsemblePlacementPolicy extends RackawareEnsemblePlacementPolicyImpl
+        implements ITopologyAwareEnsemblePlacementPolicy&lt;BookieNode&gt; {
+<span class="nc" id="L40">    RackawareEnsemblePlacementPolicyImpl slave = null;</span>
+
+    public RackawareEnsemblePlacementPolicy() {
+<span class="nc" id="L43">        super();</span>
+<span class="nc" id="L44">    }</span>
+
+    public RackawareEnsemblePlacementPolicy(boolean enforceDurability) {
+<span class="nc" id="L47">        super(enforceDurability);</span>
+<span class="nc" id="L48">    }</span>
+
+    @Override
+    protected RackawareEnsemblePlacementPolicy initialize(DNSToSwitchMapping dnsResolver,
+                                                          HashedWheelTimer timer,
+                                                          boolean reorderReadsRandom,
+                                                          int stabilizePeriodSeconds,
+                                                          int reorderThresholdPendingRequests,
+                                                          boolean isWeighted,
+                                                          int maxWeightMultiple,
+                                                          int minNumRacksPerWriteQuorum,
+                                                          boolean enforceMinNumRacksPerWriteQuorum,
+                                                          boolean ignoreLocalNodeInPlacementPolicy,
+            StatsLogger statsLogger, BookieAddressResolver bookieAddressResolver) {
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        if (stabilizePeriodSeconds &gt; 0) {</span>
+<span class="nc" id="L63">            super.initialize(dnsResolver, timer, reorderReadsRandom, 0, reorderThresholdPendingRequests, isWeighted,</span>
+                    maxWeightMultiple, minNumRacksPerWriteQuorum, enforceMinNumRacksPerWriteQuorum,
+                    ignoreLocalNodeInPlacementPolicy, statsLogger, bookieAddressResolver);
+<span class="nc" id="L66">            slave = new RackawareEnsemblePlacementPolicyImpl(enforceDurability);</span>
+<span class="nc" id="L67">            slave.initialize(dnsResolver, timer, reorderReadsRandom, stabilizePeriodSeconds,</span>
+                    reorderThresholdPendingRequests, isWeighted, maxWeightMultiple, minNumRacksPerWriteQuorum,
+                    enforceMinNumRacksPerWriteQuorum, ignoreLocalNodeInPlacementPolicy, statsLogger,
+                    bookieAddressResolver);
+        } else {
+<span class="nc" id="L72">            super.initialize(dnsResolver, timer, reorderReadsRandom, stabilizePeriodSeconds,</span>
+                    reorderThresholdPendingRequests, isWeighted, maxWeightMultiple, minNumRacksPerWriteQuorum,
+                    enforceMinNumRacksPerWriteQuorum, ignoreLocalNodeInPlacementPolicy, statsLogger,
+                    bookieAddressResolver);
+<span class="nc" id="L76">            slave = null;</span>
+        }
+<span class="nc" id="L78">        return this;</span>
+    }
+
+    @Override
+    public void uninitalize() {
+<span class="nc" id="L83">        super.uninitalize();</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">        if (null != slave) {</span>
+<span class="nc" id="L85">            slave.uninitalize();</span>
+        }
+<span class="nc" id="L87">    }</span>
+
+    @Override
+    public Set&lt;BookieId&gt; onClusterChanged(Set&lt;BookieId&gt; writableBookies,
+            Set&lt;BookieId&gt; readOnlyBookies) {
+<span class="nc" id="L92">        Set&lt;BookieId&gt; deadBookies = super.onClusterChanged(writableBookies, readOnlyBookies);</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">        if (null != slave) {</span>
+<span class="nc" id="L94">            deadBookies = slave.onClusterChanged(writableBookies, readOnlyBookies);</span>
+        }
+<span class="nc" id="L96">        return deadBookies;</span>
+    }
+
+    @Override
+    public PlacementResult&lt;List&lt;BookieId&gt;&gt; newEnsemble(int ensembleSize, int writeQuorumSize,
+            int ackQuorumSize, Map&lt;String, byte[]&gt; customMetadata, Set&lt;BookieId&gt; excludeBookies)
+            throws BKException.BKNotEnoughBookiesException {
+        try {
+<span class="nc" id="L104">            return super.newEnsemble(ensembleSize, writeQuorumSize, ackQuorumSize, customMetadata, excludeBookies);</span>
+<span class="nc" id="L105">        } catch (BKException.BKNotEnoughBookiesException bnebe) {</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">            if (slave == null) {</span>
+<span class="nc" id="L107">                throw bnebe;</span>
+            } else {
+<span class="nc" id="L109">                return slave.newEnsemble(ensembleSize, writeQuorumSize, ackQuorumSize, customMetadata, excludeBookies);</span>
+            }
+        }
+    }
+
+    @Override
+    public PlacementResult&lt;BookieId&gt; replaceBookie(int ensembleSize, int writeQuorumSize, int ackQuorumSize,
+            Map&lt;String, byte[]&gt; customMetadata, List&lt;BookieId&gt; currentEnsemble,
+            BookieId bookieToReplace, Set&lt;BookieId&gt; excludeBookies)
+            throws BKException.BKNotEnoughBookiesException {
+       try {
+<span class="nc" id="L120">            return super.replaceBookie(ensembleSize, writeQuorumSize, ackQuorumSize, customMetadata,</span>
+                    currentEnsemble, bookieToReplace, excludeBookies);
+<span class="nc" id="L122">        } catch (BKException.BKNotEnoughBookiesException bnebe) {</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">            if (slave == null) {</span>
+<span class="nc" id="L124">                throw bnebe;</span>
+            } else {
+<span class="nc" id="L126">                return slave.replaceBookie(ensembleSize, writeQuorumSize, ackQuorumSize, customMetadata,</span>
+                        currentEnsemble, bookieToReplace, excludeBookies);
+            }
+        }
+    }
+
+    @Override
+    public DistributionSchedule.WriteSet reorderReadSequence(
+            List&lt;BookieId&gt; ensemble,
+            BookiesHealthInfo bookiesHealthInfo,
+            DistributionSchedule.WriteSet writeSet) {
+<span class="nc" id="L137">        return super.reorderReadSequence(ensemble, bookiesHealthInfo,</span>
+                                         writeSet);
+    }
+
+    @Override
+    public DistributionSchedule.WriteSet reorderReadLACSequence(
+            List&lt;BookieId&gt; ensemble,
+            BookiesHealthInfo bookiesHealthInfo,
+            DistributionSchedule.WriteSet writeSet) {
+<span class="nc" id="L146">        return super.reorderReadLACSequence(ensemble, bookiesHealthInfo,</span>
+                                            writeSet);
+    }
+
+    @Override
+    public PlacementResult&lt;List&lt;BookieId&gt;&gt; newEnsemble(int ensembleSize,
+                                                 int writeQuorumSize,
+                                                 int ackQuorumSize,
+                                                 Set&lt;BookieId&gt; excludeBookies,
+                                                 Ensemble&lt;BookieNode&gt; parentEnsemble,
+                                                 Predicate&lt;BookieNode&gt; parentPredicate)
+            throws BKException.BKNotEnoughBookiesException {
+        try {
+<span class="nc" id="L159">            return super.newEnsemble(</span>
+                    ensembleSize,
+                    writeQuorumSize,
+                    ackQuorumSize,
+                    excludeBookies,
+                    parentEnsemble,
+                    parentPredicate);
+<span class="nc" id="L166">        } catch (BKException.BKNotEnoughBookiesException bnebe) {</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">            if (slave == null) {</span>
+<span class="nc" id="L168">                throw bnebe;</span>
+            } else {
+<span class="nc" id="L170">                return slave.newEnsemble(ensembleSize, writeQuorumSize, ackQuorumSize,</span>
+                        excludeBookies, parentEnsemble, parentPredicate);
+            }
+        }
+    }
+
+    @Override
+    public BookieNode selectFromNetworkLocation(
+            String networkLoc,
+            Set&lt;Node&gt; excludeBookies,
+            Predicate&lt;BookieNode&gt; predicate,
+            Ensemble&lt;BookieNode&gt; ensemble,
+            boolean fallbackToRandom)
+            throws BKException.BKNotEnoughBookiesException {
+        try {
+<span class="nc" id="L185">            return super.selectFromNetworkLocation(networkLoc, excludeBookies, predicate, ensemble,</span>
+                    fallbackToRandom);
+<span class="nc" id="L187">        } catch (BKException.BKNotEnoughBookiesException bnebe) {</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">            if (slave == null) {</span>
+<span class="nc" id="L189">                throw bnebe;</span>
+            } else {
+<span class="nc" id="L191">                return slave.selectFromNetworkLocation(networkLoc, excludeBookies, predicate, ensemble,</span>
+                        fallbackToRandom);
+            }
+        }
+    }
+
+    @Override
+    public BookieNode selectFromNetworkLocation(
+            Set&lt;String&gt; excludeRacks,
+            Set&lt;Node&gt; excludeBookies,
+            Predicate&lt;BookieNode&gt; predicate,
+            Ensemble&lt;BookieNode&gt; ensemble,
+            boolean fallbackToRandom)
+                    throws BKException.BKNotEnoughBookiesException {
+        try {
+<span class="nc" id="L206">            return super.selectFromNetworkLocation(excludeRacks, excludeBookies, predicate, ensemble, fallbackToRandom);</span>
+<span class="nc" id="L207">        } catch (BKException.BKNotEnoughBookiesException bnebe) {</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">            if (slave == null) {</span>
+<span class="nc" id="L209">                throw bnebe;</span>
+            } else {
+<span class="nc" id="L211">                return slave.selectFromNetworkLocation(excludeRacks, excludeBookies, predicate, ensemble,</span>
+                        fallbackToRandom);
+            }
+        }
+    }
+
+    @Override
+    public BookieNode selectFromNetworkLocation(
+            String networkLoc,
+            Set&lt;String&gt; excludeRacks,
+            Set&lt;Node&gt; excludeBookies,
+            Predicate&lt;BookieNode&gt; predicate,
+            Ensemble&lt;BookieNode&gt; ensemble,
+            boolean fallbackToRandom)
+            throws BKNotEnoughBookiesException {
+        try {
+<span class="nc" id="L227">            return super.selectFromNetworkLocation(networkLoc, excludeRacks, excludeBookies, predicate, ensemble,</span>
+                    fallbackToRandom);
+<span class="nc" id="L229">        } catch (BKException.BKNotEnoughBookiesException bnebe) {</span>
+<span class="nc bnc" id="L230" title="All 2 branches missed.">            if (slave == null) {</span>
+<span class="nc" id="L231">                throw bnebe;</span>
+            } else {
+<span class="nc" id="L233">                return slave.selectFromNetworkLocation(networkLoc, excludeRacks, excludeBookies, predicate, ensemble,</span>
+                        fallbackToRandom);
+            }
+        }
+    }
+
+    @Override
+    public void handleBookiesThatLeft(Set&lt;BookieId&gt; leftBookies) {
+<span class="nc" id="L241">        super.handleBookiesThatLeft(leftBookies);</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">        if (null != slave) {</span>
+<span class="nc" id="L243">            slave.handleBookiesThatLeft(leftBookies);</span>
+        }
+<span class="nc" id="L245">    }</span>
+
+    @Override
+    public void handleBookiesThatJoined(Set&lt;BookieId&gt; joinedBookies) {
+<span class="nc" id="L249">        super.handleBookiesThatJoined(joinedBookies);</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">        if (null != slave) {</span>
+<span class="nc" id="L251">            slave.handleBookiesThatJoined(joinedBookies);</span>
+        }
+<span class="nc" id="L253">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

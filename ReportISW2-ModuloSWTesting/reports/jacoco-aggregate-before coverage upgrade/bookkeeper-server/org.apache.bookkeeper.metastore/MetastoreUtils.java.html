@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>MetastoreUtils.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.metastore</a> &gt; <span class="el_source">MetastoreUtils.java</span></div><h1>MetastoreUtils.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.metastore;
+
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.apache.bookkeeper.metastore.MSException.Code;
+import org.apache.bookkeeper.versioning.Version;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Provides utilities for metastore.
+ */
+<span class="nc" id="L34">public class MetastoreUtils {</span>
+
+<span class="nc" id="L36">    private static final Logger logger = LoggerFactory.getLogger(MetastoreUtils.class);</span>
+
+    static class MultiMetastoreCallback&lt;T&gt; implements MetastoreCallback&lt;T&gt; {
+
+<span class="nc" id="L40">        int rc = Code.OK.getCode();</span>
+        final int numOps;
+<span class="nc" id="L42">        final AtomicInteger numFinished = new AtomicInteger(0);</span>
+<span class="nc" id="L43">        final CountDownLatch doneLatch = new CountDownLatch(1);</span>
+
+<span class="nc" id="L45">        MultiMetastoreCallback(int numOps) {</span>
+<span class="nc" id="L46">            this.numOps = numOps;</span>
+<span class="nc" id="L47">        }</span>
+
+        @Override
+        public void complete(int rc, T value, Object ctx) {
+<span class="nc bnc" id="L51" title="All 2 branches missed.">            if (Code.OK.getCode() != rc) {</span>
+<span class="nc" id="L52">                this.rc = rc;</span>
+<span class="nc" id="L53">                doneLatch.countDown();</span>
+<span class="nc" id="L54">                return;</span>
+            }
+<span class="nc bnc" id="L56" title="All 2 branches missed.">            if (numFinished.incrementAndGet() == numOps) {</span>
+<span class="nc" id="L57">                doneLatch.countDown();</span>
+            }
+<span class="nc" id="L59">        }</span>
+
+        public void waitUntilAllFinished() throws MSException, InterruptedException {
+<span class="nc" id="L62">            doneLatch.await();</span>
+<span class="nc bnc" id="L63" title="All 2 branches missed.">            if (Code.OK.getCode() != rc) {</span>
+<span class="nc" id="L64">                throw MSException.create(Code.get(rc));</span>
+            }
+<span class="nc" id="L66">        }</span>
+    }
+
+<span class="nc" id="L69">    static class SyncMetastoreCallback&lt;T&gt; implements MetastoreCallback&lt;T&gt; {</span>
+
+        int rc;
+        T result;
+<span class="nc" id="L73">        final CountDownLatch doneLatch = new CountDownLatch(1);</span>
+
+        @Override
+        public void complete(int rc, T value, Object ctx) {
+<span class="nc" id="L77">            this.rc = rc;</span>
+<span class="nc" id="L78">            result = value;</span>
+<span class="nc" id="L79">            doneLatch.countDown();</span>
+<span class="nc" id="L80">        }</span>
+
+        public T getResult() throws MSException, InterruptedException {
+<span class="nc" id="L83">            doneLatch.await();</span>
+
+<span class="nc bnc" id="L85" title="All 2 branches missed.">            if (Code.OK.getCode() != rc) {</span>
+<span class="nc" id="L86">                throw MSException.create(Code.get(rc));</span>
+            }
+<span class="nc" id="L88">            return result;</span>
+        }
+
+    }
+
+    /**
+     * Clean the given table.
+     *
+     * @param table
+     *          Metastore Table.
+     * @param numEntriesPerScan
+     *          Num entries per scan.
+     * @throws MSException
+     * @throws InterruptedException
+     */
+    public static void cleanTable(MetastoreTable table, int numEntriesPerScan)
+    throws MSException, InterruptedException {
+        // open cursor
+<span class="nc" id="L106">        SyncMetastoreCallback&lt;MetastoreCursor&gt; openCb = new SyncMetastoreCallback&lt;MetastoreCursor&gt;();</span>
+<span class="nc" id="L107">        table.openCursor(MetastoreTable.NON_FIELDS, openCb, null);</span>
+<span class="nc" id="L108">        MetastoreCursor cursor = openCb.getResult();</span>
+<span class="nc" id="L109">        logger.info(&quot;Open cursor for table {} to clean entries.&quot;, table.getName());</span>
+
+<span class="nc" id="L111">        List&lt;String&gt; keysToClean = new ArrayList&lt;String&gt;(numEntriesPerScan);</span>
+<span class="nc" id="L112">        int numEntriesRemoved = 0;</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">        while (cursor.hasMoreEntries()) {</span>
+<span class="nc" id="L114">            logger.info(&quot;Fetching next {} entries from table {} to clean.&quot;,</span>
+<span class="nc" id="L115">                         numEntriesPerScan, table.getName());</span>
+<span class="nc" id="L116">            Iterator&lt;MetastoreTableItem&gt; iter = cursor.readEntries(numEntriesPerScan);</span>
+<span class="nc" id="L117">            keysToClean.clear();</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">            while (iter.hasNext()) {</span>
+<span class="nc" id="L119">                MetastoreTableItem item = iter.next();</span>
+<span class="nc" id="L120">                String key = item.getKey();</span>
+<span class="nc" id="L121">                keysToClean.add(key);</span>
+<span class="nc" id="L122">            }</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">            if (keysToClean.isEmpty()) {</span>
+<span class="nc" id="L124">                continue;</span>
+            }
+
+<span class="nc" id="L127">            logger.info(&quot;Issuing deletes to delete keys {}&quot;, keysToClean);</span>
+            // issue deletes to delete batch of keys
+<span class="nc" id="L129">            MultiMetastoreCallback&lt;Void&gt; mcb = new MultiMetastoreCallback&lt;Void&gt;(keysToClean.size());</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">            for (String key : keysToClean) {</span>
+<span class="nc" id="L131">                table.remove(key, Version.ANY, mcb, null);</span>
+<span class="nc" id="L132">            }</span>
+<span class="nc" id="L133">            mcb.waitUntilAllFinished();</span>
+<span class="nc" id="L134">            numEntriesRemoved += keysToClean.size();</span>
+<span class="nc" id="L135">            logger.info(&quot;Removed {} entries from table {}.&quot;, numEntriesRemoved, table.getName());</span>
+<span class="nc" id="L136">        }</span>
+
+<span class="nc" id="L138">        logger.info(&quot;Finished cleaning up table {}.&quot;, table.getName());</span>
+<span class="nc" id="L139">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

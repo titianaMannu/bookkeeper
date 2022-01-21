@@ -1,0 +1,596 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>GarbageCollectorThread.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">GarbageCollectorThread.java</span></div><h1>GarbageCollectorThread.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import com.google.common.annotations.VisibleForTesting;
+import io.netty.util.concurrent.DefaultThreadFactory;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import java.util.concurrent.atomic.AtomicLong;
+import org.apache.bookkeeper.bookie.GarbageCollector.GarbageCleaner;
+import org.apache.bookkeeper.bookie.stats.GarbageCollectorStats;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.util.MathUtils;
+import org.apache.bookkeeper.util.SafeRunnable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * This is the garbage collector thread that runs in the background to
+ * remove any entry log files that no longer contains any active ledger.
+ */
+public class GarbageCollectorThread extends SafeRunnable {
+<span class="fc" id="L55">    private static final Logger LOG = LoggerFactory.getLogger(GarbageCollectorThread.class);</span>
+    private static final int SECOND = 1000;
+
+    // Maps entry log files to the set of ledgers that comprise the file and the size usage per ledger
+<span class="fc" id="L59">    private Map&lt;Long, EntryLogMetadata&gt; entryLogMetaMap = new ConcurrentHashMap&lt;Long, EntryLogMetadata&gt;();</span>
+
+    private final ScheduledExecutorService gcExecutor;
+<span class="fc" id="L62">    Future&lt;?&gt; scheduledFuture = null;</span>
+
+    // This is how often we want to run the Garbage Collector Thread (in milliseconds).
+    final long gcWaitTime;
+
+    // Compaction parameters
+<span class="fc" id="L68">    boolean enableMinorCompaction = false;</span>
+    final double minorCompactionThreshold;
+    final long minorCompactionInterval;
+    long lastMinorCompactionTime;
+
+<span class="fc" id="L73">    boolean enableMajorCompaction = false;</span>
+    final double majorCompactionThreshold;
+    final long majorCompactionInterval;
+    long lastMajorCompactionTime;
+
+    final boolean isForceGCAllowWhenNoSpace;
+
+    // Entry Logger Handle
+    final EntryLogger entryLogger;
+    final AbstractLogCompactor compactor;
+
+    // Stats loggers for garbage collection operations
+    private final GarbageCollectorStats gcStats;
+
+    private volatile long totalEntryLogSize;
+    private volatile int numActiveEntryLogs;
+
+    final CompactableLedgerStorage ledgerStorage;
+
+    // flag to ensure gc thread will not be interrupted during compaction
+    // to reduce the risk getting entry log corrupted
+<span class="fc" id="L94">    final AtomicBoolean compacting = new AtomicBoolean(false);</span>
+
+    // use to get the compacting status
+<span class="fc" id="L97">    final AtomicBoolean minorCompacting = new AtomicBoolean(false);</span>
+<span class="fc" id="L98">    final AtomicBoolean majorCompacting = new AtomicBoolean(false);</span>
+
+<span class="fc" id="L100">    volatile boolean running = true;</span>
+
+    // track the last scanned successfully log id
+<span class="fc" id="L103">    long scannedLogId = 0;</span>
+
+    // Boolean to trigger a forced GC.
+<span class="fc" id="L106">    final AtomicBoolean forceGarbageCollection = new AtomicBoolean(false);</span>
+    // Boolean to disable major compaction, when disk is almost full
+<span class="fc" id="L108">    final AtomicBoolean suspendMajorCompaction = new AtomicBoolean(false);</span>
+    // Boolean to disable minor compaction, when disk is full
+<span class="fc" id="L110">    final AtomicBoolean suspendMinorCompaction = new AtomicBoolean(false);</span>
+
+    final ScanAndCompareGarbageCollector garbageCollector;
+    final GarbageCleaner garbageCleaner;
+
+    final ServerConfiguration conf;
+
+    /**
+     * Create a garbage collector thread.
+     *
+     * @param conf
+     *          Server Configuration Object.
+     * @throws IOException
+     */
+    public GarbageCollectorThread(ServerConfiguration conf, LedgerManager ledgerManager,
+            final CompactableLedgerStorage ledgerStorage, StatsLogger statsLogger) throws IOException {
+<span class="fc" id="L126">        this(conf, ledgerManager, ledgerStorage, statsLogger,</span>
+<span class="fc" id="L127">                Executors.newSingleThreadScheduledExecutor(new DefaultThreadFactory(&quot;GarbageCollectorThread&quot;)));</span>
+<span class="fc" id="L128">    }</span>
+
+    /**
+     * Create a garbage collector thread.
+     *
+     * @param conf
+     *          Server Configuration Object.
+     * @throws IOException
+     */
+    public GarbageCollectorThread(ServerConfiguration conf,
+                                  LedgerManager ledgerManager,
+                                  final CompactableLedgerStorage ledgerStorage,
+                                  StatsLogger statsLogger,
+                                  ScheduledExecutorService gcExecutor)
+<span class="fc" id="L142">        throws IOException {</span>
+<span class="fc" id="L143">        this.gcExecutor = gcExecutor;</span>
+<span class="fc" id="L144">        this.conf = conf;</span>
+
+<span class="fc" id="L146">        this.entryLogger = ledgerStorage.getEntryLogger();</span>
+<span class="fc" id="L147">        this.ledgerStorage = ledgerStorage;</span>
+<span class="fc" id="L148">        this.gcWaitTime = conf.getGcWaitTime();</span>
+
+<span class="fc" id="L150">        this.numActiveEntryLogs = 0;</span>
+<span class="fc" id="L151">        this.totalEntryLogSize = 0L;</span>
+<span class="fc" id="L152">        this.garbageCollector = new ScanAndCompareGarbageCollector(ledgerManager, ledgerStorage, conf, statsLogger);</span>
+<span class="fc" id="L153">        this.gcStats = new GarbageCollectorStats(</span>
+            statsLogger,
+<span class="nc" id="L155">            () -&gt; numActiveEntryLogs,</span>
+<span class="nc" id="L156">            () -&gt; totalEntryLogSize,</span>
+<span class="nc" id="L157">            () -&gt; garbageCollector.getNumActiveLedgers()</span>
+        );
+
+<span class="fc" id="L160">        this.garbageCleaner = ledgerId -&gt; {</span>
+            try {
+<span class="nc bnc" id="L162" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L163">                    LOG.debug(&quot;delete ledger : &quot; + ledgerId);</span>
+                }
+<span class="nc" id="L165">                gcStats.getDeletedLedgerCounter().inc();</span>
+<span class="nc" id="L166">                ledgerStorage.deleteLedger(ledgerId);</span>
+<span class="nc" id="L167">            } catch (IOException e) {</span>
+<span class="nc" id="L168">                LOG.error(&quot;Exception when deleting the ledger index file on the Bookie: &quot;, e);</span>
+<span class="nc" id="L169">            }</span>
+<span class="nc" id="L170">        };</span>
+
+        // compaction parameters
+<span class="fc" id="L173">        minorCompactionThreshold = conf.getMinorCompactionThreshold();</span>
+<span class="fc" id="L174">        minorCompactionInterval = conf.getMinorCompactionInterval() * SECOND;</span>
+<span class="fc" id="L175">        majorCompactionThreshold = conf.getMajorCompactionThreshold();</span>
+<span class="fc" id="L176">        majorCompactionInterval = conf.getMajorCompactionInterval() * SECOND;</span>
+<span class="fc" id="L177">        isForceGCAllowWhenNoSpace = conf.getIsForceGCAllowWhenNoSpace();</span>
+
+<span class="fc" id="L179">        AbstractLogCompactor.LogRemovalListener remover = new AbstractLogCompactor.LogRemovalListener() {</span>
+            @Override
+            public void removeEntryLog(long logToRemove) {
+<span class="nc" id="L182">                GarbageCollectorThread.this.removeEntryLog(logToRemove);</span>
+<span class="nc" id="L183">            }</span>
+        };
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">        if (conf.getUseTransactionalCompaction()) {</span>
+<span class="nc" id="L186">            this.compactor = new TransactionalEntryLogCompactor(conf, entryLogger, ledgerStorage, remover);</span>
+        } else {
+<span class="fc" id="L188">            this.compactor = new EntryLogCompactor(conf, entryLogger, ledgerStorage, remover);</span>
+        }
+
+<span class="pc bpc" id="L191" title="2 of 4 branches missed.">        if (minorCompactionInterval &gt; 0 &amp;&amp; minorCompactionThreshold &gt; 0) {</span>
+<span class="pc bpc" id="L192" title="1 of 2 branches missed.">            if (minorCompactionThreshold &gt; 1.0f) {</span>
+<span class="nc" id="L193">                throw new IOException(&quot;Invalid minor compaction threshold &quot;</span>
+                                    + minorCompactionThreshold);
+            }
+<span class="pc bpc" id="L196" title="1 of 2 branches missed.">            if (minorCompactionInterval &lt;= gcWaitTime) {</span>
+<span class="nc" id="L197">                throw new IOException(&quot;Too short minor compaction interval : &quot;</span>
+                                    + minorCompactionInterval);
+            }
+<span class="fc" id="L200">            enableMinorCompaction = true;</span>
+        }
+
+<span class="pc bpc" id="L203" title="2 of 4 branches missed.">        if (majorCompactionInterval &gt; 0 &amp;&amp; majorCompactionThreshold &gt; 0) {</span>
+<span class="pc bpc" id="L204" title="1 of 2 branches missed.">            if (majorCompactionThreshold &gt; 1.0f) {</span>
+<span class="nc" id="L205">                throw new IOException(&quot;Invalid major compaction threshold &quot;</span>
+                                    + majorCompactionThreshold);
+            }
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">            if (majorCompactionInterval &lt;= gcWaitTime) {</span>
+<span class="nc" id="L209">                throw new IOException(&quot;Too short major compaction interval : &quot;</span>
+                                    + majorCompactionInterval);
+            }
+<span class="fc" id="L212">            enableMajorCompaction = true;</span>
+        }
+
+<span class="pc bpc" id="L215" title="2 of 4 branches missed.">        if (enableMinorCompaction &amp;&amp; enableMajorCompaction) {</span>
+<span class="pc bpc" id="L216" title="2 of 4 branches missed.">            if (minorCompactionInterval &gt;= majorCompactionInterval</span>
+                || minorCompactionThreshold &gt;= majorCompactionThreshold) {
+<span class="nc" id="L218">                throw new IOException(&quot;Invalid minor/major compaction settings : minor (&quot;</span>
+                                    + minorCompactionThreshold + &quot;, &quot; + minorCompactionInterval
+                                    + &quot;), major (&quot; + majorCompactionThreshold + &quot;, &quot;
+                                    + majorCompactionInterval + &quot;)&quot;);
+            }
+        }
+
+<span class="fc" id="L225">        LOG.info(&quot;Minor Compaction : enabled=&quot; + enableMinorCompaction + &quot;, threshold=&quot;</span>
+               + minorCompactionThreshold + &quot;, interval=&quot; + minorCompactionInterval);
+<span class="fc" id="L227">        LOG.info(&quot;Major Compaction : enabled=&quot; + enableMajorCompaction + &quot;, threshold=&quot;</span>
+               + majorCompactionThreshold + &quot;, interval=&quot; + majorCompactionInterval);
+
+<span class="fc" id="L230">        lastMinorCompactionTime = lastMajorCompactionTime = System.currentTimeMillis();</span>
+<span class="fc" id="L231">    }</span>
+
+    public void enableForceGC() {
+<span class="nc bnc" id="L234" title="All 2 branches missed.">        if (forceGarbageCollection.compareAndSet(false, true)) {</span>
+<span class="nc" id="L235">            LOG.info(&quot;Forced garbage collection triggered by thread: {}&quot;, Thread.currentThread().getName());</span>
+<span class="nc" id="L236">            triggerGC(true, suspendMajorCompaction.get(),</span>
+<span class="nc" id="L237">                      suspendMinorCompaction.get());</span>
+        }
+<span class="nc" id="L239">    }</span>
+
+    public void disableForceGC() {
+<span class="nc bnc" id="L242" title="All 2 branches missed.">        if (forceGarbageCollection.compareAndSet(true, false)) {</span>
+<span class="nc" id="L243">            LOG.info(&quot;{} disabled force garbage collection since bookie has enough space now.&quot;, Thread</span>
+<span class="nc" id="L244">                    .currentThread().getName());</span>
+        }
+<span class="nc" id="L246">    }</span>
+
+    Future&lt;?&gt; triggerGC(final boolean force,
+                        final boolean suspendMajor,
+                        final boolean suspendMinor) {
+<span class="nc" id="L251">        return gcExecutor.submit(() -&gt; {</span>
+<span class="nc" id="L252">                runWithFlags(force, suspendMajor, suspendMinor);</span>
+<span class="nc" id="L253">            });</span>
+    }
+
+    Future&lt;?&gt; triggerGC() {
+<span class="nc" id="L257">        final boolean force = forceGarbageCollection.get();</span>
+<span class="nc" id="L258">        final boolean suspendMajor = suspendMajorCompaction.get();</span>
+<span class="nc" id="L259">        final boolean suspendMinor = suspendMinorCompaction.get();</span>
+
+<span class="nc" id="L261">        return gcExecutor.submit(() -&gt; {</span>
+<span class="nc" id="L262">                runWithFlags(force, suspendMajor, suspendMinor);</span>
+<span class="nc" id="L263">            });</span>
+    }
+
+    public boolean isInForceGC() {
+<span class="nc" id="L267">        return forceGarbageCollection.get();</span>
+    }
+
+    public void suspendMajorGC() {
+<span class="nc bnc" id="L271" title="All 2 branches missed.">        if (suspendMajorCompaction.compareAndSet(false, true)) {</span>
+<span class="nc" id="L272">            LOG.info(&quot;Suspend Major Compaction triggered by thread: {}&quot;, Thread.currentThread().getName());</span>
+        }
+<span class="nc" id="L274">    }</span>
+
+    public void resumeMajorGC() {
+<span class="nc bnc" id="L277" title="All 2 branches missed.">        if (suspendMajorCompaction.compareAndSet(true, false)) {</span>
+<span class="nc" id="L278">            LOG.info(&quot;{} Major Compaction back to normal since bookie has enough space now.&quot;,</span>
+<span class="nc" id="L279">                    Thread.currentThread().getName());</span>
+        }
+<span class="nc" id="L281">    }</span>
+
+    public void suspendMinorGC() {
+<span class="nc bnc" id="L284" title="All 2 branches missed.">        if (suspendMinorCompaction.compareAndSet(false, true)) {</span>
+<span class="nc" id="L285">            LOG.info(&quot;Suspend Minor Compaction triggered by thread: {}&quot;, Thread.currentThread().getName());</span>
+        }
+<span class="nc" id="L287">    }</span>
+
+    public void resumeMinorGC() {
+<span class="nc bnc" id="L290" title="All 2 branches missed.">        if (suspendMinorCompaction.compareAndSet(true, false)) {</span>
+<span class="nc" id="L291">            LOG.info(&quot;{} Minor Compaction back to normal since bookie has enough space now.&quot;,</span>
+<span class="nc" id="L292">                    Thread.currentThread().getName());</span>
+        }
+<span class="nc" id="L294">    }</span>
+
+    public void start() {
+<span class="nc bnc" id="L297" title="All 2 branches missed.">        if (scheduledFuture != null) {</span>
+<span class="nc" id="L298">            scheduledFuture.cancel(false);</span>
+        }
+<span class="nc" id="L300">        scheduledFuture = gcExecutor.scheduleAtFixedRate(this, gcWaitTime, gcWaitTime, TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L301">    }</span>
+
+    @Override
+    public void safeRun() {
+<span class="nc" id="L305">        boolean force = forceGarbageCollection.get();</span>
+<span class="nc" id="L306">        boolean suspendMajor = suspendMajorCompaction.get();</span>
+<span class="nc" id="L307">        boolean suspendMinor = suspendMinorCompaction.get();</span>
+
+<span class="nc" id="L309">        runWithFlags(force, suspendMajor, suspendMinor);</span>
+
+<span class="nc bnc" id="L311" title="All 2 branches missed.">        if (force) {</span>
+            // only set force to false if it had been true when the garbage
+            // collection cycle started
+<span class="nc" id="L314">            forceGarbageCollection.set(false);</span>
+        }
+<span class="nc" id="L316">    }</span>
+
+    public void runWithFlags(boolean force, boolean suspendMajor, boolean suspendMinor) {
+<span class="nc" id="L319">        long threadStart = MathUtils.nowInNano();</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">        if (force) {</span>
+<span class="nc" id="L321">            LOG.info(&quot;Garbage collector thread forced to perform GC before expiry of wait time.&quot;);</span>
+        }
+        // Recover and clean up previous state if using transactional compaction
+<span class="nc" id="L324">        compactor.cleanUpAndRecover();</span>
+
+        // Extract all of the ledger ID's that comprise all of the entry logs
+        // (except for the current new one which is still being written to).
+<span class="nc" id="L328">        entryLogMetaMap = extractMetaFromEntryLogs(entryLogMetaMap);</span>
+
+        // gc inactive/deleted ledgers
+<span class="nc" id="L331">        doGcLedgers();</span>
+
+        // gc entry logs
+<span class="nc" id="L334">        doGcEntryLogs();</span>
+
+<span class="nc bnc" id="L336" title="All 2 branches missed.">        if (suspendMajor) {</span>
+<span class="nc" id="L337">            LOG.info(&quot;Disk almost full, suspend major compaction to slow down filling disk.&quot;);</span>
+        }
+<span class="nc bnc" id="L339" title="All 2 branches missed.">        if (suspendMinor) {</span>
+<span class="nc" id="L340">            LOG.info(&quot;Disk full, suspend minor compaction to slow down filling disk.&quot;);</span>
+        }
+
+<span class="nc" id="L343">        long curTime = System.currentTimeMillis();</span>
+<span class="nc bnc" id="L344" title="All 8 branches missed.">        if (enableMajorCompaction &amp;&amp; (!suspendMajor)</span>
+            &amp;&amp; (force || curTime - lastMajorCompactionTime &gt; majorCompactionInterval)) {
+            // enter major compaction
+<span class="nc" id="L347">            LOG.info(&quot;Enter major compaction, suspendMajor {}&quot;, suspendMajor);</span>
+<span class="nc" id="L348">            majorCompacting.set(true);</span>
+<span class="nc" id="L349">            doCompactEntryLogs(majorCompactionThreshold);</span>
+<span class="nc" id="L350">            lastMajorCompactionTime = System.currentTimeMillis();</span>
+            // and also move minor compaction time
+<span class="nc" id="L352">            lastMinorCompactionTime = lastMajorCompactionTime;</span>
+<span class="nc" id="L353">            gcStats.getMajorCompactionCounter().inc();</span>
+<span class="nc" id="L354">            majorCompacting.set(false);</span>
+<span class="nc bnc" id="L355" title="All 8 branches missed.">        } else if (enableMinorCompaction &amp;&amp; (!suspendMinor)</span>
+            &amp;&amp; (force || curTime - lastMinorCompactionTime &gt; minorCompactionInterval)) {
+            // enter minor compaction
+<span class="nc" id="L358">            LOG.info(&quot;Enter minor compaction, suspendMinor {}&quot;, suspendMinor);</span>
+<span class="nc" id="L359">            minorCompacting.set(true);</span>
+<span class="nc" id="L360">            doCompactEntryLogs(minorCompactionThreshold);</span>
+<span class="nc" id="L361">            lastMinorCompactionTime = System.currentTimeMillis();</span>
+<span class="nc" id="L362">            gcStats.getMinorCompactionCounter().inc();</span>
+<span class="nc" id="L363">            minorCompacting.set(false);</span>
+        }
+
+<span class="nc bnc" id="L366" title="All 2 branches missed.">        if (force) {</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">            if (forceGarbageCollection.compareAndSet(true, false)) {</span>
+<span class="nc" id="L368">                LOG.info(&quot;{} Set forceGarbageCollection to false after force GC to make it forceGC-able again.&quot;, Thread</span>
+<span class="nc" id="L369">                    .currentThread().getName());</span>
+            }
+        }
+<span class="nc" id="L372">        gcStats.getGcThreadRuntime().registerSuccessfulEvent(</span>
+<span class="nc" id="L373">                MathUtils.nowInNano() - threadStart, TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L374">    }</span>
+
+    /**
+     * Do garbage collection ledger index files.
+     */
+    private void doGcLedgers() {
+<span class="nc" id="L380">        garbageCollector.gc(garbageCleaner);</span>
+<span class="nc" id="L381">    }</span>
+
+    /**
+     * Garbage collect those entry loggers which are not associated with any active ledgers.
+     */
+    private void doGcEntryLogs() {
+        // Get a cumulative count, don't update until complete
+<span class="nc" id="L388">        AtomicLong totalEntryLogSizeAcc = new AtomicLong(0L);</span>
+
+        // Loop through all of the entry logs and remove the non-active ledgers.
+<span class="nc" id="L391">        entryLogMetaMap.forEach((entryLogId, meta) -&gt; {</span>
+<span class="nc" id="L392">           removeIfLedgerNotExists(meta);</span>
+<span class="nc bnc" id="L393" title="All 2 branches missed.">           if (meta.isEmpty()) {</span>
+               // This means the entry log is not associated with any active ledgers anymore.
+               // We can remove this entry log file now.
+<span class="nc" id="L396">               LOG.info(&quot;Deleting entryLogId &quot; + entryLogId + &quot; as it has no active ledgers!&quot;);</span>
+<span class="nc" id="L397">               removeEntryLog(entryLogId);</span>
+<span class="nc" id="L398">               gcStats.getReclaimedSpaceViaDeletes().add(meta.getTotalSize());</span>
+           }
+
+<span class="nc" id="L401">           totalEntryLogSizeAcc.getAndAdd(meta.getRemainingSize());</span>
+<span class="nc" id="L402">        });</span>
+
+<span class="nc" id="L404">        this.totalEntryLogSize = totalEntryLogSizeAcc.get();</span>
+<span class="nc" id="L405">        this.numActiveEntryLogs = entryLogMetaMap.keySet().size();</span>
+<span class="nc" id="L406">    }</span>
+
+    private void removeIfLedgerNotExists(EntryLogMetadata meta) {
+<span class="nc" id="L409">        meta.removeLedgerIf((entryLogLedger) -&gt; {</span>
+            // Remove the entry log ledger from the set if it isn't active.
+            try {
+<span class="nc bnc" id="L412" title="All 2 branches missed.">                return !ledgerStorage.ledgerExists(entryLogLedger);</span>
+<span class="nc" id="L413">            } catch (IOException e) {</span>
+<span class="nc" id="L414">                LOG.error(&quot;Error reading from ledger storage&quot;, e);</span>
+<span class="nc" id="L415">                return false;</span>
+            }
+        });
+<span class="nc" id="L418">    }</span>
+
+    /**
+     * Compact entry logs if necessary.
+     *
+     * &lt;p&gt;
+     * Compaction will be executed from low unused space to high unused space.
+     * Those entry log files whose remaining size percentage is higher than threshold
+     * would not be compacted.
+     * &lt;/p&gt;
+     */
+    @VisibleForTesting
+    void doCompactEntryLogs(double threshold) {
+<span class="nc" id="L431">        LOG.info(&quot;Do compaction to compact those files lower than {}&quot;, threshold);</span>
+
+        // sort the ledger meta by usage in ascending order.
+<span class="nc" id="L434">        List&lt;EntryLogMetadata&gt; logsToCompact = new ArrayList&lt;EntryLogMetadata&gt;();</span>
+<span class="nc" id="L435">        logsToCompact.addAll(entryLogMetaMap.values());</span>
+<span class="nc" id="L436">        logsToCompact.sort(Comparator.comparing(EntryLogMetadata::getUsage));</span>
+
+<span class="nc" id="L438">        final int numBuckets = 10;</span>
+<span class="nc" id="L439">        int[] entryLogUsageBuckets = new int[numBuckets];</span>
+
+<span class="nc bnc" id="L441" title="All 2 branches missed.">        for (EntryLogMetadata meta : logsToCompact) {</span>
+<span class="nc" id="L442">            int bucketIndex = Math.min(</span>
+                    numBuckets - 1,
+<span class="nc" id="L444">                    (int) Math.ceil(meta.getUsage() * numBuckets));</span>
+<span class="nc" id="L445">            entryLogUsageBuckets[bucketIndex]++;</span>
+
+<span class="nc bnc" id="L447" title="All 2 branches missed.">            if (meta.getUsage() &gt;= threshold) {</span>
+<span class="nc" id="L448">                continue;</span>
+            }
+<span class="nc bnc" id="L450" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L451">                LOG.debug(&quot;Compacting entry log {} below threshold {}&quot;, meta.getEntryLogId(), threshold);</span>
+            }
+
+<span class="nc" id="L454">            long priorRemainingSize = meta.getRemainingSize();</span>
+<span class="nc" id="L455">            compactEntryLog(meta);</span>
+<span class="nc" id="L456">            gcStats.getReclaimedSpaceViaCompaction().add(meta.getTotalSize() - priorRemainingSize);</span>
+
+<span class="nc bnc" id="L458" title="All 2 branches missed.">            if (!running) { // if gc thread is not running, stop compaction</span>
+<span class="nc" id="L459">                return;</span>
+            }
+<span class="nc" id="L461">        }</span>
+<span class="nc" id="L462">        LOG.info(</span>
+                &quot;Compaction: entry log usage buckets[10% 20% 30% 40% 50% 60% 70% 80% 90% 100%] = {}&quot;,
+                entryLogUsageBuckets);
+<span class="nc" id="L465">    }</span>
+
+    /**
+     * Shutdown the garbage collector thread.
+     *
+     * @throws InterruptedException if there is an exception stopping gc thread.
+     */
+    public void shutdown() throws InterruptedException {
+<span class="fc" id="L473">        this.running = false;</span>
+<span class="fc" id="L474">        LOG.info(&quot;Shutting down GarbageCollectorThread&quot;);</span>
+
+<span class="pc bpc" id="L476" title="1 of 2 branches missed.">        while (!compacting.compareAndSet(false, true)) {</span>
+            // Wait till the thread stops compacting
+<span class="nc" id="L478">            Thread.sleep(100);</span>
+        }
+
+        // Interrupt GC executor thread
+<span class="fc" id="L482">        gcExecutor.shutdownNow();</span>
+<span class="fc" id="L483">    }</span>
+
+    /**
+     * Remove entry log.
+     *
+     * @param entryLogId
+     *          Entry Log File Id
+     */
+    protected void removeEntryLog(long entryLogId) {
+        // remove entry log file successfully
+<span class="nc bnc" id="L493" title="All 2 branches missed.">        if (entryLogger.removeEntryLog(entryLogId)) {</span>
+<span class="nc" id="L494">            LOG.info(&quot;Removing entry log metadata for {}&quot;, entryLogId);</span>
+<span class="nc" id="L495">            entryLogMetaMap.remove(entryLogId);</span>
+        }
+<span class="nc" id="L497">    }</span>
+
+    /**
+     * Compact an entry log.
+     *
+     * @param entryLogMeta
+     */
+    protected void compactEntryLog(EntryLogMetadata entryLogMeta) {
+        // Similar with Sync Thread
+        // try to mark compacting flag to make sure it would not be interrupted
+        // by shutdown during compaction. otherwise it will receive
+        // ClosedByInterruptException which may cause index file &amp; entry logger
+        // closed and corrupted.
+<span class="nc bnc" id="L510" title="All 2 branches missed.">        if (!compacting.compareAndSet(false, true)) {</span>
+            // set compacting flag failed, means compacting is true now
+            // indicates that compaction is in progress for this EntryLogId.
+<span class="nc" id="L513">            return;</span>
+        }
+
+        try {
+            // Do the actual compaction
+<span class="nc" id="L518">            compactor.compact(entryLogMeta);</span>
+<span class="nc" id="L519">        } catch (Exception e) {</span>
+<span class="nc" id="L520">            LOG.error(&quot;Failed to compact entry log {} due to unexpected error&quot;, entryLogMeta.getEntryLogId(), e);</span>
+        } finally {
+            // Mark compaction done
+<span class="nc" id="L523">            compacting.set(false);</span>
+        }
+<span class="nc" id="L525">    }</span>
+
+    /**
+     * Method to read in all of the entry logs (those that we haven't done so yet),
+     * and find the set of ledger ID's that make up each entry log file.
+     *
+     * @param entryLogMetaMap
+     *          Existing EntryLogs to Meta
+     * @throws IOException
+     */
+    protected Map&lt;Long, EntryLogMetadata&gt; extractMetaFromEntryLogs(Map&lt;Long, EntryLogMetadata&gt; entryLogMetaMap) {
+        // Extract it for every entry log except for the current one.
+        // Entry Log ID's are just a long value that starts at 0 and increments
+        // by 1 when the log fills up and we roll to a new one.
+<span class="nc" id="L539">        long curLogId = entryLogger.getLeastUnflushedLogId();</span>
+<span class="nc" id="L540">        boolean hasExceptionWhenScan = false;</span>
+<span class="nc bnc" id="L541" title="All 2 branches missed.">        for (long entryLogId = scannedLogId; entryLogId &lt; curLogId; entryLogId++) {</span>
+            // Comb the current entry log file if it has not already been extracted.
+<span class="nc bnc" id="L543" title="All 2 branches missed.">            if (entryLogMetaMap.containsKey(entryLogId)) {</span>
+<span class="nc" id="L544">                continue;</span>
+            }
+
+            // check whether log file exists or not
+            // if it doesn't exist, this log file might have been garbage collected.
+<span class="nc bnc" id="L549" title="All 2 branches missed.">            if (!entryLogger.logExists(entryLogId)) {</span>
+<span class="nc" id="L550">                continue;</span>
+            }
+
+<span class="nc" id="L553">            LOG.info(&quot;Extracting entry log meta from entryLogId: {}&quot;, entryLogId);</span>
+
+            try {
+                // Read through the entry log file and extract the entry log meta
+<span class="nc" id="L557">                EntryLogMetadata entryLogMeta = entryLogger.getEntryLogMetadata(entryLogId);</span>
+<span class="nc" id="L558">                removeIfLedgerNotExists(entryLogMeta);</span>
+<span class="nc bnc" id="L559" title="All 2 branches missed.">                if (entryLogMeta.isEmpty()) {</span>
+<span class="nc" id="L560">                    entryLogger.removeEntryLog(entryLogId);</span>
+                } else {
+<span class="nc" id="L562">                    entryLogMetaMap.put(entryLogId, entryLogMeta);</span>
+                }
+<span class="nc" id="L564">            } catch (IOException e) {</span>
+<span class="nc" id="L565">                hasExceptionWhenScan = true;</span>
+<span class="nc" id="L566">                LOG.warn(&quot;Premature exception when processing &quot; + entryLogId</span>
+                         + &quot; recovery will take care of the problem&quot;, e);
+<span class="nc" id="L568">            }</span>
+
+            // if scan failed on some entry log, we don't move 'scannedLogId' to next id
+            // if scan succeed, we don't need to scan it again during next gc run,
+            // we move 'scannedLogId' to next id
+<span class="nc bnc" id="L573" title="All 2 branches missed.">            if (!hasExceptionWhenScan) {</span>
+<span class="nc" id="L574">                ++scannedLogId;</span>
+            }
+        }
+<span class="nc" id="L577">        return entryLogMetaMap;</span>
+    }
+
+    CompactableLedgerStorage getLedgerStorage() {
+<span class="nc" id="L581">        return ledgerStorage;</span>
+    }
+
+    public GarbageCollectionStatus getGarbageCollectionStatus() {
+<span class="nc" id="L585">        return GarbageCollectionStatus.builder()</span>
+<span class="nc" id="L586">            .forceCompacting(forceGarbageCollection.get())</span>
+<span class="nc" id="L587">            .majorCompacting(majorCompacting.get())</span>
+<span class="nc" id="L588">            .minorCompacting(minorCompacting.get())</span>
+<span class="nc" id="L589">            .lastMajorCompactionTime(lastMajorCompactionTime)</span>
+<span class="nc" id="L590">            .lastMinorCompactionTime(lastMinorCompactionTime)</span>
+<span class="nc" id="L591">            .majorCompactionCounter(gcStats.getMajorCompactionCounter().get())</span>
+<span class="nc" id="L592">            .minorCompactionCounter(gcStats.getMinorCompactionCounter().get())</span>
+<span class="nc" id="L593">            .build();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

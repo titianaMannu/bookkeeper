@@ -44,10 +44,9 @@ public class SingleDirectoryDBLedgerStorageTest {
         List<InputTest> list = new ArrayList<>();
 
         /*ledgerId, entryId1, entryId2, content, masterKey, threadPoolSize*/
-        list.add(new InputTest(1, 0, 1, "content", "key", 1));
+        list.add(new InputTest(1, 0, 0, "content", "key", 1));
         list.add(new InputTest(0, 1, 2, "", "", 200));
-        list.add(new InputTest(-1, -1, 1, "content", "key", 1));
-        list.add(new InputTest(1, 1, 1, "content", "key", 1));
+        list.add(new InputTest(-1, -1, 0, "content", "key", 1));
         return list;
 
     }

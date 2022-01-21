@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>GetListOfEntriesOfLedgerProcessorV3.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto</a> &gt; <span class="el_source">GetListOfEntriesOfLedgerProcessorV3.java</span></div><h1>GetListOfEntriesOfLedgerProcessorV3.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.proto;
+
+import com.google.protobuf.ByteString;
+import io.netty.channel.Channel;
+import java.io.IOException;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.bookkeeper.bookie.Bookie;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.GetListOfEntriesOfLedgerRequest;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.GetListOfEntriesOfLedgerResponse;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.Request;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.Response;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.StatusCode;
+import org.apache.bookkeeper.util.AvailabilityOfEntriesOfLedger;
+import org.apache.bookkeeper.util.MathUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A processor class for v3 entries of a ledger packets.
+ */
+public class GetListOfEntriesOfLedgerProcessorV3 extends PacketProcessorBaseV3 implements Runnable {
+
+<span class="nc" id="L44">    private static final Logger LOG = LoggerFactory.getLogger(GetListOfEntriesOfLedgerProcessorV3.class);</span>
+    protected final GetListOfEntriesOfLedgerRequest getListOfEntriesOfLedgerRequest;
+    protected final long ledgerId;
+
+    public GetListOfEntriesOfLedgerProcessorV3(Request request, Channel channel,
+            BookieRequestProcessor requestProcessor) {
+<span class="nc" id="L50">        super(request, channel, requestProcessor);</span>
+<span class="nc" id="L51">        this.getListOfEntriesOfLedgerRequest = request.getGetListOfEntriesOfLedgerRequest();</span>
+<span class="nc" id="L52">        this.ledgerId = getListOfEntriesOfLedgerRequest.getLedgerId();</span>
+<span class="nc" id="L53">    }</span>
+
+    private GetListOfEntriesOfLedgerResponse getListOfEntriesOfLedgerResponse() {
+<span class="nc" id="L56">        long startTimeNanos = MathUtils.nowInNano();</span>
+
+        GetListOfEntriesOfLedgerResponse.Builder getListOfEntriesOfLedgerResponse = GetListOfEntriesOfLedgerResponse
+<span class="nc" id="L59">                .newBuilder();</span>
+<span class="nc" id="L60">        getListOfEntriesOfLedgerResponse.setLedgerId(ledgerId);</span>
+
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        if (!isVersionCompatible()) {</span>
+<span class="nc" id="L63">            getListOfEntriesOfLedgerResponse.setStatus(StatusCode.EBADVERSION);</span>
+<span class="nc" id="L64">            requestProcessor.getRequestStats().getGetListOfEntriesOfLedgerStats()</span>
+<span class="nc" id="L65">                    .registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L66">            return getListOfEntriesOfLedgerResponse.build();</span>
+        }
+
+<span class="nc bnc" id="L69" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L70">            LOG.debug(&quot;Received new getListOfEntriesOfLedger request: {}&quot;, request);</span>
+        }
+<span class="nc" id="L72">        StatusCode status = StatusCode.EOK;</span>
+<span class="nc" id="L73">        AvailabilityOfEntriesOfLedger availabilityOfEntriesOfLedger = null;</span>
+        try {
+<span class="nc" id="L75">            availabilityOfEntriesOfLedger = new AvailabilityOfEntriesOfLedger(</span>
+<span class="nc" id="L76">                    requestProcessor.bookie.getListOfEntriesOfLedger(ledgerId));</span>
+<span class="nc" id="L77">            getListOfEntriesOfLedgerResponse.setAvailabilityOfEntriesOfLedger(</span>
+<span class="nc" id="L78">                    ByteString.copyFrom(availabilityOfEntriesOfLedger.serializeStateOfEntriesOfLedger()));</span>
+
+<span class="nc" id="L80">        } catch (Bookie.NoLedgerException e) {</span>
+<span class="nc" id="L81">            status = StatusCode.ENOLEDGER;</span>
+<span class="nc" id="L82">            LOG.error(&quot;No ledger found while performing getListOfEntriesOfLedger from ledger: {}&quot;, ledgerId, e);</span>
+<span class="nc" id="L83">        } catch (IOException e) {</span>
+<span class="nc" id="L84">            status = StatusCode.EIO;</span>
+<span class="nc" id="L85">            LOG.error(&quot;IOException while performing getListOfEntriesOfLedger from ledger: {}&quot;, ledgerId);</span>
+<span class="nc" id="L86">        }</span>
+
+<span class="nc bnc" id="L88" title="All 2 branches missed.">        if (status == StatusCode.EOK) {</span>
+<span class="nc" id="L89">            requestProcessor.getRequestStats().getListOfEntriesOfLedgerStats</span>
+<span class="nc" id="L90">                    .registerSuccessfulEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+        } else {
+<span class="nc" id="L92">            requestProcessor.getRequestStats().getListOfEntriesOfLedgerStats</span>
+<span class="nc" id="L93">                    .registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+        }
+        // Finally set the status and return
+<span class="nc" id="L96">        getListOfEntriesOfLedgerResponse.setStatus(status);</span>
+<span class="nc" id="L97">        return getListOfEntriesOfLedgerResponse.build();</span>
+    }
+
+    @Override
+    public void safeRun() {
+<span class="nc" id="L102">        GetListOfEntriesOfLedgerResponse listOfEntriesOfLedgerResponse = getListOfEntriesOfLedgerResponse();</span>
+<span class="nc" id="L103">        Response.Builder response = Response.newBuilder().setHeader(getHeader())</span>
+<span class="nc" id="L104">                .setStatus(listOfEntriesOfLedgerResponse.getStatus())</span>
+<span class="nc" id="L105">                .setGetListOfEntriesOfLedgerResponse(listOfEntriesOfLedgerResponse);</span>
+<span class="nc" id="L106">        Response resp = response.build();</span>
+<span class="nc" id="L107">        sendResponse(listOfEntriesOfLedgerResponse.getStatus(), resp,</span>
+<span class="nc" id="L108">                requestProcessor.getRequestStats().getListOfEntriesOfLedgerRequestStats);</span>
+<span class="nc" id="L109">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

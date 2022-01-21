@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>RecoveryBookieService.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.server.http.service</a> &gt; <span class="el_source">RecoveryBookieService.java</span></div><h1>RecoveryBookieService.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.server.http.service;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.bookkeeper.meta.MetadataDrivers.runFunctionWithRegistrationManager;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+
+import org.apache.bookkeeper.bookie.Cookie;
+import org.apache.bookkeeper.client.BookKeeperAdmin;
+import org.apache.bookkeeper.common.util.JsonUtil;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.http.HttpServer;
+import org.apache.bookkeeper.http.service.HttpEndpointService;
+import org.apache.bookkeeper.http.service.HttpServiceRequest;
+import org.apache.bookkeeper.http.service.HttpServiceResponse;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * HttpEndpointService that handle Bookkeeper recovery related http request.
+ *
+ * &lt;p&gt;The PUT method will recovery bookie with provided parameter.
+ * The parameter of input body should be like this format:
+ * {
+ *   &quot;bookie_src&quot;: [ &quot;bookie_src1&quot;, &quot;bookie_src2&quot;... ],
+ *   &quot;bookie_dest&quot;: [ &quot;bookie_dest1&quot;, &quot;bookie_dest2&quot;... ],
+ *   &quot;delete_cookie&quot;: &amp;lt;bool_value&amp;gt;
+ * }
+ */
+public class RecoveryBookieService implements HttpEndpointService {
+
+<span class="nc" id="L55">    static final Logger LOG = LoggerFactory.getLogger(RecoveryBookieService.class);</span>
+
+    protected ServerConfiguration conf;
+    protected BookKeeperAdmin bka;
+    protected ExecutorService executor;
+
+<span class="nc" id="L61">    public RecoveryBookieService(ServerConfiguration conf, BookKeeperAdmin bka, ExecutorService executor) {</span>
+<span class="nc" id="L62">        checkNotNull(conf);</span>
+<span class="nc" id="L63">        this.conf = conf;</span>
+<span class="nc" id="L64">        this.bka = bka;</span>
+<span class="nc" id="L65">        this.executor = executor;</span>
+<span class="nc" id="L66">    }</span>
+
+    /*
+     * Example body as this:
+     * {
+     *   &quot;bookie_src&quot;: [ &quot;bookie_src1&quot;, &quot;bookie_src2&quot;... ],
+     *   &quot;delete_cookie&quot;: &lt;bool_value&gt;
+     * }
+     */
+<span class="nc" id="L75">    static class RecoveryRequestJsonBody {</span>
+        @JsonProperty(&quot;bookie_src&quot;)
+        public List&lt;String&gt; bookieSrc;
+
+        @JsonProperty(&quot;delete_cookie&quot;)
+        public boolean deleteCookie;
+    }
+
+    @Override
+    public HttpServiceResponse handle(HttpServiceRequest request) throws Exception {
+<span class="nc" id="L85">        HttpServiceResponse response = new HttpServiceResponse();</span>
+<span class="nc" id="L86">        String requestBody = request.getBody();</span>
+        RecoveryRequestJsonBody requestJsonBody;
+
+<span class="nc bnc" id="L89" title="All 2 branches missed.">        if (requestBody == null) {</span>
+<span class="nc" id="L90">            response.setCode(HttpServer.StatusCode.NOT_FOUND);</span>
+<span class="nc" id="L91">            response.setBody(&quot;No request body provide.&quot;);</span>
+<span class="nc" id="L92">            return response;</span>
+        }
+
+        try {
+<span class="nc" id="L96">            requestJsonBody = JsonUtil.fromJson(requestBody, RecoveryRequestJsonBody.class);</span>
+<span class="nc" id="L97">            LOG.debug(&quot;bookie_src: [&quot; + requestJsonBody.bookieSrc.get(0)</span>
+                + &quot;],  delete_cookie: [&quot; + requestJsonBody.deleteCookie + &quot;]&quot;);
+<span class="nc" id="L99">        } catch (JsonUtil.ParseJsonException e) {</span>
+<span class="nc" id="L100">            LOG.error(&quot;Meet Exception: &quot;, e);</span>
+<span class="nc" id="L101">            response.setCode(HttpServer.StatusCode.NOT_FOUND);</span>
+<span class="nc" id="L102">            response.setBody(&quot;ERROR parameters: &quot; + e.getMessage());</span>
+<span class="nc" id="L103">            return response;</span>
+<span class="nc" id="L104">        }</span>
+
+<span class="nc bnc" id="L106" title="All 4 branches missed.">        if (HttpServer.Method.PUT == request.getMethod() &amp;&amp; !requestJsonBody.bookieSrc.isEmpty()) {</span>
+<span class="nc" id="L107">            runFunctionWithRegistrationManager(conf, rm -&gt; {</span>
+<span class="nc" id="L108">                final String bookieSrcSerialized = requestJsonBody.bookieSrc.get(0);</span>
+<span class="nc" id="L109">                executor.execute(() -&gt; {</span>
+                    try {
+<span class="nc" id="L111">                        BookieId bookieSrc = BookieId.parse(bookieSrcSerialized);</span>
+<span class="nc" id="L112">                        boolean deleteCookie = requestJsonBody.deleteCookie;</span>
+<span class="nc" id="L113">                        LOG.info(&quot;Start recovering bookie.&quot;);</span>
+<span class="nc" id="L114">                        bka.recoverBookieData(bookieSrc);</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">                        if (deleteCookie) {</span>
+<span class="nc" id="L116">                            Versioned&lt;Cookie&gt; cookie = Cookie.readFromRegistrationManager(rm, bookieSrc);</span>
+<span class="nc" id="L117">                            cookie.getValue().deleteFromRegistrationManager(rm, bookieSrc, cookie.getVersion());</span>
+                        }
+<span class="nc" id="L119">                        LOG.info(&quot;Complete recovering bookie&quot;);</span>
+<span class="nc" id="L120">                    } catch (Exception e) {</span>
+<span class="nc" id="L121">                        LOG.error(&quot;Exception occurred while recovering bookie&quot;, e);</span>
+<span class="nc" id="L122">                    }</span>
+<span class="nc" id="L123">                });</span>
+<span class="nc" id="L124">                return null;</span>
+            });
+
+<span class="nc" id="L127">            response.setCode(HttpServer.StatusCode.OK);</span>
+<span class="nc" id="L128">            response.setBody(&quot;Success send recovery request command.&quot;);</span>
+<span class="nc" id="L129">            return response;</span>
+        } else {
+<span class="nc" id="L131">            response.setCode(HttpServer.StatusCode.NOT_FOUND);</span>
+<span class="nc" id="L132">            response.setBody(&quot;Not found method. Should be PUT method&quot;);</span>
+<span class="nc" id="L133">            return response;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

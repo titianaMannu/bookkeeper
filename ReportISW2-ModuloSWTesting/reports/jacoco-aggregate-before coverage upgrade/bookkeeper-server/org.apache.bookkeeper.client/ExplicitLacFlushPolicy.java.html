@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ExplicitLacFlushPolicy.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">ExplicitLacFlushPolicy.java</span></div><h1>ExplicitLacFlushPolicy.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.client;
+
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.bookkeeper.client.SyncCallbackUtils.LastAddConfirmedCallback;
+import org.apache.bookkeeper.util.ByteBufList;
+import org.apache.bookkeeper.util.SafeRunnable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+interface ExplicitLacFlushPolicy {
+    void stopExplicitLacFlush();
+
+    void updatePiggyBackedLac(long piggyBackedLac);
+
+<span class="nc" id="L38">    ExplicitLacFlushPolicy VOID_EXPLICITLAC_FLUSH_POLICY = new ExplicitLacFlushPolicy() {</span>
+        @Override
+        public void stopExplicitLacFlush() {
+            // void method
+<span class="nc" id="L42">        }</span>
+
+        @Override
+        public void updatePiggyBackedLac(long piggyBackedLac) {
+            // void method
+<span class="nc" id="L47">        }</span>
+    };
+
+    class ExplicitLacFlushPolicyImpl implements ExplicitLacFlushPolicy {
+<span class="nc" id="L51">        static final Logger LOG = LoggerFactory.getLogger(ExplicitLacFlushPolicyImpl.class);</span>
+
+<span class="nc" id="L53">        volatile long piggyBackedLac = LedgerHandle.INVALID_ENTRY_ID;</span>
+<span class="nc" id="L54">        volatile long explicitLac = LedgerHandle.INVALID_ENTRY_ID;</span>
+        final LedgerHandle lh;
+        final ClientContext clientCtx;
+
+        ScheduledFuture&lt;?&gt; scheduledFuture;
+
+        ExplicitLacFlushPolicyImpl(LedgerHandle lh,
+<span class="nc" id="L61">                                   ClientContext clientCtx) {</span>
+<span class="nc" id="L62">            this.lh = lh;</span>
+<span class="nc" id="L63">            this.clientCtx = clientCtx;</span>
+
+<span class="nc" id="L65">            scheduleExplictLacFlush();</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L67">                LOG.debug(&quot;Scheduled Explicit Last Add Confirmed Update&quot;);</span>
+            }
+<span class="nc" id="L69">        }</span>
+
+        private long getExplicitLac() {
+<span class="nc" id="L72">            return explicitLac;</span>
+        }
+
+        private void setExplicitLac(long explicitLac) {
+<span class="nc" id="L76">            this.explicitLac = explicitLac;</span>
+<span class="nc" id="L77">        }</span>
+
+        private long getPiggyBackedLac() {
+<span class="nc" id="L80">            return piggyBackedLac;</span>
+        }
+
+        public void setPiggyBackedLac(long piggyBackedLac) {
+<span class="nc" id="L84">            this.piggyBackedLac = piggyBackedLac;</span>
+<span class="nc" id="L85">        }</span>
+
+        private void scheduleExplictLacFlush() {
+<span class="nc" id="L88">            final SafeRunnable updateLacTask = new SafeRunnable() {</span>
+                @Override
+                public void safeRun() {
+                    // Made progress since previous explicitLAC through
+                    // Piggyback, so no need to send an explicit LAC update to
+                    // bookies.
+<span class="nc bnc" id="L94" title="All 2 branches missed.">                    if (getExplicitLac() &lt; getPiggyBackedLac()) {</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L96">                            LOG.debug(&quot;ledgerid: {}&quot;, lh.getId());</span>
+<span class="nc" id="L97">                            LOG.debug(&quot;explicitLac:{} piggybackLac:{}&quot;, getExplicitLac(), getPiggyBackedLac());</span>
+                        }
+<span class="nc" id="L99">                        setExplicitLac(getPiggyBackedLac());</span>
+<span class="nc" id="L100">                        return;</span>
+                    }
+
+<span class="nc bnc" id="L103" title="All 2 branches missed.">                    if (lh.getLastAddConfirmed() &gt; getExplicitLac()) {</span>
+                        // Send Explicit LAC
+<span class="nc bnc" id="L105" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L106">                            LOG.debug(&quot;ledgerid: {}&quot;, lh.getId());</span>
+                        }
+<span class="nc" id="L108">                        asyncExplicitLacFlush(lh.getLastAddConfirmed());</span>
+<span class="nc" id="L109">                        setExplicitLac(lh.getLastAddConfirmed());</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L111">                            LOG.debug(&quot;After sending explict LAC lac: {}  explicitLac:{}&quot;, lh.getLastAddConfirmed(),</span>
+<span class="nc" id="L112">                                    getExplicitLac());</span>
+                        }
+                    }
+<span class="nc" id="L115">                }</span>
+
+                @Override
+                public String toString() {
+<span class="nc" id="L119">                    return String.format(&quot;UpdateLacTask ledgerId - (%d)&quot;, lh.getId());</span>
+                }
+            };
+            try {
+<span class="nc" id="L123">                long explicitLacIntervalInMs = clientCtx.getConf().explicitLacInterval;</span>
+<span class="nc" id="L124">                scheduledFuture = clientCtx.getScheduler().scheduleAtFixedRateOrdered(lh.getId(), updateLacTask,</span>
+                        explicitLacIntervalInMs, explicitLacIntervalInMs, TimeUnit.MILLISECONDS);
+<span class="nc" id="L126">            } catch (RejectedExecutionException re) {</span>
+<span class="nc" id="L127">                LOG.error(&quot;Scheduling of ExplictLastAddConfirmedFlush for ledger: {} has failed.&quot;, lh.getId(), re);</span>
+<span class="nc" id="L128">            }</span>
+<span class="nc" id="L129">        }</span>
+
+        /**
+         * Make a LastAddUpdate request.
+         */
+        void asyncExplicitLacFlush(final long explicitLac) {
+<span class="nc" id="L135">            final LastAddConfirmedCallback cb = LastAddConfirmedCallback.INSTANCE;</span>
+<span class="nc" id="L136">            final PendingWriteLacOp op = new PendingWriteLacOp(lh, clientCtx, lh.getCurrentEnsemble(), cb, null);</span>
+<span class="nc" id="L137">            op.setLac(explicitLac);</span>
+            try {
+<span class="nc bnc" id="L139" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L140">                    LOG.debug(&quot;Sending Explicit LAC: {}&quot;, explicitLac);</span>
+                }
+<span class="nc" id="L142">                clientCtx.getMainWorkerPool().submit(new SafeRunnable() {</span>
+                    @Override
+                    public void safeRun() {
+<span class="nc" id="L145">                        ByteBufList toSend = lh.macManager</span>
+<span class="nc" id="L146">                                .computeDigestAndPackageForSendingLac(lh.getLastAddConfirmed());</span>
+<span class="nc" id="L147">                        op.initiate(toSend);</span>
+<span class="nc" id="L148">                    }</span>
+                });
+<span class="nc" id="L150">            } catch (RejectedExecutionException e) {</span>
+<span class="nc" id="L151">                cb.addLacComplete(BookKeeper.getReturnRc(clientCtx.getBookieClient(),</span>
+                                                         BKException.Code.InterruptedException),
+                                  lh, null);
+<span class="nc" id="L154">            }</span>
+<span class="nc" id="L155">        }</span>
+
+        @Override
+        public void stopExplicitLacFlush() {
+<span class="nc" id="L159">            scheduledFuture.cancel(true);</span>
+<span class="nc" id="L160">        }</span>
+
+        @Override
+        public void updatePiggyBackedLac(long piggyBackedLac) {
+<span class="nc" id="L164">            setPiggyBackedLac(piggyBackedLac);</span>
+<span class="nc" id="L165">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

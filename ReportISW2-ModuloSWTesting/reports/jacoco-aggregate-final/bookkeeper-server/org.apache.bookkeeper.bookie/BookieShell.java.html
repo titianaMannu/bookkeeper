@@ -1,0 +1,2422 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>BookieShell.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">BookieShell.java</span></div><h1>BookieShell.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import static org.apache.bookkeeper.meta.MetadataDrivers.runFunctionWithLedgerManagerFactory;
+import com.google.common.annotations.VisibleForTesting;
+import java.io.File;
+import java.io.IOException;
+import java.io.Serializable;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileTime;
+import java.sql.Timestamp;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+import org.apache.bookkeeper.client.LedgerEntry;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.common.annotation.InterfaceAudience.Private;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.meta.LedgerUnderreplicationManager;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.replication.ReplicationException;
+import org.apache.bookkeeper.tools.cli.commands.autorecovery.ListUnderReplicatedCommand;
+import org.apache.bookkeeper.tools.cli.commands.autorecovery.LostBookieRecoveryDelayCommand;
+import org.apache.bookkeeper.tools.cli.commands.autorecovery.ToggleCommand;
+import org.apache.bookkeeper.tools.cli.commands.autorecovery.TriggerAuditCommand;
+import org.apache.bookkeeper.tools.cli.commands.autorecovery.WhoIsAuditorCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.ConvertToDBStorageCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.ConvertToInterleavedStorageCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.FlipBookieIdCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.FormatCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.InitCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.LastMarkCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.LedgerCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.ListActiveLedgersCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.ListFilesOnDiscCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.ListLedgersCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.LocalConsistencyCheckCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.ReadJournalCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.ReadLedgerCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.ReadLogCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.ReadLogMetadataCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.RebuildDBLedgerLocationsIndexCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.RegenerateInterleavedStorageIndexFileCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.SanityTestCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookie.UpdateBookieInLedgerCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookies.DecommissionCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookies.EndpointInfoCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookies.InfoCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookies.InstanceIdCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookies.ListBookiesCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookies.MetaFormatCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookies.NukeExistingClusterCommand;
+import org.apache.bookkeeper.tools.cli.commands.bookies.NukeExistingClusterCommand.NukeExistingClusterFlags;
+import org.apache.bookkeeper.tools.cli.commands.bookies.RecoverCommand;
+import org.apache.bookkeeper.tools.cli.commands.client.DeleteLedgerCommand;
+import org.apache.bookkeeper.tools.cli.commands.client.LedgerMetaDataCommand;
+import org.apache.bookkeeper.tools.cli.commands.client.SimpleTestCommand;
+import org.apache.bookkeeper.tools.cli.commands.cookie.AdminCommand;
+import org.apache.bookkeeper.tools.cli.commands.cookie.CreateCookieCommand;
+import org.apache.bookkeeper.tools.cli.commands.cookie.DeleteCookieCommand;
+import org.apache.bookkeeper.tools.cli.commands.cookie.GenerateCookieCommand;
+import org.apache.bookkeeper.tools.cli.commands.cookie.GetCookieCommand;
+import org.apache.bookkeeper.tools.cli.commands.cookie.UpdateCookieCommand;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.util.EntryFormatter;
+import org.apache.bookkeeper.util.LedgerIdFormatter;
+import org.apache.bookkeeper.util.Tool;
+import org.apache.commons.cli.BasicParser;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.MissingArgumentException;
+import org.apache.commons.cli.Option;
+import org.apache.commons.cli.OptionBuilder;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
+import org.apache.commons.configuration.CompositeConfiguration;
+import org.apache.commons.configuration.PropertiesConfiguration;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.lang.StringUtils;
+import org.apache.zookeeper.KeeperException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Bookie Shell is to provide utilities for users to administer a bookkeeper cluster.
+ */
+public class BookieShell implements Tool {
+
+<span class="nc" id="L115">    static final Logger LOG = LoggerFactory.getLogger(BookieShell.class);</span>
+
+    static final String CONF_OPT = &quot;conf&quot;;
+    static final String ENTRY_FORMATTER_OPT = &quot;entryformat&quot;;
+    static final String LEDGERID_FORMATTER_OPT = &quot;ledgeridformat&quot;;
+
+    static final String CMD_METAFORMAT = &quot;metaformat&quot;;
+    static final String CMD_INITBOOKIE = &quot;initbookie&quot;;
+    static final String CMD_INITNEWCLUSTER = &quot;initnewcluster&quot;;
+    static final String CMD_NUKEEXISTINGCLUSTER = &quot;nukeexistingcluster&quot;;
+    static final String CMD_BOOKIEFORMAT = &quot;bookieformat&quot;;
+    static final String CMD_RECOVER = &quot;recover&quot;;
+    static final String CMD_LEDGER = &quot;ledger&quot;;
+    static final String CMD_READ_LEDGER_ENTRIES = &quot;readledger&quot;;
+    static final String CMD_LISTLEDGERS = &quot;listledgers&quot;;
+    static final String CMD_LEDGERMETADATA = &quot;ledgermetadata&quot;;
+    static final String CMD_LISTUNDERREPLICATED = &quot;listunderreplicated&quot;;
+    static final String CMD_WHOISAUDITOR = &quot;whoisauditor&quot;;
+    static final String CMD_WHATISINSTANCEID = &quot;whatisinstanceid&quot;;
+    static final String CMD_SIMPLETEST = &quot;simpletest&quot;;
+    static final String CMD_BOOKIESANITYTEST = &quot;bookiesanity&quot;;
+    static final String CMD_READLOG = &quot;readlog&quot;;
+    static final String CMD_READLOGMETADATA = &quot;readlogmetadata&quot;;
+    static final String CMD_READJOURNAL = &quot;readjournal&quot;;
+    static final String CMD_LASTMARK = &quot;lastmark&quot;;
+    static final String CMD_AUTORECOVERY = &quot;autorecovery&quot;;
+    static final String CMD_LISTBOOKIES = &quot;listbookies&quot;;
+    static final String CMD_LISTFILESONDISC = &quot;listfilesondisc&quot;;
+    static final String CMD_UPDATECOOKIE = &quot;updatecookie&quot;;
+    static final String CMD_UPDATELEDGER = &quot;updateledgers&quot;;
+    static final String CMD_UPDATE_BOOKIE_IN_LEDGER = &quot;updateBookieInLedger&quot;;
+    static final String CMD_DELETELEDGER = &quot;deleteledger&quot;;
+    static final String CMD_BOOKIEINFO = &quot;bookieinfo&quot;;
+    static final String CMD_ACTIVE_LEDGERS_ON_ENTRY_LOG_FILE = &quot;activeledgers&quot;;
+    static final String CMD_DECOMMISSIONBOOKIE = &quot;decommissionbookie&quot;;
+    static final String CMD_ENDPOINTINFO = &quot;endpointinfo&quot;;
+    static final String CMD_LOSTBOOKIERECOVERYDELAY = &quot;lostbookierecoverydelay&quot;;
+    static final String CMD_TRIGGERAUDIT = &quot;triggeraudit&quot;;
+    static final String CMD_FORCEAUDITCHECKS = &quot;forceauditchecks&quot;;
+    static final String CMD_CONVERT_TO_DB_STORAGE = &quot;convert-to-db-storage&quot;;
+    static final String CMD_CONVERT_TO_INTERLEAVED_STORAGE = &quot;convert-to-interleaved-storage&quot;;
+    static final String CMD_REBUILD_DB_LEDGER_LOCATIONS_INDEX = &quot;rebuild-db-ledger-locations-index&quot;;
+    static final String CMD_REGENERATE_INTERLEAVED_STORAGE_INDEX_FILE = &quot;regenerate-interleaved-storage-index-file&quot;;
+
+    // cookie commands
+    static final String CMD_CREATE_COOKIE = &quot;cookie_create&quot;;
+    static final String CMD_DELETE_COOKIE = &quot;cookie_delete&quot;;
+    static final String CMD_UPDATE_COOKIE = &quot;cookie_update&quot;;
+    static final String CMD_GET_COOKIE = &quot;cookie_get&quot;;
+    static final String CMD_GENERATE_COOKIE = &quot;cookie_generate&quot;;
+
+    static final String CMD_HELP = &quot;help&quot;;
+    static final String CMD_LOCALCONSISTENCYCHECK = &quot;localconsistencycheck&quot;;
+
+<span class="nc" id="L169">    final ServerConfiguration bkConf = new ServerConfiguration();</span>
+    File[] indexDirectories;
+    File[] ledgerDirectories;
+    File[] journalDirectories;
+
+<span class="nc" id="L174">    EntryLogger entryLogger = null;</span>
+<span class="nc" id="L175">    List&lt;Journal&gt; journals = null;</span>
+    EntryFormatter entryFormatter;
+    LedgerIdFormatter ledgerIdFormatter;
+
+    int pageSize;
+    int entriesPerPage;
+
+<span class="nc" id="L182">    public BookieShell() {</span>
+<span class="nc" id="L183">    }</span>
+
+<span class="nc" id="L185">    public BookieShell(LedgerIdFormatter ledgeridFormatter, EntryFormatter entryFormatter) {</span>
+<span class="nc" id="L186">        this.ledgerIdFormatter = ledgeridFormatter;</span>
+<span class="nc" id="L187">        this.entryFormatter = entryFormatter;</span>
+<span class="nc" id="L188">    }</span>
+
+    /**
+     * BookieShell command.
+     */
+    @Private
+    public interface Command {
+        int runCmd(String[] args) throws Exception;
+
+        String description();
+
+        void printUsage();
+    }
+
+    void printInfoLine(String s) {
+<span class="nc" id="L203">        System.out.println(s);</span>
+<span class="nc" id="L204">    }</span>
+
+    void printErrorLine(String s) {
+<span class="nc" id="L207">        System.err.println(s);</span>
+<span class="nc" id="L208">    }</span>
+
+    abstract class MyCommand implements Command {
+        abstract Options getOptions();
+
+        abstract String getDescription();
+
+        abstract String getUsage();
+
+        abstract int runCmd(CommandLine cmdLine) throws Exception;
+
+        String cmdName;
+
+<span class="nc" id="L221">        MyCommand(String cmdName) {</span>
+<span class="nc" id="L222">            this.cmdName = cmdName;</span>
+<span class="nc" id="L223">        }</span>
+
+        @Override
+        public String description() {
+            // we used the string returned by `getUsage` as description in showing the list of commands
+<span class="nc" id="L228">            return getUsage();</span>
+        }
+
+        @Override
+        public int runCmd(String[] args) throws Exception {
+            try {
+<span class="nc" id="L234">                BasicParser parser = new BasicParser();</span>
+<span class="nc" id="L235">                CommandLine cmdLine = parser.parse(getOptions(), args);</span>
+<span class="nc" id="L236">                return runCmd(cmdLine);</span>
+<span class="nc" id="L237">            } catch (ParseException e) {</span>
+<span class="nc" id="L238">                LOG.error(&quot;Error parsing command line arguments : &quot;, e);</span>
+<span class="nc" id="L239">                printUsage();</span>
+<span class="nc" id="L240">                return -1;</span>
+            }
+        }
+
+        @Override
+        public void printUsage() {
+<span class="nc" id="L246">            HelpFormatter hf = new HelpFormatter();</span>
+<span class="nc" id="L247">            System.err.println(cmdName + &quot;: &quot; + getDescription());</span>
+<span class="nc" id="L248">            hf.printHelp(getUsage(), getOptions());</span>
+<span class="nc" id="L249">        }</span>
+    }
+
+    /**
+     * Format the bookkeeper metadata present in zookeeper.
+     */
+    class MetaFormatCmd extends MyCommand {
+<span class="nc" id="L256">        Options opts = new Options();</span>
+
+<span class="nc" id="L258">        MetaFormatCmd() {</span>
+<span class="nc" id="L259">            super(CMD_METAFORMAT);</span>
+<span class="nc" id="L260">            opts.addOption(&quot;n&quot;, &quot;nonInteractive&quot;, false,</span>
+                    &quot;Whether to confirm if old data exists..?&quot;);
+<span class="nc" id="L262">            opts.addOption(&quot;f&quot;, &quot;force&quot;, false,</span>
+                    &quot;If [nonInteractive] is specified, then whether&quot;
+                            + &quot; to force delete the old data without prompt.&quot;);
+<span class="nc" id="L265">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L269">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L274">            return &quot;Format bookkeeper metadata in zookeeper.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L279">            return &quot;metaformat   [-nonInteractive] [-force]&quot;;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc bnc" id="L284" title="All 2 branches missed.">            boolean interactive = (!cmdLine.hasOption(&quot;n&quot;));</span>
+<span class="nc" id="L285">            boolean force = cmdLine.hasOption(&quot;f&quot;);</span>
+
+<span class="nc" id="L287">            MetaFormatCommand cmd = new MetaFormatCommand();</span>
+<span class="nc" id="L288">            MetaFormatCommand.MetaFormatFlags flags = new MetaFormatCommand.MetaFormatFlags()</span>
+<span class="nc" id="L289">                .interactive(interactive).force(force);</span>
+<span class="nc" id="L290">            boolean result = cmd.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L291" title="All 2 branches missed.">            return result ? 0 : 1;</span>
+        }
+    }
+
+    /**
+     * Intializes new cluster by creating required znodes for the cluster. If
+     * ledgersrootpath is already existing then it will error out. If for any
+     * reason it errors out while creating znodes for the cluster, then before
+     * running initnewcluster again, try nuking existing cluster by running
+     * nukeexistingcluster. This is required because ledgersrootpath znode would
+     * be created after verifying that it doesn't exist, hence during next retry
+     * of initnewcluster it would complain saying that ledgersrootpath is
+     * already existing.
+     */
+    class InitNewCluster extends MyCommand {
+<span class="nc" id="L306">        Options opts = new Options();</span>
+
+<span class="nc" id="L308">        InitNewCluster() {</span>
+<span class="nc" id="L309">            super(CMD_INITNEWCLUSTER);</span>
+<span class="nc" id="L310">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L314">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L319">            return &quot;Initializes a new bookkeeper cluster. If initnewcluster fails then try nuking &quot;</span>
+                    + &quot;existing cluster by running nukeexistingcluster before running initnewcluster again&quot;;
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L325">            return &quot;initnewcluster&quot;;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L330">            org.apache.bookkeeper.tools.cli.commands.bookies.InitCommand initCommand =</span>
+                new org.apache.bookkeeper.tools.cli.commands.bookies.InitCommand();
+<span class="nc" id="L332">            boolean result = initCommand.apply(bkConf, new CliFlags());</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">            return (result) ? 0 : 1;</span>
+        }
+    }
+
+    /**
+     * Nuke bookkeeper metadata of existing cluster in zookeeper.
+     */
+    class NukeExistingCluster extends MyCommand {
+<span class="nc" id="L341">        Options opts = new Options();</span>
+
+<span class="nc" id="L343">        NukeExistingCluster() {</span>
+<span class="nc" id="L344">            super(CMD_NUKEEXISTINGCLUSTER);</span>
+<span class="nc" id="L345">            opts.addOption(&quot;p&quot;, &quot;zkledgersrootpath&quot;, true, &quot;zookeeper ledgers rootpath&quot;);</span>
+<span class="nc" id="L346">            opts.addOption(&quot;i&quot;, &quot;instanceid&quot;, true, &quot;instanceid&quot;);</span>
+<span class="nc" id="L347">            opts.addOption(&quot;f&quot;, &quot;force&quot;, false,</span>
+                    &quot;If instanceid is not specified, &quot;
+                    + &quot;then whether to force nuke the metadata without validating instanceid&quot;);
+<span class="nc" id="L350">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L354">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L359">            return &quot;Nuke bookkeeper cluster by deleting metadata&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L364">            return &quot;nukeexistingcluster -zkledgersrootpath &lt;zkledgersrootpath&gt; [-instanceid &lt;instanceid&gt; | -force]&quot;;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L369">            boolean force = cmdLine.hasOption(&quot;f&quot;);</span>
+<span class="nc" id="L370">            String zkledgersrootpath = cmdLine.getOptionValue(&quot;zkledgersrootpath&quot;);</span>
+<span class="nc" id="L371">            String instanceid = cmdLine.getOptionValue(&quot;instanceid&quot;);</span>
+
+<span class="nc" id="L373">            NukeExistingClusterCommand cmd = new NukeExistingClusterCommand();</span>
+<span class="nc" id="L374">            NukeExistingClusterFlags flags = new NukeExistingClusterFlags().force(force)</span>
+<span class="nc" id="L375">                                                                           .zkLedgersRootPath(zkledgersrootpath)</span>
+<span class="nc" id="L376">                                                                           .instandId(instanceid);</span>
+<span class="nc" id="L377">            boolean result = cmd.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L378" title="All 2 branches missed.">            return (result) ? 0 : 1;</span>
+        }
+    }
+
+    /**
+     * Formats the local data present in current bookie server.
+     */
+    class BookieFormatCmd extends MyCommand {
+<span class="nc" id="L386">        Options opts = new Options();</span>
+
+<span class="nc" id="L388">        public BookieFormatCmd() {</span>
+<span class="nc" id="L389">            super(CMD_BOOKIEFORMAT);</span>
+<span class="nc" id="L390">            opts.addOption(&quot;n&quot;, &quot;nonInteractive&quot;, false,</span>
+                    &quot;Whether to confirm if old data exists..?&quot;);
+<span class="nc" id="L392">            opts.addOption(&quot;f&quot;, &quot;force&quot;, false,</span>
+                    &quot;If [nonInteractive] is specified, then whether&quot;
+                            + &quot; to force delete the old data without prompt..?&quot;);
+<span class="nc" id="L395">            opts.addOption(&quot;d&quot;, &quot;deleteCookie&quot;, false, &quot;Delete its cookie on metadata store&quot;);</span>
+<span class="nc" id="L396">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L400">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L405">            return &quot;Format the current server contents.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L410">            return &quot;bookieformat [-nonInteractive] [-force] [-deleteCookie]&quot;;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc bnc" id="L415" title="All 2 branches missed.">            boolean interactive = (!cmdLine.hasOption(&quot;n&quot;));</span>
+<span class="nc" id="L416">            boolean force = cmdLine.hasOption(&quot;f&quot;);</span>
+<span class="nc" id="L417">            boolean deletecookie = cmdLine.hasOption(&quot;d&quot;);</span>
+
+<span class="nc" id="L419">            FormatCommand.Flags flags = new FormatCommand.Flags()</span>
+<span class="nc" id="L420">                .nonInteractive(interactive)</span>
+<span class="nc" id="L421">                .force(force)</span>
+<span class="nc" id="L422">                .deleteCookie(deletecookie);</span>
+<span class="nc" id="L423">            FormatCommand command = new FormatCommand(flags);</span>
+<span class="nc" id="L424">            boolean result = command.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">            return (result) ? 0 : 1;</span>
+        }
+    }
+
+    /**
+     * Initializes bookie, by making sure that the journalDir, ledgerDirs and
+     * indexDirs are empty and there is no registered Bookie with this BookieId.
+     */
+    class InitBookieCmd extends MyCommand {
+<span class="nc" id="L434">        Options opts = new Options();</span>
+
+<span class="nc" id="L436">        public InitBookieCmd() {</span>
+<span class="nc" id="L437">            super(CMD_INITBOOKIE);</span>
+<span class="nc" id="L438">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L442">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L447">            return &quot;Initialize new Bookie&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L452">            return CMD_INITBOOKIE;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L457">            ServerConfiguration conf = new ServerConfiguration(bkConf);</span>
+<span class="nc" id="L458">            InitCommand initCommand = new InitCommand();</span>
+<span class="nc" id="L459">            boolean result = initCommand.apply(conf, new CliFlags());</span>
+<span class="nc bnc" id="L460" title="All 2 branches missed.">            return (result) ? 0 : 1;</span>
+        }
+    }
+
+    /**
+     * Recover command for ledger data recovery for failed bookie.
+     */
+    class RecoverCmd extends MyCommand {
+<span class="nc" id="L468">        Options opts = new Options();</span>
+
+<span class="nc" id="L470">        public RecoverCmd() {</span>
+<span class="nc" id="L471">            super(CMD_RECOVER);</span>
+<span class="nc" id="L472">            opts.addOption(&quot;q&quot;, &quot;query&quot;, false, &quot;Query the ledgers that contain given bookies&quot;);</span>
+<span class="nc" id="L473">            opts.addOption(&quot;dr&quot;, &quot;dryrun&quot;, false, &quot;Printing the recovery plan w/o doing actual recovery&quot;);</span>
+<span class="nc" id="L474">            opts.addOption(&quot;f&quot;, &quot;force&quot;, false, &quot;Force recovery without confirmation&quot;);</span>
+<span class="nc" id="L475">            opts.addOption(&quot;l&quot;, &quot;ledger&quot;, true, &quot;Recover a specific ledger&quot;);</span>
+<span class="nc" id="L476">            opts.addOption(&quot;sk&quot;, &quot;skipOpenLedgers&quot;, false, &quot;Skip recovering open ledgers&quot;);</span>
+<span class="nc" id="L477">            opts.addOption(&quot;d&quot;, &quot;deleteCookie&quot;, false, &quot;Delete cookie node for the bookie.&quot;);</span>
+<span class="nc" id="L478">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L482">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L487">            return &quot;Recover the ledger data for failed bookie.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L492">            return &quot;recover [-deleteCookie] &lt;bookieSrc[:bookieSrc]&gt;&quot;;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L497">            String[] args = cmdLine.getArgs();</span>
+<span class="nc bnc" id="L498" title="All 2 branches missed.">            if (args.length &lt; 1) {</span>
+<span class="nc" id="L499">                throw new MissingArgumentException(</span>
+                        &quot;'bookieSrc' argument required&quot;);
+            }
+<span class="nc bnc" id="L502" title="All 2 branches missed.">            if (args.length &gt; 1) {</span>
+<span class="nc" id="L503">                System.err.println(&quot;The provided bookie dest &quot; + args[1] + &quot; will be ignored!&quot;);</span>
+            }
+<span class="nc" id="L505">            boolean query = cmdLine.hasOption(&quot;q&quot;);</span>
+<span class="nc" id="L506">            boolean dryrun = cmdLine.hasOption(&quot;dr&quot;);</span>
+<span class="nc" id="L507">            boolean force = cmdLine.hasOption(&quot;f&quot;);</span>
+<span class="nc" id="L508">            boolean skipOpenLedgers = cmdLine.hasOption(&quot;sk&quot;);</span>
+<span class="nc bnc" id="L509" title="All 4 branches missed.">            boolean removeCookies = !dryrun &amp;&amp; cmdLine.hasOption(&quot;d&quot;);</span>
+
+<span class="nc" id="L511">            Long ledgerId = getOptionLedgerIdValue(cmdLine, &quot;ledger&quot;, -1);</span>
+
+<span class="nc" id="L513">            RecoverCommand cmd = new RecoverCommand();</span>
+<span class="nc" id="L514">            RecoverCommand.RecoverFlags flags = new RecoverCommand.RecoverFlags();</span>
+<span class="nc" id="L515">            flags.bookieAddress(args[0]);</span>
+<span class="nc" id="L516">            flags.deleteCookie(removeCookies);</span>
+<span class="nc" id="L517">            flags.dryRun(dryrun);</span>
+<span class="nc" id="L518">            flags.force(force);</span>
+<span class="nc" id="L519">            flags.ledger(ledgerId);</span>
+<span class="nc" id="L520">            flags.skipOpenLedgers(skipOpenLedgers);</span>
+<span class="nc" id="L521">            flags.query(query);</span>
+<span class="nc" id="L522">            boolean result = cmd.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L523" title="All 2 branches missed.">            return (result) ? 0 : -1;</span>
+        }
+    }
+
+    /**
+     * Ledger Command Handles ledger related operations.
+     */
+    class LedgerCmd extends MyCommand {
+<span class="nc" id="L531">        Options lOpts = new Options();</span>
+
+<span class="nc" id="L533">        LedgerCmd() {</span>
+<span class="nc" id="L534">            super(CMD_LEDGER);</span>
+<span class="nc" id="L535">            lOpts.addOption(&quot;m&quot;, &quot;meta&quot;, false, &quot;Print meta information&quot;);</span>
+<span class="nc" id="L536">        }</span>
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L540">            LedgerCommand cmd = new LedgerCommand(ledgerIdFormatter);</span>
+<span class="nc" id="L541">            cmd.setPrint(BookieShell.this::printInfoLine);</span>
+<span class="nc" id="L542">            LedgerCommand.LedgerFlags flags = new LedgerCommand.LedgerFlags();</span>
+<span class="nc bnc" id="L543" title="All 2 branches missed.">            if (cmdLine.hasOption(&quot;m&quot;)) {</span>
+<span class="nc" id="L544">                flags.meta(true);</span>
+            }
+<span class="nc" id="L546">            flags.ledgerId(Long.parseLong(cmdLine.getArgs()[0]));</span>
+<span class="nc" id="L547">            boolean result = cmd.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L548" title="All 2 branches missed.">            return (result) ? 0 : 1;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L553">            return &quot;Dump ledger index entries into readable format.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L558">            return &quot;ledger       [-m] &lt;ledger_id&gt;&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L563">            return lOpts;</span>
+        }
+    }
+
+    /**
+     * Command for reading ledger entries.
+     */
+    class ReadLedgerEntriesCmd extends MyCommand {
+<span class="nc" id="L571">        Options lOpts = new Options();</span>
+
+<span class="nc" id="L573">        ReadLedgerEntriesCmd() {</span>
+<span class="nc" id="L574">            super(CMD_READ_LEDGER_ENTRIES);</span>
+<span class="nc" id="L575">            lOpts.addOption(&quot;m&quot;, &quot;msg&quot;, false, &quot;Print message body&quot;);</span>
+<span class="nc" id="L576">            lOpts.addOption(&quot;l&quot;, &quot;ledgerid&quot;, true, &quot;Ledger ID&quot;);</span>
+<span class="nc" id="L577">            lOpts.addOption(&quot;fe&quot;, &quot;firstentryid&quot;, true, &quot;First EntryID&quot;);</span>
+<span class="nc" id="L578">            lOpts.addOption(&quot;le&quot;, &quot;lastentryid&quot;, true, &quot;Last EntryID&quot;);</span>
+<span class="nc" id="L579">            lOpts.addOption(&quot;r&quot;, &quot;force-recovery&quot;, false,</span>
+                &quot;Ensure the ledger is properly closed before reading&quot;);
+<span class="nc" id="L581">            lOpts.addOption(&quot;b&quot;, &quot;bookie&quot;, true, &quot;Only read from a specific bookie&quot;);</span>
+<span class="nc" id="L582">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L586">            return lOpts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L591">            return &quot;Read a range of entries from a ledger.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L596">            return &quot;readledger  [-bookie &lt;address:port&gt;]  [-msg] -ledgerid &lt;ledgerid&gt; &quot;</span>
+                    + &quot;[-firstentryid &lt;firstentryid&gt; [-lastentryid &lt;lastentryid&gt;]] &quot;
+                    + &quot;[-force-recovery]&quot;;
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L603">            final long ledgerId = getOptionLedgerIdValue(cmdLine, &quot;ledgerid&quot;, -1);</span>
+<span class="nc" id="L604">            final long firstEntry = getOptionLongValue(cmdLine, &quot;firstentryid&quot;, 0);</span>
+<span class="nc" id="L605">            long lastEntry = getOptionLongValue(cmdLine, &quot;lastentryid&quot;, -1);</span>
+
+<span class="nc" id="L607">            boolean printMsg = cmdLine.hasOption(&quot;m&quot;);</span>
+<span class="nc" id="L608">            boolean forceRecovery = cmdLine.hasOption(&quot;r&quot;);</span>
+            final BookieId bookie;
+            String bookieAddress;
+<span class="nc bnc" id="L611" title="All 2 branches missed.">            if (cmdLine.hasOption(&quot;b&quot;)) {</span>
+                // A particular bookie was specified
+<span class="nc" id="L613">                bookieAddress = cmdLine.getOptionValue(&quot;b&quot;);</span>
+            } else {
+<span class="nc" id="L615">                bookieAddress = null;</span>
+            }
+
+<span class="nc" id="L618">            ReadLedgerCommand cmd = new ReadLedgerCommand(entryFormatter, ledgerIdFormatter);</span>
+<span class="nc" id="L619">            ReadLedgerCommand.ReadLedgerFlags flags = new ReadLedgerCommand.ReadLedgerFlags();</span>
+<span class="nc" id="L620">            flags.bookieAddresss(bookieAddress);</span>
+<span class="nc" id="L621">            flags.firstEntryId(firstEntry);</span>
+<span class="nc" id="L622">            flags.forceRecovery(forceRecovery);</span>
+<span class="nc" id="L623">            flags.lastEntryId(lastEntry);</span>
+<span class="nc" id="L624">            flags.ledgerId(ledgerId);</span>
+<span class="nc" id="L625">            flags.msg(printMsg);</span>
+<span class="nc" id="L626">            cmd.apply(bkConf, flags);</span>
+<span class="nc" id="L627">            return 0;</span>
+        }
+
+    }
+
+    /**
+     * Command for listing underreplicated ledgers.
+     */
+    class ListUnderreplicatedCmd extends MyCommand {
+<span class="nc" id="L636">        Options opts = new Options();</span>
+
+<span class="nc" id="L638">        public ListUnderreplicatedCmd() {</span>
+<span class="nc" id="L639">            super(CMD_LISTUNDERREPLICATED);</span>
+<span class="nc" id="L640">            opts.addOption(&quot;missingreplica&quot;, true, &quot;Bookie Id of missing replica&quot;);</span>
+<span class="nc" id="L641">            opts.addOption(&quot;excludingmissingreplica&quot;, true, &quot;Bookie Id of missing replica to ignore&quot;);</span>
+<span class="nc" id="L642">            opts.addOption(&quot;printmissingreplica&quot;, false, &quot;Whether to print missingreplicas list?&quot;);</span>
+<span class="nc" id="L643">            opts.addOption(&quot;printreplicationworkerid&quot;, false, &quot;Whether to print replicationworkerid?&quot;);</span>
+<span class="nc" id="L644">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L648">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L653">            return &quot;List ledgers marked as underreplicated, with optional options to specify missingreplica&quot;</span>
+                    + &quot; (BookieId) and to exclude missingreplica.&quot;;
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L659">            return &quot;listunderreplicated [[-missingreplica &lt;bookieaddress&gt;]&quot;</span>
+                    + &quot; [-excludingmissingreplica &lt;bookieaddress&gt;]] [-printmissingreplica] [-printreplicationworkerid]&quot;;
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+
+<span class="nc" id="L666">            final String includingBookieId = cmdLine.getOptionValue(&quot;missingreplica&quot;);</span>
+<span class="nc" id="L667">            final String excludingBookieId = cmdLine.getOptionValue(&quot;excludingmissingreplica&quot;);</span>
+<span class="nc" id="L668">            final boolean printMissingReplica = cmdLine.hasOption(&quot;printmissingreplica&quot;);</span>
+<span class="nc" id="L669">            final boolean printReplicationWorkerId = cmdLine.hasOption(&quot;printreplicationworkerid&quot;);</span>
+
+<span class="nc" id="L671">            ListUnderReplicatedCommand.LURFlags flags = new ListUnderReplicatedCommand.LURFlags()</span>
+<span class="nc" id="L672">                                                            .missingReplica(includingBookieId)</span>
+<span class="nc" id="L673">                                                            .excludingMissingReplica(excludingBookieId)</span>
+<span class="nc" id="L674">                                                            .printMissingReplica(printMissingReplica)</span>
+<span class="nc" id="L675">                                                            .printReplicationWorkerId(printReplicationWorkerId);</span>
+<span class="nc" id="L676">            ListUnderReplicatedCommand cmd = new ListUnderReplicatedCommand(ledgerIdFormatter);</span>
+<span class="nc" id="L677">            cmd.apply(bkConf, flags);</span>
+<span class="nc" id="L678">            return 0;</span>
+        }
+    }
+
+    static final int LIST_BATCH_SIZE = 1000;
+
+    /**
+     * Command to list all ledgers in the cluster.
+     */
+    class ListLedgersCmd extends MyCommand {
+<span class="nc" id="L688">        Options lOpts = new Options();</span>
+
+<span class="nc" id="L690">        ListLedgersCmd() {</span>
+<span class="nc" id="L691">            super(CMD_LISTLEDGERS);</span>
+<span class="nc" id="L692">            lOpts.addOption(&quot;m&quot;, &quot;meta&quot;, false, &quot;Print metadata&quot;);</span>
+<span class="nc" id="L693">            lOpts.addOption(&quot;bookieid&quot;, true, &quot;List ledgers residing in this bookie&quot;);</span>
+<span class="nc" id="L694">        }</span>
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L698">            final boolean printMeta = cmdLine.hasOption(&quot;m&quot;);</span>
+<span class="nc" id="L699">            final String bookieidToBePartOfEnsemble = cmdLine.getOptionValue(&quot;bookieid&quot;);</span>
+
+<span class="nc" id="L701">            ListLedgersCommand.ListLedgersFlags flags = new ListLedgersCommand.ListLedgersFlags()</span>
+<span class="nc" id="L702">                                                            .bookieId(bookieidToBePartOfEnsemble).meta(printMeta);</span>
+<span class="nc" id="L703">            ListLedgersCommand cmd = new ListLedgersCommand(ledgerIdFormatter);</span>
+<span class="nc" id="L704">            cmd.apply(bkConf, flags);</span>
+
+<span class="nc" id="L706">            return 0;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L711">            return &quot;List all ledgers on the cluster (this may take a long time).&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L716">            return &quot;listledgers  [-meta] [-bookieid &lt;bookieaddress&gt;]&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L721">            return lOpts;</span>
+        }
+    }
+
+    /**
+     * List active ledgers on entry log file.
+     **/
+    class ListActiveLedgersCmd extends MyCommand {
+<span class="nc" id="L729">        Options lOpts = new Options();</span>
+
+<span class="nc" id="L731">        ListActiveLedgersCmd() {</span>
+<span class="nc" id="L732">            super(CMD_ACTIVE_LEDGERS_ON_ENTRY_LOG_FILE);</span>
+<span class="nc" id="L733">            lOpts.addOption(&quot;l&quot;, &quot;logId&quot;, true, &quot;Entry log file id&quot;);</span>
+<span class="nc" id="L734">            lOpts.addOption(&quot;t&quot;, &quot;timeout&quot;, true, &quot;Read timeout(ms)&quot;);</span>
+<span class="nc" id="L735">        }</span>
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L739">            final boolean hasTimeout = cmdLine.hasOption(&quot;t&quot;);</span>
+<span class="nc" id="L740">            final boolean hasLogId = cmdLine.hasOption(&quot;l&quot;);</span>
+<span class="nc bnc" id="L741" title="All 2 branches missed.">            if (!hasLogId){</span>
+<span class="nc" id="L742">                printUsage();</span>
+<span class="nc" id="L743">                return -1;</span>
+            }
+<span class="nc" id="L745">            final long logId = Long.parseLong(cmdLine.getOptionValue(&quot;l&quot;));</span>
+<span class="nc" id="L746">            ListActiveLedgersCommand.ActiveLedgerFlags flags = new ListActiveLedgersCommand.ActiveLedgerFlags();</span>
+<span class="nc" id="L747">            flags.logId(logId);</span>
+<span class="nc bnc" id="L748" title="All 2 branches missed.">            if (hasTimeout){</span>
+<span class="nc" id="L749">                flags.timeout(Long.parseLong(cmdLine.getOptionValue(&quot;t&quot;)));</span>
+            }
+<span class="nc" id="L751">            ListActiveLedgersCommand cmd = new ListActiveLedgersCommand(ledgerIdFormatter);</span>
+<span class="nc" id="L752">            cmd.apply(bkConf, flags);</span>
+<span class="nc" id="L753">            return 0;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L758">            return &quot;List all active ledgers on the entry log file.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L763">            return &quot;activeledgers  [-logId &lt;entry log id&gt;] [-timeout &lt;timeout&gt;] [-formatter &lt;ledger id formatter&gt;]&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L768">            return lOpts;</span>
+        }
+    }
+
+    void printLedgerMetadata(long ledgerId, LedgerMetadata md, boolean printMeta) {
+<span class="nc" id="L773">        System.out.println(&quot;ledgerID: &quot; + ledgerIdFormatter.formatLedgerId(ledgerId));</span>
+<span class="nc bnc" id="L774" title="All 2 branches missed.">        if (printMeta) {</span>
+<span class="nc" id="L775">            System.out.println(md.toString());</span>
+        }
+<span class="nc" id="L777">    }</span>
+
+    /**
+     * Print the metadata for a ledger.
+     */
+    class LedgerMetadataCmd extends MyCommand {
+<span class="nc" id="L783">        Options lOpts = new Options();</span>
+
+<span class="nc" id="L785">        LedgerMetadataCmd() {</span>
+<span class="nc" id="L786">            super(CMD_LEDGERMETADATA);</span>
+<span class="nc" id="L787">            lOpts.addOption(&quot;l&quot;, &quot;ledgerid&quot;, true, &quot;Ledger ID&quot;);</span>
+<span class="nc" id="L788">            lOpts.addOption(&quot;dumptofile&quot;, true, &quot;Dump metadata for ledger, to a file&quot;);</span>
+<span class="nc" id="L789">            lOpts.addOption(&quot;restorefromfile&quot;, true, &quot;Restore metadata for ledger, from a file&quot;);</span>
+<span class="nc" id="L790">        }</span>
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L794">            final long ledgerId = getOptionLedgerIdValue(cmdLine, &quot;ledgerid&quot;, -1);</span>
+<span class="nc bnc" id="L795" title="All 2 branches missed.">            if (ledgerId == -1) {</span>
+<span class="nc" id="L796">                System.err.println(&quot;Must specify a ledger id&quot;);</span>
+<span class="nc" id="L797">                return -1;</span>
+            }
+<span class="nc bnc" id="L799" title="All 4 branches missed.">            if (cmdLine.hasOption(&quot;dumptofile&quot;) &amp;&amp; cmdLine.hasOption(&quot;restorefromefile&quot;)) {</span>
+<span class="nc" id="L800">                System.err.println(&quot;Only one of --dumptofile and --restorefromfile can be specified&quot;);</span>
+<span class="nc" id="L801">                return -2;</span>
+            }
+
+<span class="nc" id="L804">            LedgerMetaDataCommand.LedgerMetadataFlag flag = new LedgerMetaDataCommand.LedgerMetadataFlag();</span>
+<span class="nc" id="L805">            flag.ledgerId(ledgerId);</span>
+<span class="nc bnc" id="L806" title="All 2 branches missed.">            if (cmdLine.hasOption(&quot;dumptofile&quot;)) {</span>
+<span class="nc" id="L807">                flag.dumpToFile(cmdLine.getOptionValue(&quot;dumptofile&quot;));</span>
+            }
+<span class="nc bnc" id="L809" title="All 2 branches missed.">            if (cmdLine.hasOption(&quot;restorefromfile&quot;)) {</span>
+<span class="nc" id="L810">                flag.restoreFromFile(cmdLine.getOptionValue(&quot;restorefromfile&quot;));</span>
+            }
+
+<span class="nc" id="L813">            LedgerMetaDataCommand cmd = new LedgerMetaDataCommand(ledgerIdFormatter);</span>
+<span class="nc" id="L814">            cmd.apply(bkConf, flag);</span>
+<span class="nc" id="L815">            return 0;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L820">            return &quot;Print the metadata for a ledger, or optionally dump to a file.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L825">            return &quot;ledgermetadata -ledgerid &lt;ledgerid&gt; [--dump-to-file FILENAME|--restore-from-file FILENAME]&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L830">            return lOpts;</span>
+        }
+    }
+
+    /**
+     * Check local storage for inconsistencies.
+     */
+    class LocalConsistencyCheck extends MyCommand {
+<span class="nc" id="L838">        Options lOpts = new Options();</span>
+
+<span class="nc" id="L840">        LocalConsistencyCheck() {</span>
+<span class="nc" id="L841">            super(CMD_LOCALCONSISTENCYCHECK);</span>
+<span class="nc" id="L842">        }</span>
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L846">            LocalConsistencyCheckCommand cmd = new LocalConsistencyCheckCommand();</span>
+<span class="nc" id="L847">            boolean result = cmd.apply(bkConf, new CliFlags());</span>
+<span class="nc bnc" id="L848" title="All 2 branches missed.">            return (result) ? 0 : 1;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L853">            return &quot;Validate Ledger Storage internal metadata&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L858">            return &quot;localconsistencycheck&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L863">            return lOpts;</span>
+        }
+    }
+
+    /**
+     * Simple test to create a ledger and write to it.
+     */
+    class SimpleTestCmd extends MyCommand {
+<span class="nc" id="L871">        Options lOpts = new Options();</span>
+
+<span class="nc" id="L873">        SimpleTestCmd() {</span>
+<span class="nc" id="L874">            super(CMD_SIMPLETEST);</span>
+<span class="nc" id="L875">            lOpts.addOption(&quot;e&quot;, &quot;ensemble&quot;, true, &quot;Ensemble size (default 3)&quot;);</span>
+<span class="nc" id="L876">            lOpts.addOption(&quot;w&quot;, &quot;writeQuorum&quot;, true, &quot;Write quorum size (default 2)&quot;);</span>
+<span class="nc" id="L877">            lOpts.addOption(&quot;a&quot;, &quot;ackQuorum&quot;, true, &quot;Ack quorum size (default 2)&quot;);</span>
+<span class="nc" id="L878">            lOpts.addOption(&quot;n&quot;, &quot;numEntries&quot;, true, &quot;Entries to write (default 1000)&quot;);</span>
+<span class="nc" id="L879">        }</span>
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L883">            int ensemble = getOptionIntValue(cmdLine, &quot;ensemble&quot;, 3);</span>
+<span class="nc" id="L884">            int writeQuorum = getOptionIntValue(cmdLine, &quot;writeQuorum&quot;, 2);</span>
+<span class="nc" id="L885">            int ackQuorum = getOptionIntValue(cmdLine, &quot;ackQuorum&quot;, 2);</span>
+<span class="nc" id="L886">            int numEntries = getOptionIntValue(cmdLine, &quot;numEntries&quot;, 1000);</span>
+
+<span class="nc" id="L888">            SimpleTestCommand.Flags flags = new SimpleTestCommand.Flags()</span>
+<span class="nc" id="L889">                .ensembleSize(ensemble)</span>
+<span class="nc" id="L890">                .writeQuorumSize(writeQuorum)</span>
+<span class="nc" id="L891">                .ackQuorumSize(ackQuorum)</span>
+<span class="nc" id="L892">                .numEntries(numEntries);</span>
+
+<span class="nc" id="L894">            SimpleTestCommand command = new SimpleTestCommand(flags);</span>
+
+<span class="nc" id="L896">            command.apply(bkConf, flags);</span>
+<span class="nc" id="L897">            return 0;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L902">            return &quot;Simple test to create a ledger and write entries to it.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L907">            return &quot;simpletest   [-ensemble N] [-writeQuorum N] [-ackQuorum N] [-numEntries N]&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L912">            return lOpts;</span>
+        }
+    }
+
+    /**
+     * Command to run a bookie sanity test.
+     */
+    class BookieSanityTestCmd extends MyCommand {
+<span class="nc" id="L920">        Options lOpts = new Options();</span>
+
+<span class="nc" id="L922">        BookieSanityTestCmd() {</span>
+<span class="nc" id="L923">            super(CMD_BOOKIESANITYTEST);</span>
+<span class="nc" id="L924">            lOpts.addOption(&quot;e&quot;, &quot;entries&quot;, true, &quot;Total entries to be added for the test (default 10)&quot;);</span>
+<span class="nc" id="L925">            lOpts.addOption(&quot;t&quot;, &quot;timeout&quot;, true, &quot;Timeout for write/read operations in seconds (default 1)&quot;);</span>
+<span class="nc" id="L926">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L930">            return lOpts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L935">            return &quot;Sanity test for local bookie. Create ledger and write/reads entries on local bookie.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L940">            return &quot;bookiesanity [-entries N] [-timeout N]&quot;;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L945">            SanityTestCommand command = new SanityTestCommand();</span>
+<span class="nc" id="L946">            SanityTestCommand.SanityFlags flags = new SanityTestCommand.SanityFlags();</span>
+<span class="nc" id="L947">            boolean result = command.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L948" title="All 2 branches missed.">            return (result) ? 0 : -1;</span>
+        }
+    }
+
+    /**
+     * Command to read entry log files.
+     */
+    class ReadLogCmd extends MyCommand {
+<span class="nc" id="L956">        Options rlOpts = new Options();</span>
+
+<span class="nc" id="L958">        ReadLogCmd() {</span>
+<span class="nc" id="L959">            super(CMD_READLOG);</span>
+<span class="nc" id="L960">            rlOpts.addOption(&quot;m&quot;, &quot;msg&quot;, false, &quot;Print message body&quot;);</span>
+<span class="nc" id="L961">            rlOpts.addOption(&quot;l&quot;, &quot;ledgerid&quot;, true, &quot;Ledger ID&quot;);</span>
+<span class="nc" id="L962">            rlOpts.addOption(&quot;e&quot;, &quot;entryid&quot;, true, &quot;Entry ID&quot;);</span>
+<span class="nc" id="L963">            rlOpts.addOption(&quot;sp&quot;, &quot;startpos&quot;, true, &quot;Start Position&quot;);</span>
+<span class="nc" id="L964">            rlOpts.addOption(&quot;ep&quot;, &quot;endpos&quot;, true, &quot;End Position&quot;);</span>
+<span class="nc" id="L965">        }</span>
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L969">            String[] leftArgs = cmdLine.getArgs();</span>
+<span class="nc bnc" id="L970" title="All 2 branches missed.">            if (leftArgs.length &lt;= 0) {</span>
+<span class="nc" id="L971">                System.err.println(&quot;ERROR: missing entry log id or entry log file name&quot;);</span>
+<span class="nc" id="L972">                printUsage();</span>
+<span class="nc" id="L973">                return -1;</span>
+            }
+<span class="nc" id="L975">            ReadLogCommand cmd = new ReadLogCommand(ledgerIdFormatter, entryFormatter);</span>
+<span class="nc" id="L976">            ReadLogCommand.ReadLogFlags flags = new ReadLogCommand.ReadLogFlags();</span>
+
+<span class="nc" id="L978">            boolean printMsg = false;</span>
+<span class="nc bnc" id="L979" title="All 2 branches missed.">            if (cmdLine.hasOption(&quot;m&quot;)) {</span>
+<span class="nc" id="L980">                printMsg = true;</span>
+            }
+            long logId;
+            try {
+<span class="nc" id="L984">                logId = Long.parseLong(leftArgs[0]);</span>
+<span class="nc" id="L985">                flags.entryLogId(logId);</span>
+<span class="nc" id="L986">            } catch (NumberFormatException nfe) {</span>
+                // not a entry log id
+<span class="nc" id="L988">                flags.filename(leftArgs[0]);</span>
+<span class="nc" id="L989">            }</span>
+<span class="nc" id="L990">            final long lId = getOptionLedgerIdValue(cmdLine, &quot;ledgerid&quot;, -1);</span>
+<span class="nc" id="L991">            final long eId = getOptionLongValue(cmdLine, &quot;entryid&quot;, -1);</span>
+<span class="nc" id="L992">            final long startpos = getOptionLongValue(cmdLine, &quot;startpos&quot;, -1);</span>
+<span class="nc" id="L993">            final long endpos = getOptionLongValue(cmdLine, &quot;endpos&quot;, -1);</span>
+<span class="nc" id="L994">            flags.endPos(endpos);</span>
+<span class="nc" id="L995">            flags.startPos(startpos);</span>
+<span class="nc" id="L996">            flags.entryId(eId);</span>
+<span class="nc" id="L997">            flags.ledgerId(lId);</span>
+<span class="nc" id="L998">            flags.msg(printMsg);</span>
+<span class="nc" id="L999">            boolean result = cmd.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L1000" title="All 2 branches missed.">            return (result) ? 0 : -1;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1005">            return &quot;Scan an entry file and format the entries into readable format.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1010">            return &quot;readlog      [-msg] &lt;entry_log_id | entry_log_file_name&gt; [-ledgerid &lt;ledgerid&gt; &quot;</span>
+                    + &quot;[-entryid &lt;entryid&gt;]] [-startpos &lt;startEntryLogBytePos&gt; [-endpos &lt;endEntryLogBytePos&gt;]]&quot;;
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1016">            return rlOpts;</span>
+        }
+    }
+
+    /**
+     * Command to print metadata of entrylog.
+     */
+    class ReadLogMetadataCmd extends MyCommand {
+<span class="nc" id="L1024">        Options rlOpts = new Options();</span>
+
+<span class="nc" id="L1026">        ReadLogMetadataCmd() {</span>
+<span class="nc" id="L1027">            super(CMD_READLOGMETADATA);</span>
+<span class="nc" id="L1028">        }</span>
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1032">            ReadLogMetadataCommand cmd = new ReadLogMetadataCommand(ledgerIdFormatter);</span>
+<span class="nc" id="L1033">            ReadLogMetadataCommand.ReadLogMetadataFlags flags = new ReadLogMetadataCommand.ReadLogMetadataFlags();</span>
+<span class="nc" id="L1034">            String[] leftArgs = cmdLine.getArgs();</span>
+<span class="nc bnc" id="L1035" title="All 2 branches missed.">            if (leftArgs.length &lt;= 0) {</span>
+<span class="nc" id="L1036">                LOG.error(&quot;ERROR: missing entry log id or entry log file name&quot;);</span>
+<span class="nc" id="L1037">                printUsage();</span>
+<span class="nc" id="L1038">                return -1;</span>
+            }
+
+            long logId;
+            try {
+<span class="nc" id="L1043">                logId = Long.parseLong(leftArgs[0]);</span>
+<span class="nc" id="L1044">                flags.logId(logId);</span>
+<span class="nc" id="L1045">            } catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L1046">                flags.logFilename(leftArgs[0]);</span>
+<span class="nc" id="L1047">            }</span>
+<span class="nc" id="L1048">            cmd.apply(bkConf, flags);</span>
+<span class="nc" id="L1049">            return 0;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1054">            return &quot;Prints entrylog's metadata&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1059">            return &quot;readlogmetadata &lt;entry_log_id | entry_log_file_name&gt;&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1064">            return rlOpts;</span>
+        }
+    }
+
+    /**
+     * Command to read journal files.
+     */
+    class ReadJournalCmd extends MyCommand {
+<span class="nc" id="L1072">        Options rjOpts = new Options();</span>
+
+<span class="nc" id="L1074">        ReadJournalCmd() {</span>
+<span class="nc" id="L1075">            super(CMD_READJOURNAL);</span>
+<span class="nc" id="L1076">            rjOpts.addOption(&quot;dir&quot;, true, &quot;Journal directory (needed if more than one journal configured)&quot;);</span>
+<span class="nc" id="L1077">            rjOpts.addOption(&quot;m&quot;, &quot;msg&quot;, false, &quot;Print message body&quot;);</span>
+<span class="nc" id="L1078">        }</span>
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1082">            String[] leftArgs = cmdLine.getArgs();</span>
+<span class="nc bnc" id="L1083" title="All 2 branches missed.">            if (leftArgs.length &lt;= 0) {</span>
+<span class="nc" id="L1084">                System.err.println(&quot;ERROR: missing journal id or journal file name&quot;);</span>
+<span class="nc" id="L1085">                printUsage();</span>
+<span class="nc" id="L1086">                return -1;</span>
+            }
+
+<span class="nc" id="L1089">            long journalId = -1L;</span>
+<span class="nc" id="L1090">            String filename = &quot;&quot;;</span>
+            try {
+<span class="nc" id="L1092">                journalId = Long.parseLong(leftArgs[0]);</span>
+<span class="nc" id="L1093">            } catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L1094">                filename = leftArgs[0];</span>
+<span class="nc" id="L1095">            }</span>
+
+<span class="nc" id="L1097">            boolean printMsg = false;</span>
+<span class="nc bnc" id="L1098" title="All 2 branches missed.">            if (cmdLine.hasOption(&quot;m&quot;)) {</span>
+<span class="nc" id="L1099">                printMsg = true;</span>
+            }
+
+<span class="nc" id="L1102">            ReadJournalCommand.ReadJournalFlags flags = new ReadJournalCommand.ReadJournalFlags().msg(printMsg)</span>
+<span class="nc" id="L1103">                                                            .fileName(filename).journalId(journalId)</span>
+<span class="nc" id="L1104">                                                            .dir(cmdLine.getOptionValue(&quot;dir&quot;));</span>
+<span class="nc" id="L1105">            ReadJournalCommand cmd = new ReadJournalCommand(ledgerIdFormatter, entryFormatter);</span>
+<span class="nc" id="L1106">            boolean result = cmd.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L1107" title="All 2 branches missed.">            return result ? 0 : -1;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1112">            return &quot;Scan a journal file and format the entries into readable format.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1117">            return &quot;readjournal [-dir] [-msg] &lt;journal_id | journal_file_name&gt;&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1122">            return rjOpts;</span>
+        }
+    }
+
+    /**
+     * Command to print last log mark.
+     */
+    class LastMarkCmd extends MyCommand {
+<span class="nc" id="L1130">        LastMarkCmd() {</span>
+<span class="nc" id="L1131">            super(CMD_LASTMARK);</span>
+<span class="nc" id="L1132">        }</span>
+
+        @Override
+        public int runCmd(CommandLine c) throws Exception {
+<span class="nc" id="L1136">            LastMarkCommand command = new LastMarkCommand();</span>
+<span class="nc" id="L1137">            command.apply(bkConf, new CliFlags());</span>
+<span class="nc" id="L1138">            return 0;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1143">            return &quot;Print last log marker.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1148">            return &quot;lastmark&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1153">            return new Options();</span>
+        }
+    }
+
+    /**
+     * List available bookies.
+     */
+    class ListBookiesCmd extends MyCommand {
+<span class="nc" id="L1161">        Options opts = new Options();</span>
+
+<span class="nc" id="L1163">        ListBookiesCmd() {</span>
+<span class="nc" id="L1164">            super(CMD_LISTBOOKIES);</span>
+<span class="nc" id="L1165">            opts.addOption(&quot;rw&quot;, &quot;readwrite&quot;, false, &quot;Print readwrite bookies&quot;);</span>
+<span class="nc" id="L1166">            opts.addOption(&quot;ro&quot;, &quot;readonly&quot;, false, &quot;Print readonly bookies&quot;);</span>
+<span class="nc" id="L1167">            opts.addOption(&quot;a&quot;, &quot;all&quot;, false, &quot;Print all bookies&quot;);</span>
+            // @deprecated 'rw'/'ro' option print both hostname and ip, so this option is not needed anymore
+<span class="nc" id="L1169">            opts.addOption(&quot;h&quot;, &quot;hostnames&quot;, false, &quot;Also print hostname of the bookie&quot;);</span>
+<span class="nc" id="L1170">        }</span>
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1174">            int passedCommands = 0;</span>
+
+<span class="nc" id="L1176">            boolean readwrite = cmdLine.hasOption(&quot;rw&quot;);</span>
+<span class="nc bnc" id="L1177" title="All 2 branches missed.">            if (readwrite) {</span>
+<span class="nc" id="L1178">                passedCommands++;</span>
+            }
+<span class="nc" id="L1180">            boolean readonly = cmdLine.hasOption(&quot;ro&quot;);</span>
+<span class="nc bnc" id="L1181" title="All 2 branches missed.">            if (readonly) {</span>
+<span class="nc" id="L1182">                passedCommands++;</span>
+            }
+<span class="nc" id="L1184">            boolean all = cmdLine.hasOption(&quot;a&quot;);</span>
+<span class="nc bnc" id="L1185" title="All 2 branches missed.">            if (all) {</span>
+<span class="nc" id="L1186">                passedCommands++;</span>
+            }
+
+<span class="nc bnc" id="L1189" title="All 2 branches missed.">            if (passedCommands != 1) {</span>
+<span class="nc" id="L1190">                LOG.error(&quot;One and only one of -readwrite, -readonly and -all must be specified&quot;);</span>
+<span class="nc" id="L1191">                printUsage();</span>
+<span class="nc" id="L1192">                return 1;</span>
+            }
+
+<span class="nc" id="L1195">            ListBookiesCommand.Flags flags = new ListBookiesCommand.Flags()</span>
+<span class="nc" id="L1196">                .readwrite(readwrite)</span>
+<span class="nc" id="L1197">                .readonly(readonly)</span>
+<span class="nc" id="L1198">                .all(all);</span>
+
+<span class="nc" id="L1200">            ListBookiesCommand command = new ListBookiesCommand(flags);</span>
+
+<span class="nc" id="L1202">            command.apply(bkConf, flags);</span>
+<span class="nc" id="L1203">            return 0;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1208">            return &quot;List the bookies, which are running as either readwrite or readonly mode.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1213">            return &quot;listbookies  [-readwrite|-readonly|-all] [-hostnames]&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1218">            return opts;</span>
+        }
+    }
+
+    class ListDiskFilesCmd extends MyCommand {
+<span class="nc" id="L1223">        Options opts = new Options();</span>
+
+<span class="nc" id="L1225">        ListDiskFilesCmd() {</span>
+<span class="nc" id="L1226">            super(CMD_LISTFILESONDISC);</span>
+<span class="nc" id="L1227">            opts.addOption(&quot;txn&quot;, &quot;journal&quot;, false, &quot;Print list of Journal Files&quot;);</span>
+<span class="nc" id="L1228">            opts.addOption(&quot;log&quot;, &quot;entrylog&quot;, false, &quot;Print list of EntryLog Files&quot;);</span>
+<span class="nc" id="L1229">            opts.addOption(&quot;idx&quot;, &quot;index&quot;, false, &quot;Print list of Index files&quot;);</span>
+<span class="nc" id="L1230">        }</span>
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+
+<span class="nc" id="L1235">            boolean journal = cmdLine.hasOption(&quot;txn&quot;);</span>
+<span class="nc" id="L1236">            boolean entrylog = cmdLine.hasOption(&quot;log&quot;);</span>
+<span class="nc" id="L1237">            boolean index = cmdLine.hasOption(&quot;idx&quot;);</span>
+
+<span class="nc" id="L1239">            ListFilesOnDiscCommand.LFODFlags flags = new ListFilesOnDiscCommand.LFODFlags().journal(journal)</span>
+<span class="nc" id="L1240">                                                         .entrylog(entrylog).index(index);</span>
+<span class="nc" id="L1241">            ListFilesOnDiscCommand cmd = new ListFilesOnDiscCommand(flags);</span>
+<span class="nc" id="L1242">            cmd.apply(bkConf, flags);</span>
+<span class="nc" id="L1243">            return 0;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1248">            return &quot;List the files in JournalDirectory/LedgerDirectories/IndexDirectories.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1253">            return &quot;listfilesondisc  [-journal|-entrylog|-index]&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1258">            return opts;</span>
+        }
+    }
+
+    /**
+     * Command to print help message.
+     */
+    class HelpCmd extends MyCommand {
+<span class="nc" id="L1266">        HelpCmd() {</span>
+<span class="nc" id="L1267">            super(CMD_HELP);</span>
+<span class="nc" id="L1268">        }</span>
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1272">            String[] args = cmdLine.getArgs();</span>
+<span class="nc bnc" id="L1273" title="All 2 branches missed.">            if (args.length == 0) {</span>
+<span class="nc" id="L1274">                printShellUsage();</span>
+<span class="nc" id="L1275">                return 0;</span>
+            }
+<span class="nc" id="L1277">            String cmdName = args[0];</span>
+<span class="nc" id="L1278">            Command cmd = commands.get(cmdName);</span>
+<span class="nc bnc" id="L1279" title="All 2 branches missed.">            if (null == cmd) {</span>
+<span class="nc" id="L1280">                System.err.println(&quot;Unknown command &quot; + cmdName);</span>
+<span class="nc" id="L1281">                printShellUsage();</span>
+<span class="nc" id="L1282">                return -1;</span>
+            }
+<span class="nc" id="L1284">            cmd.printUsage();</span>
+<span class="nc" id="L1285">            return 0;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1290">            return &quot;Describe the usage of this program or its subcommands.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1295">            return &quot;help         [COMMAND]&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1300">            return new Options();</span>
+        }
+    }
+
+    /**
+     * Command for administration of autorecovery.
+     */
+    class AutoRecoveryCmd extends MyCommand {
+<span class="nc" id="L1308">        Options opts = new Options();</span>
+
+<span class="nc" id="L1310">        public AutoRecoveryCmd() {</span>
+<span class="nc" id="L1311">            super(CMD_AUTORECOVERY);</span>
+<span class="nc" id="L1312">            opts.addOption(&quot;e&quot;, &quot;enable&quot;, false,</span>
+                    &quot;Enable auto recovery of underreplicated ledgers&quot;);
+<span class="nc" id="L1314">            opts.addOption(&quot;d&quot;, &quot;disable&quot;, false,</span>
+                    &quot;Disable auto recovery of underreplicated ledgers&quot;);
+<span class="nc" id="L1316">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1320">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1325">            return &quot;Enable or disable autorecovery in the cluster.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1330">            return &quot;autorecovery [-enable|-disable]&quot;;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1335">            boolean disable = cmdLine.hasOption(&quot;d&quot;);</span>
+<span class="nc" id="L1336">            boolean enable = cmdLine.hasOption(&quot;e&quot;);</span>
+
+<span class="nc" id="L1338">            ToggleCommand.AutoRecoveryFlags flags = new ToggleCommand.AutoRecoveryFlags()</span>
+<span class="nc bnc" id="L1339" title="All 4 branches missed.">                .enable(enable).status(!disable &amp;&amp; !enable);</span>
+<span class="nc" id="L1340">            ToggleCommand cmd = new ToggleCommand();</span>
+<span class="nc" id="L1341">            cmd.apply(bkConf, flags);</span>
+
+<span class="nc" id="L1343">            return 0;</span>
+        }
+    }
+
+    /**
+     * Setter and Getter for LostBookieRecoveryDelay value (in seconds) in metadata store.
+     */
+    class LostBookieRecoveryDelayCmd extends MyCommand {
+<span class="nc" id="L1351">        Options opts = new Options();</span>
+
+<span class="nc" id="L1353">        public LostBookieRecoveryDelayCmd() {</span>
+<span class="nc" id="L1354">            super(CMD_LOSTBOOKIERECOVERYDELAY);</span>
+<span class="nc" id="L1355">            opts.addOption(&quot;g&quot;, &quot;get&quot;, false, &quot;Get LostBookieRecoveryDelay value (in seconds)&quot;);</span>
+<span class="nc" id="L1356">            opts.addOption(&quot;s&quot;, &quot;set&quot;, true, &quot;Set LostBookieRecoveryDelay value (in seconds)&quot;);</span>
+<span class="nc" id="L1357">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1361">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1366">            return &quot;Setter and Getter for LostBookieRecoveryDelay value (in seconds) in metadata store.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1371">            return &quot;lostbookierecoverydelay [-get|-set &lt;value&gt;]&quot;;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1376">            boolean getter = cmdLine.hasOption(&quot;g&quot;);</span>
+<span class="nc" id="L1377">            boolean setter = cmdLine.hasOption(&quot;s&quot;);</span>
+<span class="nc" id="L1378">            int set = 0;</span>
+<span class="nc bnc" id="L1379" title="All 2 branches missed.">            if (setter) {</span>
+<span class="nc" id="L1380">                set = Integer.parseInt(cmdLine.getOptionValue(&quot;set&quot;));</span>
+            }
+
+<span class="nc" id="L1383">            LostBookieRecoveryDelayCommand.LBRDFlags flags = new LostBookieRecoveryDelayCommand.LBRDFlags()</span>
+<span class="nc" id="L1384">                .get(getter).set(set);</span>
+<span class="nc" id="L1385">            LostBookieRecoveryDelayCommand cmd = new LostBookieRecoveryDelayCommand();</span>
+<span class="nc" id="L1386">            boolean result = cmd.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L1387" title="All 2 branches missed.">            return result ? 0 : 1;</span>
+        }
+    }
+
+    /**
+     * Print which node has the auditor lock.
+     */
+    class WhoIsAuditorCmd extends MyCommand {
+<span class="nc" id="L1395">        Options opts = new Options();</span>
+
+<span class="nc" id="L1397">        public WhoIsAuditorCmd() {</span>
+<span class="nc" id="L1398">            super(CMD_WHOISAUDITOR);</span>
+<span class="nc" id="L1399">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1403">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1408">            return &quot;Print the node which holds the auditor lock.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1413">            return &quot;whoisauditor&quot;;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1418">            CliFlags flags = new CliFlags();</span>
+<span class="nc" id="L1419">            WhoIsAuditorCommand cmd = new WhoIsAuditorCommand();</span>
+<span class="nc" id="L1420">            boolean result = cmd.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L1421" title="All 2 branches missed.">            return result ? 0 : -1;</span>
+        }
+    }
+
+    /**
+     * Prints the instanceid of the cluster.
+     */
+    class WhatIsInstanceId extends MyCommand {
+<span class="nc" id="L1429">        Options opts = new Options();</span>
+
+<span class="nc" id="L1431">        public WhatIsInstanceId() {</span>
+<span class="nc" id="L1432">            super(CMD_WHATISINSTANCEID);</span>
+<span class="nc" id="L1433">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1437">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1442">            return &quot;Print the instanceid of the cluster&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1447">            return &quot;whatisinstanceid&quot;;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1452">            InstanceIdCommand cmd = new InstanceIdCommand();</span>
+<span class="nc" id="L1453">            cmd.apply(bkConf, new CliFlags());</span>
+<span class="nc" id="L1454">            return 0;</span>
+        }
+    }
+
+    /**
+     * Update cookie command.
+     */
+    class UpdateCookieCmd extends MyCommand {
+<span class="nc" id="L1462">        Options opts = new Options();</span>
+        private static final String BOOKIEID = &quot;bookieId&quot;;
+        private static final String EXPANDSTORAGE = &quot;expandstorage&quot;;
+        private static final String LIST = &quot;list&quot;;
+        private static final String DELETE = &quot;delete&quot;;
+        private static final String HOSTNAME = &quot;hostname&quot;;
+        private static final String IP = &quot;ip&quot;;
+        private static final String FORCE = &quot;force&quot;;
+
+<span class="nc" id="L1471">        UpdateCookieCmd() {</span>
+<span class="nc" id="L1472">            super(CMD_UPDATECOOKIE);</span>
+<span class="nc" id="L1473">            opts.addOption(&quot;b&quot;, BOOKIEID, true, &quot;Bookie Id&quot;);</span>
+<span class="nc" id="L1474">            opts.addOption(&quot;e&quot;, EXPANDSTORAGE, false, &quot;Expand Storage&quot;);</span>
+<span class="nc" id="L1475">            opts.addOption(&quot;l&quot;, LIST, false, &quot;List paths of all the cookies present locally and on zookkeeper&quot;);</span>
+            @SuppressWarnings(&quot;static-access&quot;)
+<span class="nc" id="L1477">            Option deleteOption = OptionBuilder.withLongOpt(DELETE).hasOptionalArgs(1)</span>
+<span class="nc" id="L1478">                    .withDescription(&quot;Delete cookie both locally and in ZooKeeper&quot;).create(&quot;d&quot;);</span>
+<span class="nc" id="L1479">            opts.addOption(deleteOption);</span>
+<span class="nc" id="L1480">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1484">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1489">            return &quot;Command to update cookie&quot;</span>
+                    + &quot;bookieId - Update bookie id in cookie\n&quot;
+                    + &quot;expandstorage - Add new empty ledger/index directories.&quot;
+                    + &quot; Update the directories info in the conf file before running the command\n&quot;
+                    + &quot;list - list the local cookie files path and ZK cookiePath &quot;
+                    + &quot;delete - Delete cookies locally and in zookeeper&quot;;
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1499">            return &quot;updatecookie [-bookieId &lt;hostname|ip&gt;] [-expandstorage] [-list] [-delete &lt;force&gt;]&quot;;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1504">            AdminCommand cmd = new AdminCommand();</span>
+<span class="nc" id="L1505">            AdminCommand.AdminFlags flags = new AdminCommand.AdminFlags();</span>
+<span class="nc" id="L1506">            Option[] options = cmdLine.getOptions();</span>
+<span class="nc bnc" id="L1507" title="All 2 branches missed.">            if (options.length != 1) {</span>
+<span class="nc" id="L1508">                LOG.error(&quot;Invalid command!&quot;);</span>
+<span class="nc" id="L1509">                this.printUsage();</span>
+<span class="nc" id="L1510">                return -1;</span>
+            }
+<span class="nc" id="L1512">            Option thisCommandOption = options[0];</span>
+<span class="nc bnc" id="L1513" title="All 2 branches missed.">            if (thisCommandOption.getLongOpt().equals(BOOKIEID)) {</span>
+<span class="nc" id="L1514">                final String bookieId = cmdLine.getOptionValue(BOOKIEID);</span>
+<span class="nc bnc" id="L1515" title="All 2 branches missed.">                if (StringUtils.isBlank(bookieId)) {</span>
+<span class="nc" id="L1516">                    LOG.error(&quot;Invalid argument list!&quot;);</span>
+<span class="nc" id="L1517">                    this.printUsage();</span>
+<span class="nc" id="L1518">                    return -1;</span>
+                }
+<span class="nc bnc" id="L1520" title="All 4 branches missed.">                if (!StringUtils.equals(bookieId, HOSTNAME) &amp;&amp; !StringUtils.equals(bookieId, IP)) {</span>
+<span class="nc" id="L1521">                    LOG.error(&quot;Invalid option value:&quot; + bookieId);</span>
+<span class="nc" id="L1522">                    this.printUsage();</span>
+<span class="nc" id="L1523">                    return -1;</span>
+                }
+<span class="nc" id="L1525">                boolean useHostName = getOptionalValue(bookieId, HOSTNAME);</span>
+<span class="nc" id="L1526">                flags.hostname(useHostName);</span>
+<span class="nc bnc" id="L1527" title="All 2 branches missed.">                flags.ip(!useHostName);</span>
+            }
+<span class="nc" id="L1529">            flags.expandstorage(thisCommandOption.getLongOpt().equals(EXPANDSTORAGE));</span>
+<span class="nc" id="L1530">            flags.list(thisCommandOption.getLongOpt().equals(LIST));</span>
+<span class="nc" id="L1531">            flags.delete(thisCommandOption.getLongOpt().equals(DELETE));</span>
+<span class="nc bnc" id="L1532" title="All 2 branches missed.">            if (thisCommandOption.getLongOpt().equals(DELETE)) {</span>
+<span class="nc" id="L1533">                boolean force = false;</span>
+<span class="nc" id="L1534">                String optionValue = thisCommandOption.getValue();</span>
+<span class="nc bnc" id="L1535" title="All 4 branches missed.">                if (!StringUtils.isEmpty(optionValue) &amp;&amp; optionValue.equals(FORCE)) {</span>
+<span class="nc" id="L1536">                    force = true;</span>
+                }
+<span class="nc" id="L1538">                flags.force(force);</span>
+            }
+<span class="nc" id="L1540">            boolean result = cmd.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L1541" title="All 2 branches missed.">            return (result) ? 0 : -1;</span>
+        }
+    }
+
+    /**
+     * Update ledger command.
+     */
+    class UpdateLedgerCmd extends MyCommand {
+<span class="nc" id="L1549">        private final Options opts = new Options();</span>
+
+<span class="nc" id="L1551">        UpdateLedgerCmd() {</span>
+<span class="nc" id="L1552">            super(CMD_UPDATELEDGER);</span>
+<span class="nc" id="L1553">            opts.addOption(&quot;b&quot;, &quot;bookieId&quot;, true, &quot;Bookie Id&quot;);</span>
+<span class="nc" id="L1554">            opts.addOption(&quot;s&quot;, &quot;updatespersec&quot;, true, &quot;Number of ledgers updating per second (default: 5 per sec)&quot;);</span>
+<span class="nc" id="L1555">            opts.addOption(&quot;r&quot;, &quot;maxOutstandingReads&quot;, true, &quot;Max outstanding reads (default: 5 * updatespersec)&quot;);</span>
+<span class="nc" id="L1556">            opts.addOption(&quot;l&quot;, &quot;limit&quot;, true, &quot;Maximum number of ledgers to update (default: no limit)&quot;);</span>
+<span class="nc" id="L1557">            opts.addOption(&quot;v&quot;, &quot;verbose&quot;, true, &quot;Print status of the ledger updation (default: false)&quot;);</span>
+<span class="nc" id="L1558">            opts.addOption(&quot;p&quot;, &quot;printprogress&quot;, true,</span>
+                    &quot;Print messages on every configured seconds if verbose turned on (default: 10 secs)&quot;);
+<span class="nc" id="L1560">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1564">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1569">            return &quot;Update bookie id in ledgers (this may take a long time).&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1574">            return &quot;updateledgers -bookieId &lt;hostname|ip&gt; [-updatespersec N] [-maxOutstandingReads N] [-limit N] &quot;</span>
+                    + &quot;[-verbose true/false] [-printprogress N]&quot;;
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1580">            FlipBookieIdCommand cmd = new FlipBookieIdCommand();</span>
+<span class="nc" id="L1581">            FlipBookieIdCommand.FlipBookieIdFlags flags = new FlipBookieIdCommand.FlipBookieIdFlags();</span>
+
+<span class="nc" id="L1583">            final String bookieId = cmdLine.getOptionValue(&quot;bookieId&quot;);</span>
+<span class="nc bnc" id="L1584" title="All 2 branches missed.">            if (StringUtils.isBlank(bookieId)) {</span>
+<span class="nc" id="L1585">                LOG.error(&quot;Invalid argument list!&quot;);</span>
+<span class="nc" id="L1586">                this.printUsage();</span>
+<span class="nc" id="L1587">                return -1;</span>
+            }
+<span class="nc bnc" id="L1589" title="All 4 branches missed.">            if (!StringUtils.equals(bookieId, &quot;hostname&quot;) &amp;&amp; !StringUtils.equals(bookieId, &quot;ip&quot;)) {</span>
+<span class="nc" id="L1590">                LOG.error(&quot;Invalid option value {} for bookieId, expected hostname/ip&quot;, bookieId);</span>
+<span class="nc" id="L1591">                this.printUsage();</span>
+<span class="nc" id="L1592">                return -1;</span>
+            }
+<span class="nc" id="L1594">            boolean useHostName = getOptionalValue(bookieId, &quot;hostname&quot;);</span>
+<span class="nc" id="L1595">            final int rate = getOptionIntValue(cmdLine, &quot;updatespersec&quot;, 5);</span>
+<span class="nc" id="L1596">            final int maxOutstandingReads = getOptionIntValue(cmdLine, &quot;maxOutstandingReads&quot;, (rate * 5));</span>
+<span class="nc" id="L1597">            final int limit = getOptionIntValue(cmdLine, &quot;limit&quot;, Integer.MIN_VALUE);</span>
+<span class="nc" id="L1598">            final boolean verbose = getOptionBooleanValue(cmdLine, &quot;verbose&quot;, false);</span>
+            final long printprogress;
+<span class="nc bnc" id="L1600" title="All 2 branches missed.">            if (!verbose) {</span>
+<span class="nc bnc" id="L1601" title="All 2 branches missed.">                if (cmdLine.hasOption(&quot;printprogress&quot;)) {</span>
+<span class="nc" id="L1602">                    LOG.warn(&quot;Ignoring option 'printprogress', this is applicable when 'verbose' is true&quot;);</span>
+                }
+<span class="nc" id="L1604">                printprogress = Integer.MIN_VALUE;</span>
+            } else {
+                // defaulting to 10 seconds
+<span class="nc" id="L1607">                printprogress = getOptionLongValue(cmdLine, &quot;printprogress&quot;, 10);</span>
+            }
+<span class="nc" id="L1609">            flags.hostname(useHostName);</span>
+<span class="nc" id="L1610">            flags.printProgress(printprogress);</span>
+<span class="nc" id="L1611">            flags.limit(limit);</span>
+<span class="nc" id="L1612">            flags.updatePerSec(rate);</span>
+<span class="nc" id="L1613">            flags.maxOutstandingReads(maxOutstandingReads);</span>
+<span class="nc" id="L1614">            flags.verbose(verbose);</span>
+
+<span class="nc" id="L1616">            boolean result = cmd.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L1617" title="All 2 branches missed.">            return (result) ? 0 : -1;</span>
+        }
+    }
+
+    /**
+     * Update bookie into ledger command.
+     */
+    class UpdateBookieInLedgerCmd extends MyCommand {
+<span class="nc" id="L1625">        private final Options opts = new Options();</span>
+
+<span class="nc" id="L1627">        UpdateBookieInLedgerCmd() {</span>
+<span class="nc" id="L1628">            super(CMD_UPDATE_BOOKIE_IN_LEDGER);</span>
+<span class="nc" id="L1629">            opts.addOption(&quot;sb&quot;, &quot;srcBookie&quot;, true, &quot;Source bookie which needs to be replaced by destination bookie.&quot;);</span>
+<span class="nc" id="L1630">            opts.addOption(&quot;db&quot;, &quot;destBookie&quot;, true, &quot;Destination bookie which replaces source bookie.&quot;);</span>
+<span class="nc" id="L1631">            opts.addOption(&quot;s&quot;, &quot;updatespersec&quot;, true, &quot;Number of ledgers updating per second (default: 5 per sec)&quot;);</span>
+<span class="nc" id="L1632">            opts.addOption(&quot;r&quot;, &quot;maxOutstandingReads&quot;, true, &quot;Max outstanding reads (default: 5 * updatespersec)&quot;);</span>
+<span class="nc" id="L1633">            opts.addOption(&quot;l&quot;, &quot;limit&quot;, true, &quot;Maximum number of ledgers to update (default: no limit)&quot;);</span>
+<span class="nc" id="L1634">            opts.addOption(&quot;v&quot;, &quot;verbose&quot;, true, &quot;Print status of the ledger updation (default: false)&quot;);</span>
+<span class="nc" id="L1635">            opts.addOption(&quot;p&quot;, &quot;printprogress&quot;, true,</span>
+                    &quot;Print messages on every configured seconds if verbose turned on (default: 10 secs)&quot;);
+<span class="nc" id="L1637">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1641">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1646">            return &quot;Replace bookie in ledger metadata. (useful when re-ip of host) &quot;</span>
+                    + &quot;replace srcBookie with destBookie. (this may take a long time).&quot;;
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1652">            return &quot;updateBookieInLedger -srcBookie &lt;source bookie&gt; -destBookie &lt;destination bookie&gt; &quot;</span>
+                    + &quot;[-updatespersec N] [-maxOutstandingReads N] [-limit N] [-verbose true/false] [-printprogress N]&quot;;
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1658">            UpdateBookieInLedgerCommand cmd = new UpdateBookieInLedgerCommand();</span>
+<span class="nc" id="L1659">            UpdateBookieInLedgerCommand.UpdateBookieInLedgerFlags flags =</span>
+                    new UpdateBookieInLedgerCommand.UpdateBookieInLedgerFlags();
+
+<span class="nc" id="L1662">            final String srcBookie = cmdLine.getOptionValue(&quot;srcBookie&quot;);</span>
+<span class="nc" id="L1663">            final String destBookie = cmdLine.getOptionValue(&quot;destBookie&quot;);</span>
+<span class="nc bnc" id="L1664" title="All 4 branches missed.">            if (StringUtils.isBlank(srcBookie) || StringUtils.isBlank(destBookie)) {</span>
+<span class="nc" id="L1665">                LOG.error(&quot;Invalid argument list (srcBookie and destBookie must be provided)!&quot;);</span>
+<span class="nc" id="L1666">                this.printUsage();</span>
+<span class="nc" id="L1667">                return -1;</span>
+            }
+<span class="nc bnc" id="L1669" title="All 2 branches missed.">            if (StringUtils.equals(srcBookie, destBookie)) {</span>
+<span class="nc" id="L1670">                LOG.error(&quot;srcBookie and destBookie can't be the same.&quot;);</span>
+<span class="nc" id="L1671">                return -1;</span>
+            }
+<span class="nc" id="L1673">            final int rate = getOptionIntValue(cmdLine, &quot;updatespersec&quot;, 5);</span>
+<span class="nc" id="L1674">            final int maxOutstandingReads = getOptionIntValue(cmdLine, &quot;maxOutstandingReads&quot;, (rate * 5));</span>
+<span class="nc" id="L1675">            final int limit = getOptionIntValue(cmdLine, &quot;limit&quot;, Integer.MIN_VALUE);</span>
+<span class="nc" id="L1676">            final boolean verbose = getOptionBooleanValue(cmdLine, &quot;verbose&quot;, false);</span>
+            final long printprogress;
+<span class="nc bnc" id="L1678" title="All 2 branches missed.">            if (!verbose) {</span>
+<span class="nc bnc" id="L1679" title="All 2 branches missed.">                if (cmdLine.hasOption(&quot;printprogress&quot;)) {</span>
+<span class="nc" id="L1680">                    LOG.warn(&quot;Ignoring option 'printprogress', this is applicable when 'verbose' is true&quot;);</span>
+                }
+<span class="nc" id="L1682">                printprogress = Integer.MIN_VALUE;</span>
+            } else {
+                // defaulting to 10 seconds
+<span class="nc" id="L1685">                printprogress = getOptionLongValue(cmdLine, &quot;printprogress&quot;, 10);</span>
+            }
+<span class="nc" id="L1687">            flags.srcBookie(srcBookie);</span>
+<span class="nc" id="L1688">            flags.destBookie(destBookie);</span>
+<span class="nc" id="L1689">            flags.printProgress(printprogress);</span>
+<span class="nc" id="L1690">            flags.limit(limit);</span>
+<span class="nc" id="L1691">            flags.updatePerSec(rate);</span>
+<span class="nc" id="L1692">            flags.maxOutstandingReads(maxOutstandingReads);</span>
+<span class="nc" id="L1693">            flags.verbose(verbose);</span>
+
+<span class="nc" id="L1695">            boolean result = cmd.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L1696" title="All 2 branches missed.">            return (result) ? 0 : -1;</span>
+        }
+    }
+
+    /**
+     * Command to delete a given ledger.
+     */
+    class DeleteLedgerCmd extends MyCommand {
+<span class="nc" id="L1704">        Options lOpts = new Options();</span>
+
+<span class="nc" id="L1706">        DeleteLedgerCmd() {</span>
+<span class="nc" id="L1707">            super(CMD_DELETELEDGER);</span>
+<span class="nc" id="L1708">            lOpts.addOption(&quot;l&quot;, &quot;ledgerid&quot;, true, &quot;Ledger ID&quot;);</span>
+<span class="nc" id="L1709">            lOpts.addOption(&quot;f&quot;, &quot;force&quot;, false, &quot;Whether to force delete the Ledger without prompt..?&quot;);</span>
+<span class="nc" id="L1710">        }</span>
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1714">            final long lid = getOptionLedgerIdValue(cmdLine, &quot;ledgerid&quot;, -1);</span>
+
+<span class="nc" id="L1716">            boolean force = cmdLine.hasOption(&quot;f&quot;);</span>
+<span class="nc" id="L1717">            DeleteLedgerCommand cmd = new DeleteLedgerCommand(ledgerIdFormatter);</span>
+<span class="nc" id="L1718">            DeleteLedgerCommand.DeleteLedgerFlags flags = new DeleteLedgerCommand.DeleteLedgerFlags()</span>
+<span class="nc" id="L1719">                .ledgerId(lid).force(force);</span>
+<span class="nc" id="L1720">            cmd.apply(bkConf, flags);</span>
+
+<span class="nc" id="L1722">            return 0;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1727">            return &quot;Delete a ledger.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1732">            return &quot;deleteledger -ledgerid &lt;ledgerid&gt; [-force]&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1737">            return lOpts;</span>
+        }
+    }
+
+    /*
+     * Command to retrieve bookie information like free disk space, etc from all
+     * the bookies in the cluster.
+     */
+    class BookieInfoCmd extends MyCommand {
+<span class="nc" id="L1746">        Options lOpts = new Options();</span>
+
+<span class="nc" id="L1748">        BookieInfoCmd() {</span>
+<span class="nc" id="L1749">            super(CMD_BOOKIEINFO);</span>
+<span class="nc" id="L1750">        }</span>
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1754">            return &quot;Retrieve bookie info such as free and total disk space.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1759">            return &quot;bookieinfo&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1764">            return lOpts;</span>
+        }
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1769">            InfoCommand cmd = new InfoCommand();</span>
+<span class="nc" id="L1770">            cmd.apply(bkConf, new CliFlags());</span>
+<span class="nc" id="L1771">            return 0;</span>
+        }
+    }
+
+    /**
+     * Command to trigger AuditTask by resetting lostBookieRecoveryDelay to its current value.
+     */
+    class TriggerAuditCmd extends MyCommand {
+<span class="nc" id="L1779">        Options opts = new Options();</span>
+
+<span class="nc" id="L1781">        TriggerAuditCmd() {</span>
+<span class="nc" id="L1782">            super(CMD_TRIGGERAUDIT);</span>
+<span class="nc" id="L1783">        }</span>
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1787">            return &quot;Force trigger the Audit by resetting the lostBookieRecoveryDelay.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1792">            return CMD_TRIGGERAUDIT;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1797">            return opts;</span>
+        }
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1802">            TriggerAuditCommand cmd = new TriggerAuditCommand();</span>
+<span class="nc" id="L1803">            cmd.apply(bkConf, new CliFlags());</span>
+<span class="nc" id="L1804">            return 0;</span>
+        }
+    }
+
+    class ForceAuditorChecksCmd extends MyCommand {
+<span class="nc" id="L1809">        Options opts = new Options();</span>
+
+<span class="nc" id="L1811">        ForceAuditorChecksCmd() {</span>
+<span class="nc" id="L1812">            super(CMD_FORCEAUDITCHECKS);</span>
+<span class="nc" id="L1813">            opts.addOption(&quot;calc&quot;, &quot;checkallledgerscheck&quot;, false, &quot;Force checkAllLedgers audit &quot;</span>
+                    + &quot;upon next Auditor startup &quot;);
+<span class="nc" id="L1815">            opts.addOption(&quot;ppc&quot;, &quot;placementpolicycheck&quot;, false, &quot;Force placementPolicyCheck audit &quot;</span>
+                    + &quot;upon next Auditor startup &quot;);
+<span class="nc" id="L1817">            opts.addOption(&quot;rc&quot;, &quot;replicascheck&quot;, false, &quot;Force replicasCheck audit &quot;</span>
+                    + &quot;upon next Auditor startup &quot;);
+<span class="nc" id="L1819">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1823">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1828">            return &quot;Reset the last run time of auditor checks &quot;</span>
+                    + &quot;(checkallledgerscheck, placementpolicycheck, replicascheck) &quot;
+                    + &quot;The current auditor must be REBOOTED after this command is run.&quot;;
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1835">            return &quot;forceauditchecks [-checkallledgerscheck [-placementpolicycheck] [-replicascheck]&quot;;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1840">            boolean checkAllLedgersCheck = cmdLine.hasOption(&quot;calc&quot;);</span>
+<span class="nc" id="L1841">            boolean placementPolicyCheck = cmdLine.hasOption(&quot;ppc&quot;);</span>
+<span class="nc" id="L1842">            boolean replicasCheck = cmdLine.hasOption(&quot;rc&quot;);</span>
+
+<span class="nc bnc" id="L1844" title="All 6 branches missed.">            if (checkAllLedgersCheck || placementPolicyCheck  || replicasCheck) {</span>
+<span class="nc" id="L1845">                runFunctionWithLedgerManagerFactory(bkConf, mFactory -&gt; {</span>
+                    try {
+<span class="nc" id="L1847">                        try (LedgerUnderreplicationManager underreplicationManager =</span>
+<span class="nc" id="L1848">                                     mFactory.newLedgerUnderreplicationManager()) {</span>
+                            // Arbitrary value of 21 days chosen since current freq of all checks is less than 21 days
+<span class="nc" id="L1850">                            long time = System.currentTimeMillis() - (21 * 24 * 60 * 60 * 1000);</span>
+<span class="nc bnc" id="L1851" title="All 2 branches missed.">                            if (checkAllLedgersCheck) {</span>
+<span class="nc" id="L1852">                                LOG.info(&quot;Resetting CheckAllLedgersCTime to : &quot; + new Timestamp(time));</span>
+<span class="nc" id="L1853">                                underreplicationManager.setCheckAllLedgersCTime(time);</span>
+                            }
+<span class="nc bnc" id="L1855" title="All 2 branches missed.">                            if (placementPolicyCheck) {</span>
+<span class="nc" id="L1856">                                LOG.info(&quot;Resetting PlacementPolicyCheckCTime to : &quot; + new Timestamp(time));</span>
+<span class="nc" id="L1857">                                underreplicationManager.setPlacementPolicyCheckCTime(time);</span>
+                            }
+<span class="nc bnc" id="L1859" title="All 2 branches missed.">                            if (replicasCheck) {</span>
+<span class="nc" id="L1860">                                LOG.info(&quot;Resetting ReplicasCheckCTime to : &quot; + new Timestamp(time));</span>
+<span class="nc" id="L1861">                                underreplicationManager.setReplicasCheckCTime(time);</span>
+                            }
+                        }
+<span class="nc" id="L1864">                    } catch (InterruptedException | KeeperException | ReplicationException e) {</span>
+<span class="nc" id="L1865">                        LOG.error(&quot;Exception while trying to reset last run time &quot;, e);</span>
+<span class="nc" id="L1866">                        return -1;</span>
+<span class="nc" id="L1867">                    }</span>
+<span class="nc" id="L1868">                    return 0;</span>
+                });
+            } else {
+<span class="nc" id="L1871">                LOG.error(&quot;Command line args must contain atleast one type of check. This was a no-op.&quot;);</span>
+<span class="nc" id="L1872">                return -1;</span>
+            }
+<span class="nc" id="L1874">            return 0;</span>
+        }
+    }
+
+    /**
+     * Command to trigger AuditTask by resetting lostBookieRecoveryDelay and
+     * then make sure the ledgers stored in the bookie are properly replicated
+     * and Cookie of the decommissioned bookie should be deleted from metadata
+     * server.
+     */
+    class DecommissionBookieCmd extends MyCommand {
+<span class="nc" id="L1885">        Options lOpts = new Options();</span>
+
+<span class="nc" id="L1887">        DecommissionBookieCmd() {</span>
+<span class="nc" id="L1888">            super(CMD_DECOMMISSIONBOOKIE);</span>
+<span class="nc" id="L1889">            lOpts.addOption(&quot;bookieid&quot;, true, &quot;decommission a remote bookie&quot;);</span>
+<span class="nc" id="L1890">        }</span>
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1894">            return &quot;Force trigger the Audittask and make sure all the ledgers stored in the decommissioning bookie&quot;</span>
+                    + &quot; are replicated and cookie of the decommissioned bookie is deleted from metadata server.&quot;;
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1900">            return CMD_DECOMMISSIONBOOKIE + &quot; [-bookieid &lt;bookieaddress&gt;]&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1905">            return lOpts;</span>
+        }
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1910">            DecommissionCommand cmd = new DecommissionCommand();</span>
+<span class="nc" id="L1911">            DecommissionCommand.DecommissionFlags flags = new DecommissionCommand.DecommissionFlags();</span>
+<span class="nc" id="L1912">            final String remoteBookieidToDecommission = cmdLine.getOptionValue(&quot;bookieid&quot;);</span>
+<span class="nc" id="L1913">            flags.remoteBookieIdToDecommission(remoteBookieidToDecommission);</span>
+<span class="nc" id="L1914">            boolean result = cmd.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L1915" title="All 2 branches missed.">            return (result) ? 0 : -1;</span>
+        }
+    }
+
+    /**
+     * Command to retrieve remote bookie endpoint information.
+     */
+    class EndpointInfoCmd extends MyCommand {
+<span class="nc" id="L1923">        Options lOpts = new Options();</span>
+
+<span class="nc" id="L1925">        EndpointInfoCmd() {</span>
+<span class="nc" id="L1926">            super(CMD_ENDPOINTINFO);</span>
+<span class="nc" id="L1927">            lOpts.addOption(&quot;b&quot;, &quot;bookieid&quot;, true, &quot;Bookie Id&quot;);</span>
+<span class="nc" id="L1928">        }</span>
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1932">            return &quot;Get info about a remote bookie with a specific bookie address (bookieid)&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1937">            return CMD_ENDPOINTINFO + &quot; [-bookieid &lt;bookieaddress&gt;]&quot;;</span>
+        }
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1942">            return lOpts;</span>
+        }
+
+        @Override
+        public int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1947">            EndpointInfoCommand cmd = new EndpointInfoCommand();</span>
+<span class="nc" id="L1948">            EndpointInfoCommand.EndpointInfoFlags flags = new EndpointInfoCommand.EndpointInfoFlags();</span>
+<span class="nc" id="L1949">            final String bookieId = cmdLine.getOptionValue(&quot;bookieid&quot;);</span>
+<span class="nc" id="L1950">            flags.bookie(bookieId);</span>
+<span class="nc bnc" id="L1951" title="All 2 branches missed.">            if (StringUtils.isBlank(bookieId)) {</span>
+<span class="nc" id="L1952">                LOG.error(&quot;Invalid argument list!&quot;);</span>
+<span class="nc" id="L1953">                this.printUsage();</span>
+<span class="nc" id="L1954">                return -1;</span>
+            }
+
+<span class="nc" id="L1957">            boolean result = cmd.apply(bkConf, flags);</span>
+<span class="nc bnc" id="L1958" title="All 2 branches missed.">            return (result) ? 0 : -1;</span>
+        }
+    }
+
+    /**
+     * A facility for reporting update ledger progress.
+     */
+    public interface UpdateLedgerNotifier {
+        void progress(long updated, long issued);
+    }
+
+    /**
+     * Convert bookie indexes from InterleavedStorage to DbLedgerStorage format.
+     */
+    class ConvertToDbStorageCmd extends MyCommand {
+<span class="nc" id="L1973">        Options opts = new Options();</span>
+
+<span class="nc" id="L1975">        public ConvertToDbStorageCmd() {</span>
+<span class="nc" id="L1976">            super(CMD_CONVERT_TO_DB_STORAGE);</span>
+<span class="nc" id="L1977">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L1981">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L1986">            return &quot;Convert bookie indexes from InterleavedStorage to DbLedgerStorage format&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L1991">            return CMD_CONVERT_TO_DB_STORAGE;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L1996">            ConvertToDBStorageCommand cmd = new ConvertToDBStorageCommand();</span>
+<span class="nc" id="L1997">            ConvertToDBStorageCommand.CTDBFlags flags = new ConvertToDBStorageCommand.CTDBFlags();</span>
+<span class="nc" id="L1998">            cmd.setLedgerIdFormatter(ledgerIdFormatter);</span>
+<span class="nc" id="L1999">            cmd.apply(bkConf, flags);</span>
+<span class="nc" id="L2000">            return 0;</span>
+        }
+    }
+
+    /**
+     * Convert bookie indexes from DbLedgerStorage to InterleavedStorage format.
+     */
+    class ConvertToInterleavedStorageCmd extends MyCommand {
+<span class="nc" id="L2008">        Options opts = new Options();</span>
+
+<span class="nc" id="L2010">        public ConvertToInterleavedStorageCmd() {</span>
+<span class="nc" id="L2011">            super(CMD_CONVERT_TO_INTERLEAVED_STORAGE);</span>
+<span class="nc" id="L2012">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L2016">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L2021">            return &quot;Convert bookie indexes from DbLedgerStorage to InterleavedStorage format&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L2026">            return CMD_CONVERT_TO_INTERLEAVED_STORAGE;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L2031">            ConvertToInterleavedStorageCommand cmd = new ConvertToInterleavedStorageCommand();</span>
+<span class="nc" id="L2032">            ConvertToInterleavedStorageCommand.CTISFlags flags = new ConvertToInterleavedStorageCommand.CTISFlags();</span>
+<span class="nc" id="L2033">            cmd.apply(bkConf, flags);</span>
+<span class="nc" id="L2034">            return 0;</span>
+        }
+    }
+
+    /**
+     * Rebuild DbLedgerStorage locations index.
+     */
+    class RebuildDbLedgerLocationsIndexCmd extends MyCommand {
+<span class="nc" id="L2042">        Options opts = new Options();</span>
+
+<span class="nc" id="L2044">        public RebuildDbLedgerLocationsIndexCmd() {</span>
+<span class="nc" id="L2045">            super(CMD_REBUILD_DB_LEDGER_LOCATIONS_INDEX);</span>
+<span class="nc" id="L2046">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L2050">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L2055">            return &quot;Rebuild DbLedgerStorage locations index by scanning the entry logs&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L2060">            return CMD_REBUILD_DB_LEDGER_LOCATIONS_INDEX;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L2065">            RebuildDBLedgerLocationsIndexCommand cmd = new RebuildDBLedgerLocationsIndexCommand();</span>
+<span class="nc" id="L2066">            cmd.apply(bkConf, new CliFlags());</span>
+<span class="nc" id="L2067">            return 0;</span>
+        }
+    }
+
+    /**
+     * Regenerate an index file for interleaved storage.
+     */
+    class RegenerateInterleavedStorageIndexFile extends MyCommand {
+<span class="nc" id="L2075">        Options opts = new Options();</span>
+
+<span class="nc" id="L2077">        public RegenerateInterleavedStorageIndexFile() {</span>
+<span class="nc" id="L2078">            super(CMD_REGENERATE_INTERLEAVED_STORAGE_INDEX_FILE);</span>
+<span class="nc" id="L2079">            Option ledgerOption = new Option(&quot;l&quot;, &quot;ledgerIds&quot;, true,</span>
+                                             &quot;Ledger(s) whose index needs to be regenerated.&quot;
+                                             + &quot; Multiple can be specified, comma separated.&quot;);
+<span class="nc" id="L2082">            ledgerOption.setRequired(true);</span>
+<span class="nc" id="L2083">            ledgerOption.setValueSeparator(',');</span>
+<span class="nc" id="L2084">            ledgerOption.setArgs(Option.UNLIMITED_VALUES);</span>
+
+<span class="nc" id="L2086">            opts.addOption(ledgerOption);</span>
+<span class="nc" id="L2087">            opts.addOption(&quot;dryRun&quot;, false,</span>
+                           &quot;Process the entryLogger, but don't write anything.&quot;);
+<span class="nc" id="L2089">            opts.addOption(&quot;password&quot;, true,</span>
+                           &quot;The bookie stores the password in the index file, so we need it to regenerate. &quot;
+                           + &quot;This must match the value in the ledger metadata.&quot;);
+<span class="nc" id="L2092">            opts.addOption(&quot;b64password&quot;, true,</span>
+                           &quot;The password in base64 encoding, for cases where the password is not UTF-8.&quot;);
+<span class="nc" id="L2094">        }</span>
+
+        @Override
+        Options getOptions() {
+<span class="nc" id="L2098">            return opts;</span>
+        }
+
+        @Override
+        String getDescription() {
+<span class="nc" id="L2103">            return &quot;Regenerate an interleaved storage index file, from available entrylogger files.&quot;;</span>
+        }
+
+        @Override
+        String getUsage() {
+<span class="nc" id="L2108">            return CMD_REGENERATE_INTERLEAVED_STORAGE_INDEX_FILE;</span>
+        }
+
+        @Override
+        int runCmd(CommandLine cmdLine) throws Exception {
+<span class="nc" id="L2113">            RegenerateInterleavedStorageIndexFileCommand cmd = new RegenerateInterleavedStorageIndexFileCommand();</span>
+            RegenerateInterleavedStorageIndexFileCommand.RISIFFlags
+<span class="nc" id="L2115">                flags = new RegenerateInterleavedStorageIndexFileCommand.RISIFFlags();</span>
+<span class="nc" id="L2116">            List&lt;Long&gt; ledgerIds = Arrays.stream(cmdLine.getOptionValues(&quot;ledgerIds&quot;)).map((id) -&gt; Long.parseLong(id))</span>
+<span class="nc" id="L2117">                                         .collect(Collectors.toList());</span>
+<span class="nc" id="L2118">            boolean dryRun = cmdLine.hasOption(&quot;dryRun&quot;);</span>
+<span class="nc" id="L2119">            flags.ledgerIds(ledgerIds);</span>
+<span class="nc bnc" id="L2120" title="All 2 branches missed.">            if (cmdLine.hasOption(&quot;password&quot;)) {</span>
+<span class="nc" id="L2121">                flags.password(cmdLine.getOptionValue(&quot;password&quot;));</span>
+<span class="nc bnc" id="L2122" title="All 2 branches missed.">            } else if (cmdLine.hasOption(&quot;b64password&quot;)) {</span>
+<span class="nc" id="L2123">                flags.b64Password(cmdLine.getOptionValue(&quot;b64password&quot;));</span>
+            }
+<span class="nc" id="L2125">            flags.dryRun(dryRun);</span>
+<span class="nc" id="L2126">            cmd.apply(bkConf, flags);</span>
+<span class="nc" id="L2127">            return 0;</span>
+        }
+    }
+
+<span class="nc" id="L2131">    final Map&lt;String, Command&gt; commands = new HashMap&lt;&gt;();</span>
+
+    {
+<span class="nc" id="L2134">        commands.put(CMD_METAFORMAT, new MetaFormatCmd());</span>
+<span class="nc" id="L2135">        commands.put(CMD_INITBOOKIE, new InitBookieCmd());</span>
+<span class="nc" id="L2136">        commands.put(CMD_INITNEWCLUSTER, new InitNewCluster());</span>
+<span class="nc" id="L2137">        commands.put(CMD_NUKEEXISTINGCLUSTER, new NukeExistingCluster());</span>
+<span class="nc" id="L2138">        commands.put(CMD_BOOKIEFORMAT, new BookieFormatCmd());</span>
+<span class="nc" id="L2139">        commands.put(CMD_RECOVER, new RecoverCmd());</span>
+<span class="nc" id="L2140">        commands.put(CMD_LEDGER, new LedgerCmd());</span>
+<span class="nc" id="L2141">        commands.put(CMD_READ_LEDGER_ENTRIES, new ReadLedgerEntriesCmd());</span>
+<span class="nc" id="L2142">        commands.put(CMD_LISTLEDGERS, new ListLedgersCmd());</span>
+<span class="nc" id="L2143">        commands.put(CMD_ACTIVE_LEDGERS_ON_ENTRY_LOG_FILE, new ListActiveLedgersCmd());</span>
+<span class="nc" id="L2144">        commands.put(CMD_LISTUNDERREPLICATED, new ListUnderreplicatedCmd());</span>
+<span class="nc" id="L2145">        commands.put(CMD_WHOISAUDITOR, new WhoIsAuditorCmd());</span>
+<span class="nc" id="L2146">        commands.put(CMD_WHATISINSTANCEID, new WhatIsInstanceId());</span>
+<span class="nc" id="L2147">        commands.put(CMD_LEDGERMETADATA, new LedgerMetadataCmd());</span>
+<span class="nc" id="L2148">        commands.put(CMD_LOCALCONSISTENCYCHECK, new LocalConsistencyCheck());</span>
+<span class="nc" id="L2149">        commands.put(CMD_SIMPLETEST, new SimpleTestCmd());</span>
+<span class="nc" id="L2150">        commands.put(CMD_BOOKIESANITYTEST, new BookieSanityTestCmd());</span>
+<span class="nc" id="L2151">        commands.put(CMD_READLOG, new ReadLogCmd());</span>
+<span class="nc" id="L2152">        commands.put(CMD_READLOGMETADATA, new ReadLogMetadataCmd());</span>
+<span class="nc" id="L2153">        commands.put(CMD_READJOURNAL, new ReadJournalCmd());</span>
+<span class="nc" id="L2154">        commands.put(CMD_LASTMARK, new LastMarkCmd());</span>
+<span class="nc" id="L2155">        commands.put(CMD_AUTORECOVERY, new AutoRecoveryCmd());</span>
+<span class="nc" id="L2156">        commands.put(CMD_LISTBOOKIES, new ListBookiesCmd());</span>
+<span class="nc" id="L2157">        commands.put(CMD_LISTFILESONDISC, new ListDiskFilesCmd());</span>
+<span class="nc" id="L2158">        commands.put(CMD_UPDATECOOKIE, new UpdateCookieCmd());</span>
+<span class="nc" id="L2159">        commands.put(CMD_UPDATELEDGER, new UpdateLedgerCmd());</span>
+<span class="nc" id="L2160">        commands.put(CMD_UPDATE_BOOKIE_IN_LEDGER, new UpdateBookieInLedgerCmd());</span>
+<span class="nc" id="L2161">        commands.put(CMD_DELETELEDGER, new DeleteLedgerCmd());</span>
+<span class="nc" id="L2162">        commands.put(CMD_BOOKIEINFO, new BookieInfoCmd());</span>
+<span class="nc" id="L2163">        commands.put(CMD_DECOMMISSIONBOOKIE, new DecommissionBookieCmd());</span>
+<span class="nc" id="L2164">        commands.put(CMD_ENDPOINTINFO, new EndpointInfoCmd());</span>
+<span class="nc" id="L2165">        commands.put(CMD_CONVERT_TO_DB_STORAGE, new ConvertToDbStorageCmd());</span>
+<span class="nc" id="L2166">        commands.put(CMD_CONVERT_TO_INTERLEAVED_STORAGE, new ConvertToInterleavedStorageCmd());</span>
+<span class="nc" id="L2167">        commands.put(CMD_REBUILD_DB_LEDGER_LOCATIONS_INDEX, new RebuildDbLedgerLocationsIndexCmd());</span>
+<span class="nc" id="L2168">        commands.put(CMD_REGENERATE_INTERLEAVED_STORAGE_INDEX_FILE, new RegenerateInterleavedStorageIndexFile());</span>
+<span class="nc" id="L2169">        commands.put(CMD_HELP, new HelpCmd());</span>
+<span class="nc" id="L2170">        commands.put(CMD_LOSTBOOKIERECOVERYDELAY, new LostBookieRecoveryDelayCmd());</span>
+<span class="nc" id="L2171">        commands.put(CMD_TRIGGERAUDIT, new TriggerAuditCmd());</span>
+<span class="nc" id="L2172">        commands.put(CMD_FORCEAUDITCHECKS, new ForceAuditorChecksCmd());</span>
+        // cookie related commands
+<span class="nc" id="L2174">        commands.put(CMD_CREATE_COOKIE,</span>
+<span class="nc" id="L2175">            new CreateCookieCommand().asShellCommand(CMD_CREATE_COOKIE, bkConf));</span>
+<span class="nc" id="L2176">        commands.put(CMD_DELETE_COOKIE,</span>
+<span class="nc" id="L2177">            new DeleteCookieCommand().asShellCommand(CMD_DELETE_COOKIE, bkConf));</span>
+<span class="nc" id="L2178">        commands.put(CMD_UPDATE_COOKIE,</span>
+<span class="nc" id="L2179">            new UpdateCookieCommand().asShellCommand(CMD_UPDATE_COOKIE, bkConf));</span>
+<span class="nc" id="L2180">        commands.put(CMD_GET_COOKIE,</span>
+<span class="nc" id="L2181">            new GetCookieCommand().asShellCommand(CMD_GET_COOKIE, bkConf));</span>
+<span class="nc" id="L2182">        commands.put(CMD_GENERATE_COOKIE,</span>
+<span class="nc" id="L2183">            new GenerateCookieCommand().asShellCommand(CMD_GENERATE_COOKIE, bkConf));</span>
+    }
+
+    @Override
+    public void setConf(CompositeConfiguration conf) throws Exception {
+<span class="nc" id="L2188">        bkConf.loadConf(conf);</span>
+<span class="nc" id="L2189">        journalDirectories = Bookie.getCurrentDirectories(bkConf.getJournalDirs());</span>
+<span class="nc" id="L2190">        ledgerDirectories = Bookie.getCurrentDirectories(bkConf.getLedgerDirs());</span>
+<span class="nc bnc" id="L2191" title="All 2 branches missed.">        if (null == bkConf.getIndexDirs()) {</span>
+<span class="nc" id="L2192">            indexDirectories = ledgerDirectories;</span>
+        } else {
+<span class="nc" id="L2194">            indexDirectories = Bookie.getCurrentDirectories(bkConf.getIndexDirs());</span>
+        }
+<span class="nc" id="L2196">        pageSize = bkConf.getPageSize();</span>
+<span class="nc" id="L2197">        entriesPerPage = pageSize / 8;</span>
+<span class="nc" id="L2198">    }</span>
+
+    private void printShellUsage() {
+<span class="nc" id="L2201">        System.err.println(&quot;Usage: bookkeeper shell [-localbookie [&lt;host:port&gt;]] [-ledgeridformat &lt;hex/long/uuid&gt;] &quot;</span>
+                + &quot;[-entryformat &lt;hex/string&gt;] [-conf configuration] &lt;command&gt;&quot;);
+<span class="nc" id="L2203">        System.err.println(&quot;where command is one of:&quot;);</span>
+<span class="nc" id="L2204">        List&lt;String&gt; commandNames = new ArrayList&lt;String&gt;();</span>
+<span class="nc bnc" id="L2205" title="All 2 branches missed.">        for (Command c : commands.values()) {</span>
+<span class="nc" id="L2206">            commandNames.add(&quot;       &quot; + c.description());</span>
+<span class="nc" id="L2207">        }</span>
+<span class="nc" id="L2208">        Collections.sort(commandNames);</span>
+<span class="nc bnc" id="L2209" title="All 2 branches missed.">        for (String s : commandNames) {</span>
+<span class="nc" id="L2210">            System.err.println(s);</span>
+<span class="nc" id="L2211">        }</span>
+<span class="nc" id="L2212">    }</span>
+
+    @VisibleForTesting
+    public int execute(String... args) throws Exception {
+<span class="nc" id="L2216">        return run(args);</span>
+    }
+
+    @Override
+    public int run(String[] args) throws Exception {
+<span class="nc bnc" id="L2221" title="All 2 branches missed.">        if (args.length &lt;= 0) {</span>
+<span class="nc" id="L2222">            printShellUsage();</span>
+<span class="nc" id="L2223">            return -1;</span>
+        }
+<span class="nc" id="L2225">        String cmdName = args[0];</span>
+<span class="nc" id="L2226">        Command cmd = commands.get(cmdName);</span>
+<span class="nc bnc" id="L2227" title="All 2 branches missed.">        if (null == cmd) {</span>
+<span class="nc" id="L2228">            System.err.println(&quot;ERROR: Unknown command &quot; + cmdName);</span>
+<span class="nc" id="L2229">            printShellUsage();</span>
+<span class="nc" id="L2230">            return -1;</span>
+        }
+        // prepare new args
+<span class="nc" id="L2233">        String[] newArgs = new String[args.length - 1];</span>
+<span class="nc" id="L2234">        System.arraycopy(args, 1, newArgs, 0, newArgs.length);</span>
+<span class="nc" id="L2235">        return cmd.runCmd(newArgs);</span>
+    }
+
+    /**
+     * Returns the sorted list of the files in the given folders with the given file extensions.
+     * Sorting is done on the basis of CreationTime if the CreationTime is not available or if they are equal
+     * then sorting is done by LastModifiedTime
+     * @param folderNames - array of folders which we need to look recursively for files with given extensions
+     * @param extensions - the file extensions, which we are interested in
+     * @return sorted list of files
+     */
+    public static List&lt;File&gt; listFilesAndSort(File[] folderNames, String... extensions) {
+<span class="nc" id="L2247">        List&lt;File&gt; completeFilesList = new ArrayList&lt;File&gt;();</span>
+<span class="nc bnc" id="L2248" title="All 2 branches missed.">        for (int i = 0; i &lt; folderNames.length; i++) {</span>
+<span class="nc" id="L2249">            Collection&lt;File&gt; filesCollection = FileUtils.listFiles(folderNames[i], extensions, true);</span>
+<span class="nc" id="L2250">            completeFilesList.addAll(filesCollection);</span>
+        }
+<span class="nc" id="L2252">        Collections.sort(completeFilesList, new FilesTimeComparator());</span>
+<span class="nc" id="L2253">        return completeFilesList;</span>
+    }
+
+    private static class FilesTimeComparator implements Comparator&lt;File&gt;, Serializable {
+
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public int compare(File file1, File file2) {
+<span class="nc" id="L2262">            Path file1Path = Paths.get(file1.getAbsolutePath());</span>
+<span class="nc" id="L2263">            Path file2Path = Paths.get(file2.getAbsolutePath());</span>
+            try {
+<span class="nc" id="L2265">                BasicFileAttributes file1Attributes = Files.readAttributes(file1Path, BasicFileAttributes.class);</span>
+<span class="nc" id="L2266">                BasicFileAttributes file2Attributes = Files.readAttributes(file2Path, BasicFileAttributes.class);</span>
+<span class="nc" id="L2267">                FileTime file1CreationTime = file1Attributes.creationTime();</span>
+<span class="nc" id="L2268">                FileTime file2CreationTime = file2Attributes.creationTime();</span>
+<span class="nc" id="L2269">                int compareValue = file1CreationTime.compareTo(file2CreationTime);</span>
+                /*
+                 * please check https://docs.oracle.com/javase/7/docs/api/java/nio/file/attribute/BasicFileAttributes.html#creationTime()
+                 * So not all file system implementation store creation time, in that case creationTime()
+                 * method may return FileTime representing the epoch (1970-01-01T00:00:00Z). So in that case
+                 * it would be better to compare lastModifiedTime
+                 */
+<span class="nc bnc" id="L2276" title="All 2 branches missed.">                if (compareValue == 0) {</span>
+<span class="nc" id="L2277">                    FileTime file1LastModifiedTime = file1Attributes.lastModifiedTime();</span>
+<span class="nc" id="L2278">                    FileTime file2LastModifiedTime = file2Attributes.lastModifiedTime();</span>
+<span class="nc" id="L2279">                    compareValue = file1LastModifiedTime.compareTo(file2LastModifiedTime);</span>
+                }
+<span class="nc" id="L2281">                return compareValue;</span>
+<span class="nc" id="L2282">            } catch (IOException e) {</span>
+<span class="nc" id="L2283">                return 0;</span>
+            }
+        }
+    }
+
+    public static void main(String[] argv) throws Exception {
+<span class="nc" id="L2289">        BookieShell shell = new BookieShell();</span>
+
+        // handle some common options for multiple cmds
+<span class="nc" id="L2292">        Options opts = new Options();</span>
+<span class="nc" id="L2293">        opts.addOption(CONF_OPT, true, &quot;configuration file&quot;);</span>
+<span class="nc" id="L2294">        opts.addOption(LEDGERID_FORMATTER_OPT, true, &quot;format of ledgerId&quot;);</span>
+<span class="nc" id="L2295">        opts.addOption(ENTRY_FORMATTER_OPT, true, &quot;format of entries&quot;);</span>
+<span class="nc" id="L2296">        BasicParser parser = new BasicParser();</span>
+<span class="nc" id="L2297">        CommandLine cmdLine = parser.parse(opts, argv, true);</span>
+
+        // load configuration
+<span class="nc" id="L2300">        CompositeConfiguration conf = new CompositeConfiguration();</span>
+<span class="nc bnc" id="L2301" title="All 2 branches missed.">        if (cmdLine.hasOption(CONF_OPT)) {</span>
+<span class="nc" id="L2302">            String val = cmdLine.getOptionValue(CONF_OPT);</span>
+<span class="nc" id="L2303">            conf.addConfiguration(new PropertiesConfiguration(</span>
+<span class="nc" id="L2304">                    new File(val).toURI().toURL()));</span>
+        }
+<span class="nc" id="L2306">        shell.setConf(conf);</span>
+
+        // ledgerid format
+<span class="nc bnc" id="L2309" title="All 2 branches missed.">        if (cmdLine.hasOption(LEDGERID_FORMATTER_OPT)) {</span>
+<span class="nc" id="L2310">            String val = cmdLine.getOptionValue(LEDGERID_FORMATTER_OPT);</span>
+<span class="nc" id="L2311">            shell.ledgerIdFormatter = LedgerIdFormatter.newLedgerIdFormatter(val, shell.bkConf);</span>
+<span class="nc" id="L2312">        } else {</span>
+<span class="nc" id="L2313">            shell.ledgerIdFormatter = LedgerIdFormatter.newLedgerIdFormatter(shell.bkConf);</span>
+        }
+<span class="nc" id="L2315">        LOG.debug(&quot;Using ledgerIdFormatter {}&quot;, shell.ledgerIdFormatter.getClass());</span>
+
+        // entry format
+<span class="nc bnc" id="L2318" title="All 2 branches missed.">        if (cmdLine.hasOption(ENTRY_FORMATTER_OPT)) {</span>
+<span class="nc" id="L2319">            String val = cmdLine.getOptionValue(ENTRY_FORMATTER_OPT);</span>
+<span class="nc" id="L2320">            shell.entryFormatter = EntryFormatter.newEntryFormatter(val, shell.bkConf);</span>
+<span class="nc" id="L2321">        } else {</span>
+<span class="nc" id="L2322">            shell.entryFormatter = EntryFormatter.newEntryFormatter(shell.bkConf);</span>
+        }
+<span class="nc" id="L2324">        LOG.debug(&quot;Using entry formatter {}&quot;, shell.entryFormatter.getClass());</span>
+
+<span class="nc" id="L2326">        int res = shell.run(cmdLine.getArgs());</span>
+<span class="nc" id="L2327">        System.exit(res);</span>
+<span class="nc" id="L2328">    }</span>
+
+    private synchronized void initEntryLogger() throws IOException {
+<span class="nc bnc" id="L2331" title="All 2 branches missed.">        if (null == entryLogger) {</span>
+            // provide read only entry logger
+<span class="nc" id="L2333">            entryLogger = new ReadOnlyEntryLogger(bkConf);</span>
+        }
+<span class="nc" id="L2335">    }</span>
+
+    ///
+    /// Bookie Shell Commands
+    ///
+
+    protected void printEntryLogMetadata(long logId) throws IOException {
+<span class="nc" id="L2342">        LOG.info(&quot;Print entryLogMetadata of entrylog {} ({}.log)&quot;, logId, Long.toHexString(logId));</span>
+<span class="nc" id="L2343">        initEntryLogger();</span>
+<span class="nc" id="L2344">        EntryLogMetadata entryLogMetadata = entryLogger.getEntryLogMetadata(logId);</span>
+<span class="nc" id="L2345">        entryLogMetadata.getLedgersMap().forEach((ledgerId, size) -&gt; {</span>
+<span class="nc" id="L2346">            LOG.info(&quot;--------- Lid={}, TotalSizeOfEntriesOfLedger={}  ---------&quot;,</span>
+<span class="nc" id="L2347">                    ledgerIdFormatter.formatLedgerId(ledgerId), size);</span>
+<span class="nc" id="L2348">        });</span>
+<span class="nc" id="L2349">    }</span>
+
+
+    /**
+     * Format the entry into a readable format.
+     *
+     * @param entry
+     *          ledgerentry to print
+     * @param printMsg
+     *          Whether printing the message body
+     */
+    private void formatEntry(LedgerEntry entry, boolean printMsg) {
+<span class="nc" id="L2361">        long ledgerId = entry.getLedgerId();</span>
+<span class="nc" id="L2362">        long entryId = entry.getEntryId();</span>
+<span class="nc" id="L2363">        long entrySize = entry.getLength();</span>
+<span class="nc" id="L2364">        System.out.println(&quot;--------- Lid=&quot; + ledgerIdFormatter.formatLedgerId(ledgerId) + &quot;, Eid=&quot; + entryId</span>
+                + &quot;, EntrySize=&quot; + entrySize + &quot; ---------&quot;);
+<span class="nc bnc" id="L2366" title="All 2 branches missed.">        if (printMsg) {</span>
+<span class="nc" id="L2367">            entryFormatter.formatEntry(entry.getEntry());</span>
+        }
+<span class="nc" id="L2369">    }</span>
+
+    private static int getOptionIntValue(CommandLine cmdLine, String option, int defaultVal) {
+<span class="nc bnc" id="L2372" title="All 2 branches missed.">        if (cmdLine.hasOption(option)) {</span>
+<span class="nc" id="L2373">            String val = cmdLine.getOptionValue(option);</span>
+            try {
+<span class="nc" id="L2375">                return Integer.parseInt(val);</span>
+<span class="nc" id="L2376">            } catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L2377">                System.err.println(&quot;ERROR: invalid value for option &quot; + option + &quot; : &quot; + val);</span>
+<span class="nc" id="L2378">                return defaultVal;</span>
+            }
+        }
+<span class="nc" id="L2381">        return defaultVal;</span>
+    }
+
+    private static long getOptionLongValue(CommandLine cmdLine, String option, long defaultVal) {
+<span class="nc bnc" id="L2385" title="All 2 branches missed.">        if (cmdLine.hasOption(option)) {</span>
+<span class="nc" id="L2386">            String val = cmdLine.getOptionValue(option);</span>
+            try {
+<span class="nc" id="L2388">                return Long.parseLong(val);</span>
+<span class="nc" id="L2389">            } catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L2390">                System.err.println(&quot;ERROR: invalid value for option &quot; + option + &quot; : &quot; + val);</span>
+<span class="nc" id="L2391">                return defaultVal;</span>
+            }
+        }
+<span class="nc" id="L2394">        return defaultVal;</span>
+    }
+
+    private long getOptionLedgerIdValue(CommandLine cmdLine, String option, long defaultVal) {
+<span class="nc bnc" id="L2398" title="All 2 branches missed.">        if (cmdLine.hasOption(option)) {</span>
+<span class="nc" id="L2399">            String val = cmdLine.getOptionValue(option);</span>
+            try {
+<span class="nc" id="L2401">                return ledgerIdFormatter.readLedgerId(val);</span>
+<span class="nc" id="L2402">            } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L2403">                System.err.println(&quot;ERROR: invalid value for option &quot; + option + &quot; : &quot; + val);</span>
+<span class="nc" id="L2404">                return defaultVal;</span>
+            }
+        }
+<span class="nc" id="L2407">        return defaultVal;</span>
+    }
+
+    private static boolean getOptionBooleanValue(CommandLine cmdLine, String option, boolean defaultVal) {
+<span class="nc bnc" id="L2411" title="All 2 branches missed.">        if (cmdLine.hasOption(option)) {</span>
+<span class="nc" id="L2412">            String val = cmdLine.getOptionValue(option);</span>
+<span class="nc" id="L2413">            return Boolean.parseBoolean(val);</span>
+        }
+<span class="nc" id="L2415">        return defaultVal;</span>
+    }
+
+    private static boolean getOptionalValue(String optValue, String optName) {
+<span class="nc" id="L2419">        return StringUtils.equals(optValue, optName);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

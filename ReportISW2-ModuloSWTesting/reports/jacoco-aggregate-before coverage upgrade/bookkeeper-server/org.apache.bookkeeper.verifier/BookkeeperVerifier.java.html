@@ -1,0 +1,695 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>BookkeeperVerifier.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.verifier</a> &gt; <span class="el_source">BookkeeperVerifier.java</span></div><h1>BookkeeperVerifier.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.verifier;
+
+import static com.google.common.base.Preconditions.checkState;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.Queue;
+import java.util.Random;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+
+import org.apache.bookkeeper.client.BKException;
+
+/**
+ * Encapsulates logic for playing and verifying operations against a bookkeeper-like
+ * interface. The test state consists of a set of ledgers in 1 of several states:
+ * 1) opening -- waiting for driver to complete open
+ * 2) open -- valid targets for reads and writes
+ * 3) live -- valid targets for reads
+ * 4) deleting
+ * Each ledger moves in sequence through these states.  See startWrite for the
+ * code driving the lifecycle.
+ */
+public class BookkeeperVerifier {
+<span class="nc" id="L49">    private final Queue&lt;Exception&gt; errors = new LinkedList&lt;&gt;();</span>
+
+    private synchronized boolean checkReturn(long ledgerID, int rc) {
+<span class="nc bnc" id="L52" title="All 2 branches missed.">        if (BKException.Code.OK != rc) {</span>
+<span class="nc" id="L53">            String error = String.format(&quot;Got error %d on ledger %d&quot;, rc, ledgerID);</span>
+<span class="nc" id="L54">            System.out.println(error);</span>
+<span class="nc" id="L55">            propagateExceptionToMain(BKException.create(rc));</span>
+<span class="nc" id="L56">            return true;</span>
+        } else {
+<span class="nc" id="L58">            return false;</span>
+        }
+    }
+
+    private synchronized void propagateExceptionToMain(Exception e) {
+<span class="nc" id="L63">        errors.add(e);</span>
+<span class="nc" id="L64">        this.notifyAll();</span>
+<span class="nc" id="L65">    }</span>
+
+    private synchronized void printThrowExceptions() throws Exception {
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        if (!errors.isEmpty()) {</span>
+<span class="nc bnc" id="L69" title="All 2 branches missed.">            for (Exception e: errors) {</span>
+<span class="nc" id="L70">                System.out.format(&quot;Error found: %s%n&quot;, e.toString());</span>
+<span class="nc" id="L71">                e.printStackTrace();</span>
+<span class="nc" id="L72">            }</span>
+<span class="nc" id="L73">            throw errors.poll();</span>
+        }
+<span class="nc" id="L75">    }</span>
+
+    /**
+     * Provides an interface for translating test operations into operations on a
+     * cluster.
+     */
+    public interface BookkeeperDriver {
+        void createLedger(
+                long ledgerID, int enSize, int writeQSize, int ackQSize,
+                Consumer&lt;Integer&gt; cb
+        );
+
+        void closeLedger(
+                long ledgerID,
+                Consumer&lt;Integer&gt; cb
+        );
+
+        void deleteLedger(
+                long ledgerID,
+                Consumer&lt;Integer&gt; cb
+        );
+
+        void writeEntry(
+                long ledgerID,
+                long entryID,
+                byte[] data,
+                Consumer&lt;Integer&gt; cb
+        );
+
+        /**
+         * Callback for reads.
+         */
+        interface ReadCallback {
+            void complete(
+                    long ledgerID,
+                    ArrayList&lt;byte[]&gt; results
+            );
+        }
+
+        void readEntries(
+                long ledgerID,
+                long firstEntryID,
+                long lastEntryID,
+                BiConsumer&lt;Integer, ArrayList&lt;byte[]&gt;&gt; cb);
+    }
+
+    private final BookkeeperDriver driver;
+
+    private final int ensembleSize;
+    private final int writeQuorum;
+    private final int ackQuorum;
+    private final int duration;
+    private final int drainTimeout;
+    private final int targetConcurrentLedgers;
+    private final int targetConcurrentWrites;
+    private final int targetWriteGroup;
+    private final int targetReadGroup;
+    private final int targetLedgers;
+    private final int targetEntrySize;
+    private final int targetConcurrentReads;
+    private final double coldToHotRatio;
+
+    private final long targetLedgerEntries;
+
+    BookkeeperVerifier(
+            BookkeeperDriver driver,
+            int ensembleSize,
+            int writeQuorum,
+            int ackQuorum,
+            int duration,
+            int drainTimeout,
+            int targetConcurrentLedgers,
+            int targetConcurrentWrites,
+            int targetWriteGroup,
+            int targetReadGroup,
+            int targetLedgers,
+            long targetLedgerSize,
+            int targetEntrySize,
+            int targetConcurrentReads,
+<span class="nc" id="L154">            double coldToHotRatio) {</span>
+<span class="nc" id="L155">        this.driver = driver;</span>
+<span class="nc" id="L156">        this.ensembleSize = ensembleSize;</span>
+<span class="nc" id="L157">        this.writeQuorum = writeQuorum;</span>
+<span class="nc" id="L158">        this.ackQuorum = ackQuorum;</span>
+<span class="nc" id="L159">        this.duration = duration;</span>
+<span class="nc" id="L160">        this.drainTimeout = drainTimeout;</span>
+<span class="nc" id="L161">        this.targetConcurrentLedgers = targetConcurrentLedgers;</span>
+<span class="nc" id="L162">        this.targetConcurrentWrites = targetConcurrentWrites;</span>
+<span class="nc" id="L163">        this.targetWriteGroup = targetWriteGroup;</span>
+<span class="nc" id="L164">        this.targetReadGroup = targetReadGroup;</span>
+<span class="nc" id="L165">        this.targetLedgers = targetLedgers;</span>
+<span class="nc" id="L166">        this.targetEntrySize = targetEntrySize;</span>
+<span class="nc" id="L167">        this.targetConcurrentReads = targetConcurrentReads;</span>
+<span class="nc" id="L168">        this.coldToHotRatio = coldToHotRatio;</span>
+
+<span class="nc" id="L170">        this.targetLedgerEntries = targetLedgerSize / targetEntrySize;</span>
+<span class="nc" id="L171">    }</span>
+
+<span class="nc" id="L173">    private int outstandingWriteCount = 0;</span>
+<span class="nc" id="L174">    private int outstandingReadCount = 0;</span>
+<span class="nc" id="L175">    private long nextLedger = 0;</span>
+    private long getNextLedgerID() {
+<span class="nc" id="L177">        return nextLedger++;</span>
+    }
+
+    /**
+     * State required to regenerate an entry.
+     */
+    class EntryInfo {
+        private final long entryID;
+        private final long seed;
+<span class="nc" id="L186">        EntryInfo(long entryID, long seed) {</span>
+<span class="nc" id="L187">            this.entryID = entryID;</span>
+<span class="nc" id="L188">            this.seed = seed;</span>
+<span class="nc" id="L189">        }</span>
+        byte[] getBuffer() {
+<span class="nc" id="L191">            Random rand = new Random(seed);</span>
+<span class="nc" id="L192">            byte[] ret = new byte[targetEntrySize];</span>
+<span class="nc" id="L193">            rand.nextBytes(ret);</span>
+<span class="nc" id="L194">            return ret;</span>
+        }
+        long getEntryID() {
+<span class="nc" id="L197">            return entryID;</span>
+        }
+    }
+
+    /**
+     * Contains the state required to reconstruct the contents of any entry in the ledger.
+     * The seed value passed into the constructor fully determines the contents of the
+     * ledger.  Each EntryInfo has its own seed generated sequentially from a Random instance
+     * seeded from the original seed.  It then uses that seed to generate a secondary Random
+     * instance for generating the bytes within the entry.  See EntryIterator for details.
+     * Random(seed)
+     *  |
+     *  E0 -&gt; Random(E0) -&gt; getBuffer()
+     *  |
+     *  E1 -&gt; Random(E1) -&gt; getBuffer()
+     *  |
+     *  E2 -&gt; Random(E2) -&gt; getBuffer()
+     *  |
+     *  E3 -&gt; Random(E3) -&gt; getBuffer()
+     *  |
+     *  E4 -&gt; Random(E4) -&gt; getBuffer()
+     *  |
+     *  ...
+     */
+<span class="nc bnc" id="L221" title="All 2 branches missed.">    class LedgerInfo {</span>
+        private final long ledgerID;
+        private final long seed;
+<span class="nc" id="L224">        private long lastEntryIDCompleted = -1;</span>
+<span class="nc" id="L225">        private long confirmedLAC = -1;</span>
+<span class="nc" id="L226">        private boolean closed = false;</span>
+
+<span class="nc" id="L228">        final TreeSet&lt;Long&gt; writesInProgress = new TreeSet&lt;&gt;();</span>
+<span class="nc" id="L229">        final TreeSet&lt;Long&gt; writesCompleted = new TreeSet&lt;&gt;();</span>
+<span class="nc" id="L230">        int readsInProgress = 0;</span>
+<span class="nc" id="L231">        Consumer&lt;Consumer&lt;Integer&gt;&gt; onLastOp = null;</span>
+<span class="nc" id="L232">        Consumer&lt;Consumer&lt;Integer&gt;&gt; onLastWrite = null;</span>
+
+        EntryIterator iter;
+
+<span class="nc" id="L236">        LedgerInfo(long ledgerID, long seed) {</span>
+<span class="nc" id="L237">            this.ledgerID = ledgerID;</span>
+<span class="nc" id="L238">            this.seed = seed;</span>
+<span class="nc" id="L239">            iter = new EntryIterator();</span>
+<span class="nc" id="L240">        }</span>
+
+        long getLastEntryIDCompleted() {
+<span class="nc" id="L243">            return lastEntryIDCompleted;</span>
+        }
+
+        long getConfirmedLAC() {
+<span class="nc" id="L247">            return confirmedLAC;</span>
+        }
+
+        ArrayList&lt;EntryInfo&gt; getNextEntries(int num) {
+<span class="nc" id="L251">            ArrayList&lt;EntryInfo&gt; ret = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L252" title="All 4 branches missed.">            for (int i = 0; i &lt; num &amp;&amp; iter.hasNext(); ++i) {</span>
+<span class="nc" id="L253">                ret.add(iter.next());</span>
+            }
+<span class="nc" id="L255">            return ret;</span>
+        }
+
+        class EntryIterator implements Iterator&lt;EntryInfo&gt; {
+            Random rand;
+            long currentID;
+            long currentSeed;
+
+<span class="nc" id="L263">            EntryIterator() {</span>
+<span class="nc" id="L264">                seek(-1);</span>
+<span class="nc" id="L265">            }</span>
+
+            void seek(long entryID) {
+<span class="nc" id="L268">                currentID = -1;</span>
+<span class="nc" id="L269">                currentSeed = seed;</span>
+<span class="nc" id="L270">                rand = new Random(seed);</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">                while (currentID &lt; entryID) {</span>
+<span class="nc" id="L272">                    advance();</span>
+                }
+<span class="nc" id="L274">            }</span>
+
+            void advance() {
+<span class="nc" id="L277">                currentSeed = rand.nextLong();</span>
+<span class="nc" id="L278">                currentID++;</span>
+<span class="nc" id="L279">            }</span>
+
+            EntryInfo get() {
+<span class="nc" id="L282">                return new EntryInfo(currentID, currentSeed);</span>
+            }
+
+            @Override
+            public boolean hasNext() {
+<span class="nc bnc" id="L287" title="All 2 branches missed.">                return currentID &lt; targetLedgerEntries;</span>
+            }
+
+
+            @Override
+            public EntryInfo next() {
+<span class="nc" id="L293">                advance();</span>
+<span class="nc" id="L294">                return get();</span>
+            }
+        }
+
+        EntryIterator getIterator() {
+<span class="nc" id="L299">            return new EntryIterator();</span>
+        }
+
+        void openWrite(long entryID) {
+<span class="nc" id="L303">            writesInProgress.add(entryID);</span>
+<span class="nc" id="L304">            System.out.format(&quot;Open writes, %s%n&quot;, writesInProgress.toString());</span>
+<span class="nc" id="L305">        }</span>
+
+        void incReads() {
+<span class="nc" id="L308">            readsInProgress++;</span>
+<span class="nc" id="L309">            System.out.format(&quot;Inc reads to %d%n&quot;, readsInProgress);</span>
+<span class="nc" id="L310">        }</span>
+
+        /**
+         * The idea here is that we may need to register an operation which needs to run
+         * whenever the final op completes on this Ledger (like deletion).  If there
+         * are none, newOnLastOp should be called synchronously with cb.  Otherwise,
+         * cb should be called synchronously with cb and newOnLastOp should be called
+         * with the cb passed in with the decReads or closeWrite.
+         * In the deletion case, cb would be the callback for the error from
+         * the deletion operation (if it happens).  The reason for all of this is that
+         * the delete case will need to chain an async call to delete into the async callback
+         * chain for whatever the last operation to complete on this Ledger.  newOnLastOp
+         * would invoke that delete.  The cb passed in allows it to pick up and continue
+         * the original chain.
+         * @param cb Callback to get result of newOnLastOp if called now
+         * @param newOnLastOp Callback to be invoked on the last decReads or closeWrite,
+         *                    should be passed the cb passed in with the final closeWrite
+         *                    or decReads
+         */
+        void onLastOpComplete(
+                Consumer&lt;Integer&gt; cb,
+                Consumer&lt;Consumer&lt;Integer&gt;&gt; newOnLastOp) {
+<span class="nc bnc" id="L332" title="All 2 branches missed.">            checkState(onLastOp == null);</span>
+<span class="nc" id="L333">            onLastOp = newOnLastOp;</span>
+<span class="nc" id="L334">            checkOpComplete(cb);</span>
+<span class="nc" id="L335">        }</span>
+
+        /**
+         * Very similar to onLastOpComplete, but gets called on the final call to closeWrite.
+         * @param cb Callback to get result of newOnLastWrite if called now
+         * @param newOnLastWrite Callback to be invoked on the last closeWrite,
+         *                       should be passed the cb passed in with the final closeWrite.
+         */
+        void onLastWriteComplete(
+                Consumer&lt;Integer&gt; cb,
+                Consumer&lt;Consumer&lt;Integer&gt;&gt; newOnLastWrite) {
+<span class="nc bnc" id="L346" title="All 4 branches missed.">            assert (onLastWrite == null);</span>
+<span class="nc" id="L347">            onLastWrite = newOnLastWrite;</span>
+<span class="nc" id="L348">            checkWriteComplete(cb);</span>
+<span class="nc" id="L349">        }</span>
+
+        void closeWrite(long entryID, Consumer&lt;Integer&gt; cb) {
+<span class="nc" id="L352">            writesInProgress.remove(entryID);</span>
+<span class="nc" id="L353">            writesCompleted.add(entryID);</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">            long completedTo = writesInProgress.isEmpty() ? Long.MAX_VALUE : writesInProgress.first();</span>
+<span class="nc bnc" id="L355" title="All 4 branches missed.">            while (!writesCompleted.isEmpty() &amp;&amp; writesCompleted.first() &lt; completedTo) {</span>
+<span class="nc" id="L356">                lastEntryIDCompleted = writesCompleted.first();</span>
+<span class="nc" id="L357">                writesCompleted.remove(writesCompleted.first());</span>
+            }
+<span class="nc" id="L359">            checkWriteComplete((rc) -&gt; {</span>
+<span class="nc" id="L360">                checkReturn(ledgerID, rc);</span>
+<span class="nc" id="L361">                checkOpComplete(cb);</span>
+<span class="nc" id="L362">            });</span>
+<span class="nc" id="L363">        }</span>
+
+        void updateLAC(long lac) {
+<span class="nc bnc" id="L366" title="All 2 branches missed.">            if (lac &gt; confirmedLAC) {</span>
+<span class="nc" id="L367">                confirmedLAC = lac;</span>
+            }
+<span class="nc" id="L369">        }</span>
+
+        void decReads(Consumer&lt;Integer&gt; cb) {
+<span class="nc" id="L372">            --readsInProgress;</span>
+<span class="nc" id="L373">            checkOpComplete(cb);</span>
+<span class="nc" id="L374">        }</span>
+
+        private void checkWriteComplete(Consumer&lt;Integer&gt; cb) {
+<span class="nc bnc" id="L377" title="All 4 branches missed.">            if (writesInProgress.isEmpty() &amp;&amp; onLastWrite != null) {</span>
+<span class="nc" id="L378">                System.out.format(&quot;checkWriteComplete: done%n&quot;);</span>
+<span class="nc" id="L379">                onLastWrite.accept(cb);</span>
+<span class="nc" id="L380">                onLastWrite = null;</span>
+            } else {
+<span class="nc" id="L382">                System.out.format(</span>
+                        &quot;checkWriteComplete: ledger %d, writesInProgress %s%n&quot;,
+<span class="nc" id="L384">                        ledgerID,</span>
+<span class="nc" id="L385">                        writesInProgress.toString());</span>
+<span class="nc" id="L386">                cb.accept(0);</span>
+            }
+<span class="nc" id="L388">        }</span>
+
+        private void checkOpComplete(Consumer&lt;Integer&gt; cb) {
+<span class="nc bnc" id="L391" title="All 6 branches missed.">            if (readsInProgress == 0 &amp;&amp; writesInProgress.isEmpty() &amp;&amp; onLastOp != null) {</span>
+<span class="nc" id="L392">                System.out.format(&quot;checkOpComplete: done%n&quot;);</span>
+<span class="nc" id="L393">                onLastOp.accept(cb);</span>
+<span class="nc" id="L394">                onLastOp = null;</span>
+            } else {
+<span class="nc" id="L396">                System.out.format(</span>
+                        &quot;checkOpComplete: ledger %d, writesInProgress %s, readsInProgress %d%n&quot;,
+<span class="nc" id="L398">                        ledgerID,</span>
+<span class="nc" id="L399">                        writesInProgress.toString(), readsInProgress);</span>
+<span class="nc" id="L400">                cb.accept(0);</span>
+            }
+<span class="nc" id="L402">        }</span>
+
+        public boolean isClosed() {
+<span class="nc" id="L405">            return closed;</span>
+        }
+        public void setClosed() {
+<span class="nc" id="L408">            closed = true;</span>
+<span class="nc" id="L409">            confirmedLAC = lastEntryIDCompleted;</span>
+<span class="nc" id="L410">        }</span>
+    }
+
+<span class="nc" id="L413">    private final Set&lt;LedgerInfo&gt; openingLedgers = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L414">    private final Set&lt;LedgerInfo&gt; openLedgers = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L415">    private final Set&lt;LedgerInfo&gt; liveLedgers = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L416">    private final Random opRand = new Random();</span>
+
+    private LedgerInfo getRandomLedger(Collection&lt;LedgerInfo&gt; ledgerCollection) {
+<span class="nc" id="L419">        int elem = opRand.nextInt(ledgerCollection.size());</span>
+<span class="nc" id="L420">        Iterator&lt;LedgerInfo&gt; iter = ledgerCollection.iterator();</span>
+<span class="nc bnc" id="L421" title="All 2 branches missed.">        for (int i = 0; i &lt; elem; ++i) {</span>
+<span class="nc" id="L422">            iter.next();</span>
+        }
+<span class="nc" id="L424">        return iter.next();</span>
+    }
+
+    private synchronized boolean startRead() {
+<span class="nc bnc" id="L428" title="All 2 branches missed.">        if (outstandingReadCount &gt; targetConcurrentReads) {</span>
+<span class="nc" id="L429">            System.out.format(&quot;Not starting another read, enough in progress%n&quot;);</span>
+            /* Caller should exit and wait for outstandingReadCount to fall */
+<span class="nc" id="L431">            return false;</span>
+        }
+        LedgerInfo ledger;
+<span class="nc bnc" id="L434" title="All 4 branches missed.">        if (!openLedgers.isEmpty() &amp;&amp; (opRand.nextDouble() &gt; coldToHotRatio)) {</span>
+<span class="nc" id="L435">            ledger = getRandomLedger(openLedgers);</span>
+<span class="nc" id="L436">            System.out.format(&quot;Reading from open ledger %d%n&quot;, ledger.ledgerID);</span>
+<span class="nc bnc" id="L437" title="All 2 branches missed.">        } else if (!liveLedgers.isEmpty()) {</span>
+<span class="nc" id="L438">            ledger = getRandomLedger(liveLedgers);</span>
+<span class="nc" id="L439">            System.out.format(&quot;Reading from cold ledger %d%n&quot;, ledger.ledgerID);</span>
+        } else {
+            /* No readable ledgers, either startWrite can make progress, or there are already ledgers
+             * opening.
+             */
+<span class="nc" id="L444">            return false;</span>
+        }
+<span class="nc" id="L446">        long lastEntryCompleted = ledger.getConfirmedLAC();</span>
+<span class="nc bnc" id="L447" title="All 2 branches missed.">        if (lastEntryCompleted &lt;= 0) {</span>
+<span class="nc" id="L448">            System.out.format(&quot;No readable entries in ledger %d, let's wait%n&quot;, ledger.ledgerID);</span>
+            /* Either startWrite can make progress or there are already a bunch in progress */
+<span class="nc" id="L450">            return false;</span>
+        }
+<span class="nc" id="L452">        long start = Math.abs(opRand.nextLong() % lastEntryCompleted);</span>
+<span class="nc bnc" id="L453" title="All 2 branches missed.">        long end = start + targetReadGroup &gt; lastEntryCompleted ? lastEntryCompleted : start + targetReadGroup;</span>
+<span class="nc" id="L454">        System.out.format(&quot;Reading %d -&gt; %d from ledger %d%n&quot;, start, end, ledger.ledgerID);</span>
+<span class="nc" id="L455">        LedgerInfo finalLedger = ledger;</span>
+<span class="nc" id="L456">        ledger.incReads();</span>
+<span class="nc" id="L457">        driver.readEntries(ledger.ledgerID, start, end, (rc, results) -&gt; {</span>
+<span class="nc" id="L458">            synchronized (BookkeeperVerifier.this) {</span>
+<span class="nc bnc" id="L459" title="All 2 branches missed.">                if (checkReturn(ledger.ledgerID, rc)) {</span>
+<span class="nc" id="L460">                    return;</span>
+                }
+<span class="nc" id="L462">                System.out.format(&quot;Read %d -&gt; %d from ledger %d complete%n&quot;, start, end, ledger.ledgerID);</span>
+<span class="nc" id="L463">                long current = start;</span>
+<span class="nc" id="L464">                LedgerInfo.EntryIterator iterator = finalLedger.getIterator();</span>
+<span class="nc" id="L465">                iterator.seek(current - 1);</span>
+<span class="nc bnc" id="L466" title="All 2 branches missed.">                for (byte[] result : results) {</span>
+<span class="nc" id="L467">                    byte[] check = iterator.next().getBuffer();</span>
+<span class="nc bnc" id="L468" title="All 2 branches missed.">                    if (result.length != check.length) {</span>
+<span class="nc" id="L469">                        propagateExceptionToMain(new Exception(String.format(</span>
+                                &quot;Mismatched entry length on entry %d for ledger %d, read returned %d, should be %d&quot;,
+<span class="nc" id="L471">                                current, ledger.ledgerID, result.length, check.length)</span>
+                        ));
+                    }
+                        /* Verify contents */
+<span class="nc bnc" id="L475" title="All 2 branches missed.">                    if (!Arrays.equals(check, result)) {</span>
+<span class="nc" id="L476">                        int i = 0;</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">                        for (; i &lt; check.length; ++i) {</span>
+<span class="nc bnc" id="L478" title="All 2 branches missed.">                            if (check[i] != result[i]) {</span>
+<span class="nc" id="L479">                                break;</span>
+                            }
+                        }
+<span class="nc" id="L482">                        propagateExceptionToMain(new Exception(String.format(</span>
+                                &quot;Mismatched entry contents on entry %d for ledger %d at offset %d, length %d&quot;,
+<span class="nc" id="L484">                                current, ledger.ledgerID, i, check.length)</span>
+                        ));
+                    }
+<span class="nc" id="L487">                    current++;</span>
+<span class="nc" id="L488">                }</span>
+<span class="nc" id="L489">                finalLedger.decReads((rc2) -&gt; {</span>
+<span class="nc" id="L490">                    synchronized (BookkeeperVerifier.this) {</span>
+<span class="nc" id="L491">                        checkReturn(ledger.ledgerID, rc2);</span>
+<span class="nc" id="L492">                        System.out.format(&quot;Read %d -&gt; %d from ledger %d releasing read%n&quot;, start, end, ledger.ledgerID);</span>
+<span class="nc" id="L493">                        outstandingReadCount--;</span>
+<span class="nc" id="L494">                        BookkeeperVerifier.this.notifyAll();</span>
+<span class="nc" id="L495">                    }</span>
+<span class="nc" id="L496">                });</span>
+<span class="nc" id="L497">            }</span>
+<span class="nc" id="L498">        });</span>
+<span class="nc" id="L499">        ++outstandingReadCount;</span>
+<span class="nc" id="L500">        return true;</span>
+    }
+
+    class WriteCallback implements Consumer&lt;Integer&gt; {
+<span class="nc" id="L504">        private int completed = 0;</span>
+        private final int toWaitFor;
+        private final LedgerInfo ledger;
+        private final long lastEntry;
+        private final long pendingLAC;
+<span class="nc" id="L509">        WriteCallback(LedgerInfo ledger, long lastEntry, long pendingLAC, int toWaitFor) {</span>
+<span class="nc" id="L510">            this.toWaitFor = toWaitFor;</span>
+<span class="nc" id="L511">            this.ledger = ledger;</span>
+<span class="nc" id="L512">            this.lastEntry = lastEntry;</span>
+<span class="nc" id="L513">            this.pendingLAC = pendingLAC;</span>
+<span class="nc" id="L514">        }</span>
+
+        @Override
+        public void accept(Integer rc) {
+<span class="nc" id="L518">            synchronized (BookkeeperVerifier.this) {</span>
+<span class="nc bnc" id="L519" title="All 2 branches missed.">                if (checkReturn(ledger.ledgerID, rc)) {</span>
+<span class="nc" id="L520">                    return;</span>
+                }
+<span class="nc" id="L522">                ++completed;</span>
+<span class="nc bnc" id="L523" title="All 2 branches missed.">                if (toWaitFor == completed) {</span>
+<span class="nc" id="L524">                    System.out.format(&quot;Writes ending at %d complete on ledger %d%n&quot;, lastEntry, ledger.ledgerID);</span>
+<span class="nc" id="L525">                    ledger.closeWrite(lastEntry, (rc2) -&gt; {</span>
+<span class="nc" id="L526">                        synchronized (BookkeeperVerifier.this) {</span>
+<span class="nc" id="L527">                            checkReturn(ledger.ledgerID, rc2);</span>
+<span class="nc" id="L528">                            System.out.format(&quot;Writes ending at %d complete on ledger %d releasing write%n&quot;,</span>
+<span class="nc" id="L529">                                    lastEntry, ledger.ledgerID);</span>
+<span class="nc" id="L530">                            --outstandingWriteCount;</span>
+<span class="nc" id="L531">                            BookkeeperVerifier.this.notifyAll();</span>
+<span class="nc" id="L532">                        }</span>
+<span class="nc" id="L533">                    });</span>
+<span class="nc" id="L534">                    ledger.updateLAC(pendingLAC);</span>
+                }
+<span class="nc" id="L536">            }</span>
+<span class="nc" id="L537">        }</span>
+    }
+
+    /**
+     * Attempt to start one more write, return false if too many are in progress.
+     * @return false if unable to start more
+     */
+    private synchronized boolean startWrite() {
+<span class="nc bnc" id="L545" title="All 2 branches missed.">        if (outstandingWriteCount &gt; targetConcurrentWrites) {</span>
+<span class="nc" id="L546">            System.out.format(&quot;Write paused, too many outstanding writes%n&quot;);</span>
+            /* Caller should release lock and wait for outstandingWriteCount to fall */
+<span class="nc" id="L548">            return false;</span>
+        }
+<span class="nc bnc" id="L550" title="All 2 branches missed.">        if (openLedgers.size() + openingLedgers.size() &lt; targetConcurrentLedgers) {</span>
+            /* Not enough open ledgers, open a new one -- counts as a write */
+<span class="nc" id="L552">            long newID = getNextLedgerID();</span>
+<span class="nc" id="L553">            System.out.format(&quot;Creating new ledger %d%n&quot;, newID);</span>
+<span class="nc" id="L554">            LedgerInfo ledger = new LedgerInfo(newID, opRand.nextLong());</span>
+<span class="nc" id="L555">            openingLedgers.add(ledger);</span>
+<span class="nc" id="L556">            driver.createLedger(newID, ensembleSize, writeQuorum, ackQuorum, (rc) -&gt; {</span>
+<span class="nc" id="L557">                synchronized (BookkeeperVerifier.this) {</span>
+<span class="nc" id="L558">                    checkReturn(newID, rc);</span>
+<span class="nc" id="L559">                    System.out.format(&quot;Created new ledger %d%n&quot;, newID);</span>
+<span class="nc" id="L560">                    openingLedgers.remove(ledger);</span>
+<span class="nc" id="L561">                    openLedgers.add(ledger);</span>
+<span class="nc" id="L562">                    --outstandingWriteCount;</span>
+<span class="nc" id="L563">                    BookkeeperVerifier.this.notifyAll();</span>
+<span class="nc" id="L564">                }</span>
+<span class="nc" id="L565">            });</span>
+<span class="nc" id="L566">            ++outstandingWriteCount;</span>
+<span class="nc" id="L567">            return true;</span>
+<span class="nc bnc" id="L568" title="All 2 branches missed.">        } else if (openLedgers.isEmpty()) {</span>
+<span class="nc" id="L569">            System.out.format(&quot;Not starting a write, no open ledgers, already opening the limit%n&quot;);</span>
+            /* Caller should release lock and wait for openLedgers to be populated */
+<span class="nc" id="L571">            return false;</span>
+        } else {
+<span class="nc" id="L573">            LedgerInfo ledger = getRandomLedger(openLedgers);</span>
+<span class="nc" id="L574">            ArrayList&lt;EntryInfo&gt; toWrite = ledger.getNextEntries(targetWriteGroup);</span>
+<span class="nc" id="L575">            long lastEntry = toWrite.get(toWrite.size() - 1).getEntryID();</span>
+<span class="nc" id="L576">            System.out.format(</span>
+                    &quot;Writing entries %d -&gt; %d to ledger %d%n&quot;,
+<span class="nc" id="L578">                    toWrite.get(0).getEntryID(),</span>
+<span class="nc" id="L579">                    lastEntry,</span>
+<span class="nc" id="L580">                    ledger.ledgerID);</span>
+<span class="nc" id="L581">            ledger.openWrite(lastEntry);</span>
+
+<span class="nc" id="L583">            WriteCallback writeCB = new WriteCallback(</span>
+<span class="nc" id="L584">                    ledger, lastEntry, ledger.getLastEntryIDCompleted(), toWrite.size());</span>
+<span class="nc bnc" id="L585" title="All 2 branches missed.">            for (EntryInfo entry: toWrite) {</span>
+<span class="nc" id="L586">                driver.writeEntry(ledger.ledgerID, entry.getEntryID(), entry.getBuffer(), writeCB);</span>
+<span class="nc" id="L587">            }</span>
+<span class="nc" id="L588">            ++outstandingWriteCount;</span>
+
+<span class="nc bnc" id="L590" title="All 2 branches missed.">            if (lastEntry &gt;= targetLedgerEntries) {</span>
+                /* Remove this ledger from the writable list, mark for closing once all open writes complete */
+<span class="nc" id="L592">                System.out.format(&quot;Marking ledger %d for close%n&quot;, ledger.ledgerID);</span>
+<span class="nc" id="L593">                openLedgers.remove(ledger);</span>
+<span class="nc" id="L594">                liveLedgers.add(ledger);</span>
+<span class="nc" id="L595">                ledger.onLastWriteComplete((rc) -&gt; checkReturn(ledger.ledgerID, rc), (Consumer&lt;Integer&gt; cb) -&gt; {</span>
+<span class="nc" id="L596">                    System.out.format(&quot;Closing ledger %d%n&quot;, ledger.ledgerID);</span>
+<span class="nc" id="L597">                    driver.closeLedger(ledger.ledgerID, (Integer rc) -&gt; {</span>
+<span class="nc" id="L598">                        synchronized (BookkeeperVerifier.this) {</span>
+<span class="nc" id="L599">                            ledger.setClosed();</span>
+<span class="nc" id="L600">                            System.out.format(&quot;Closed ledger %d%n&quot;, ledger.ledgerID);</span>
+
+<span class="nc bnc" id="L602" title="All 2 branches missed.">                            if (liveLedgers.size() &gt;= targetLedgers) {</span>
+                                /* We've closed the ledger, but now we have too many closed but readable ledgers,
+                                 * start deleting one. */
+<span class="nc" id="L605">                                LedgerInfo toDelete = getRandomLedger(liveLedgers);</span>
+<span class="nc" id="L606">                                final long ledgerID = toDelete.ledgerID;</span>
+<span class="nc" id="L607">                                System.out.format(&quot;Marking ledger %d for deletion%n&quot;, ledgerID);</span>
+<span class="nc" id="L608">                                liveLedgers.remove(toDelete);</span>
+<span class="nc" id="L609">                                toDelete.onLastOpComplete(cb, (Consumer&lt;Integer&gt; cb2) -&gt; {</span>
+<span class="nc" id="L610">                                    System.out.format(&quot;Deleting ledger %d%n&quot;, ledgerID);</span>
+<span class="nc" id="L611">                                    driver.deleteLedger(ledgerID, (rc2) -&gt; {</span>
+<span class="nc" id="L612">                                        synchronized (BookkeeperVerifier.this) {</span>
+<span class="nc" id="L613">                                            System.out.format(&quot;Deleted ledger %d%n&quot;, ledgerID);</span>
+<span class="nc" id="L614">                                            cb2.accept(rc2);</span>
+<span class="nc" id="L615">                                        }</span>
+<span class="nc" id="L616">                                    });</span>
+<span class="nc" id="L617">                                });</span>
+<span class="nc" id="L618">                            } else {</span>
+<span class="nc" id="L619">                                cb.accept(rc);</span>
+                            }
+<span class="nc" id="L621">                        }</span>
+<span class="nc" id="L622">                    });</span>
+<span class="nc" id="L623">                });</span>
+            }
+
+<span class="nc" id="L626">            Collections.shuffle(toWrite);</span>
+<span class="nc" id="L627">            return true;</span>
+        }
+    }
+
+    /**
+     * This is the method used to invoke the main loop of the IO driver.  run() will loop
+     * starting IO requests until the time runs out on the test and all outstanding requests
+     * complete.  Test execution state is accessed only under the instance lock for 'this'.
+     * There is no fine grained locking, hence run() simply needs to be synchronized and
+     * can wait for IOs to complete atomically with startWrite and startRead returning
+     * false (see those comments).
+     *
+     * @throws Exception
+     */
+    public synchronized void run() throws Exception {
+<span class="nc" id="L642">        long start = System.currentTimeMillis();</span>
+<span class="nc" id="L643">        long testEnd = start + (duration * 1000);</span>
+<span class="nc" id="L644">        long testDrainEnd = testEnd + (drainTimeout * 1000);</span>
+
+        /* Keep IO running until testEnd */
+<span class="nc bnc" id="L647" title="All 2 branches missed.">        while (System.currentTimeMillis() &lt; testEnd) {</span>
+
+            /* see startRead and startWrite, they return false once no more IO can be started */
+<span class="nc bnc" id="L650" title="All 4 branches missed.">            while (startRead() || startWrite()) {}</span>
+<span class="nc" id="L651">            long toWait = testEnd - System.currentTimeMillis();</span>
+
+            /* atomically wait for either IO to complete or the test to end */
+<span class="nc bnc" id="L654" title="All 2 branches missed.">            this.wait(toWait &lt; 0 ? 0 : toWait);</span>
+<span class="nc" id="L655">            printThrowExceptions();</span>
+<span class="nc" id="L656">        }</span>
+
+        /* Wait for all in progress ops to complete, outstanding*Count is updated under the lock */
+<span class="nc bnc" id="L659" title="All 6 branches missed.">        while ((System.currentTimeMillis() &lt; testDrainEnd)</span>
+               &amp;&amp; (outstandingReadCount &gt; 0 || outstandingWriteCount &gt; 0)) {
+<span class="nc" id="L661">            System.out.format(&quot;reads: %d, writes: %d%n&quot;, outstandingReadCount, outstandingWriteCount);</span>
+<span class="nc" id="L662">            System.out.format(&quot;openingLedgers:%n&quot;);</span>
+<span class="nc bnc" id="L663" title="All 2 branches missed.">            for (LedgerInfo li: openingLedgers) {</span>
+<span class="nc" id="L664">                System.out.format(</span>
+                        &quot;Ledger %d has reads: %d, writes: %d%n&quot;,
+<span class="nc" id="L666">                        li.ledgerID,</span>
+<span class="nc" id="L667">                        li.readsInProgress,</span>
+<span class="nc" id="L668">                        li.writesInProgress.size());</span>
+<span class="nc" id="L669">            }</span>
+<span class="nc" id="L670">            System.out.format(&quot;openLedgers:%n&quot;);</span>
+<span class="nc bnc" id="L671" title="All 2 branches missed.">            for (LedgerInfo li: openLedgers) {</span>
+<span class="nc" id="L672">                System.out.format(</span>
+                        &quot;Ledger %d has reads: %d, writes: %d%n&quot;,
+<span class="nc" id="L674">                        li.ledgerID,</span>
+<span class="nc" id="L675">                        li.readsInProgress,</span>
+<span class="nc" id="L676">                        li.writesInProgress.size());</span>
+<span class="nc" id="L677">            }</span>
+<span class="nc" id="L678">            System.out.format(&quot;liveLedgers:%n&quot;);</span>
+<span class="nc bnc" id="L679" title="All 2 branches missed.">            for (LedgerInfo li: liveLedgers) {</span>
+<span class="nc" id="L680">                System.out.format(</span>
+                        &quot;Ledger %d has reads: %d, writes: %d%n&quot;,
+<span class="nc" id="L682">                        li.ledgerID,</span>
+<span class="nc" id="L683">                        li.readsInProgress,</span>
+<span class="nc" id="L684">                        li.writesInProgress.size());</span>
+<span class="nc" id="L685">            }</span>
+<span class="nc" id="L686">            long toWait = testDrainEnd - System.currentTimeMillis();</span>
+<span class="nc bnc" id="L687" title="All 2 branches missed.">            this.wait(toWait &lt; 0 ? 0 : toWait);</span>
+<span class="nc" id="L688">            printThrowExceptions();</span>
+<span class="nc" id="L689">        }</span>
+<span class="nc bnc" id="L690" title="All 4 branches missed.">        if (outstandingReadCount &gt; 0 || outstandingWriteCount &gt; 0) {</span>
+<span class="nc" id="L691">            throw new Exception(&quot;Failed to drain ops before timeout%n&quot;);</span>
+        }
+<span class="nc" id="L693">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>WriteLacProcessorV3.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto</a> &gt; <span class="el_source">WriteLacProcessorV3.java</span></div><h1>WriteLacProcessorV3.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.proto;
+
+import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.Request;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.Response;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.StatusCode;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.WriteLacRequest;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.WriteLacResponse;
+import org.apache.bookkeeper.util.MathUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+
+class WriteLacProcessorV3 extends PacketProcessorBaseV3 implements Runnable {
+<span class="nc" id="L43">    private static final Logger logger = LoggerFactory.getLogger(WriteLacProcessorV3.class);</span>
+
+    public WriteLacProcessorV3(Request request, Channel channel,
+                             BookieRequestProcessor requestProcessor) {
+<span class="nc" id="L47">        super(request, channel, requestProcessor);</span>
+<span class="nc" id="L48">    }</span>
+
+    // Returns null if there is no exception thrown
+    private WriteLacResponse getWriteLacResponse() {
+<span class="nc" id="L52">        final long startTimeNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L53">        WriteLacRequest writeLacRequest = request.getWriteLacRequest();</span>
+<span class="nc" id="L54">        long lac = writeLacRequest.getLac();</span>
+<span class="nc" id="L55">        long ledgerId = writeLacRequest.getLedgerId();</span>
+
+<span class="nc" id="L57">        final WriteLacResponse.Builder writeLacResponse = WriteLacResponse.newBuilder().setLedgerId(ledgerId);</span>
+
+<span class="nc bnc" id="L59" title="All 2 branches missed.">        if (!isVersionCompatible()) {</span>
+<span class="nc" id="L60">            writeLacResponse.setStatus(StatusCode.EBADVERSION);</span>
+<span class="nc" id="L61">            return writeLacResponse.build();</span>
+        }
+
+<span class="nc bnc" id="L64" title="All 2 branches missed.">        if (requestProcessor.bookie.isReadOnly()) {</span>
+<span class="nc" id="L65">            logger.warn(&quot;BookieServer is running as readonly mode, so rejecting the request from the client!&quot;);</span>
+<span class="nc" id="L66">            writeLacResponse.setStatus(StatusCode.EREADONLY);</span>
+<span class="nc" id="L67">            return writeLacResponse.build();</span>
+        }
+
+<span class="nc" id="L70">        BookkeeperInternalCallbacks.WriteCallback writeCallback = new BookkeeperInternalCallbacks.WriteCallback() {</span>
+            @Override
+            public void writeComplete(int rc, long ledgerId, long entryId, BookieId addr, Object ctx) {
+<span class="nc bnc" id="L73" title="All 2 branches missed.">                if (BookieProtocol.EOK == rc) {</span>
+<span class="nc" id="L74">                    requestProcessor.getRequestStats().getWriteLacStats()</span>
+<span class="nc" id="L75">                        .registerSuccessfulEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+                } else {
+<span class="nc" id="L77">                    requestProcessor.getRequestStats().getWriteLacStats()</span>
+<span class="nc" id="L78">                        .registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+                }
+
+                StatusCode status;
+<span class="nc bnc" id="L82" title="All 3 branches missed.">                switch (rc) {</span>
+                case BookieProtocol.EOK:
+<span class="nc" id="L84">                    status = StatusCode.EOK;</span>
+<span class="nc" id="L85">                    break;</span>
+                case BookieProtocol.EIO:
+<span class="nc" id="L87">                    status = StatusCode.EIO;</span>
+<span class="nc" id="L88">                    break;</span>
+                default:
+<span class="nc" id="L90">                    status = StatusCode.EUA;</span>
+                    break;
+                }
+<span class="nc" id="L93">                writeLacResponse.setStatus(status);</span>
+<span class="nc" id="L94">                Response.Builder response = Response.newBuilder()</span>
+<span class="nc" id="L95">                        .setHeader(getHeader())</span>
+<span class="nc" id="L96">                        .setStatus(writeLacResponse.getStatus())</span>
+<span class="nc" id="L97">                        .setWriteLacResponse(writeLacResponse);</span>
+<span class="nc" id="L98">                Response resp = response.build();</span>
+<span class="nc" id="L99">                sendResponse(status, resp, requestProcessor.getRequestStats().getWriteLacRequestStats());</span>
+<span class="nc" id="L100">            }</span>
+        };
+
+<span class="nc" id="L103">        StatusCode status = null;</span>
+<span class="nc" id="L104">        ByteBuffer lacToAdd = writeLacRequest.getBody().asReadOnlyByteBuffer();</span>
+<span class="nc" id="L105">        byte[] masterKey = writeLacRequest.getMasterKey().toByteArray();</span>
+
+        try {
+<span class="nc" id="L108">            requestProcessor.bookie.setExplicitLac(Unpooled.wrappedBuffer(lacToAdd), writeCallback, channel, masterKey);</span>
+<span class="nc" id="L109">            status = StatusCode.EOK;</span>
+<span class="nc" id="L110">        } catch (IOException e) {</span>
+<span class="nc" id="L111">            logger.error(&quot;Error saving lac {} for ledger:{}&quot;,</span>
+<span class="nc" id="L112">                    lac, ledgerId, e);</span>
+<span class="nc" id="L113">            status = StatusCode.EIO;</span>
+<span class="nc" id="L114">        } catch (InterruptedException  e) {</span>
+<span class="nc" id="L115">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L116">            logger.error(&quot;Interrupted while saving lac {} for ledger:{}&quot;,</span>
+<span class="nc" id="L117">                    lac, ledgerId, e);</span>
+<span class="nc" id="L118">            status = StatusCode.EIO;</span>
+<span class="nc" id="L119">        } catch (BookieException e) {</span>
+<span class="nc" id="L120">            logger.error(&quot;Unauthorized access to ledger:{} while adding lac:{}&quot;,</span>
+<span class="nc" id="L121">                    ledgerId, lac, e);</span>
+<span class="nc" id="L122">            status = StatusCode.EUA;</span>
+<span class="nc" id="L123">        } catch (Throwable t) {</span>
+<span class="nc" id="L124">            logger.error(&quot;Unexpected exception while writing lac {} for ledger:{}&quot;,</span>
+<span class="nc" id="L125">                    lac, ledgerId, t);</span>
+            // some bad request which cause unexpected exception
+<span class="nc" id="L127">            status = StatusCode.EBADREQ;</span>
+<span class="nc" id="L128">        }</span>
+
+        // If everything is okay, we return null so that the calling function
+        // dosn't return a response back to the caller.
+<span class="nc bnc" id="L132" title="All 2 branches missed.">        if (!status.equals(StatusCode.EOK)) {</span>
+<span class="nc" id="L133">            requestProcessor.getRequestStats().getWriteLacStats()</span>
+<span class="nc" id="L134">                .registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L135">            writeLacResponse.setStatus(status);</span>
+<span class="nc" id="L136">            return writeLacResponse.build();</span>
+        }
+<span class="nc" id="L138">        return null;</span>
+    }
+
+    @Override
+    public void safeRun() {
+<span class="nc" id="L143">        WriteLacResponse writeLacResponse = getWriteLacResponse();</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">        if (null != writeLacResponse) {</span>
+<span class="nc" id="L145">            Response.Builder response = Response.newBuilder()</span>
+<span class="nc" id="L146">                    .setHeader(getHeader())</span>
+<span class="nc" id="L147">                    .setStatus(writeLacResponse.getStatus())</span>
+<span class="nc" id="L148">                    .setWriteLacResponse(writeLacResponse);</span>
+<span class="nc" id="L149">            Response resp = response.build();</span>
+<span class="nc" id="L150">            sendResponse(</span>
+<span class="nc" id="L151">                writeLacResponse.getStatus(),</span>
+                resp,
+<span class="nc" id="L153">                requestProcessor.getRequestStats().getWriteLacRequestStats());</span>
+        }
+<span class="nc" id="L155">    }</span>
+
+    /**
+     * this toString method filters out body and masterKey from the output.
+     * masterKey contains the password of the ledger and body is customer data,
+     * so it is not appropriate to have these in logs or system output.
+     */
+    @Override
+    public String toString() {
+<span class="nc" id="L164">        return RequestUtils.toSafeString(request);</span>
+    }
+}
+
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

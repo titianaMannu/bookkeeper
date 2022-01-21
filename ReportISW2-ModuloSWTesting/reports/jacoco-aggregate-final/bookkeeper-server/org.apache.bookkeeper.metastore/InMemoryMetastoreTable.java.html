@@ -1,0 +1,383 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>InMemoryMetastoreTable.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.metastore</a> &gt; <span class="el_source">InMemoryMetastoreTable.java</span></div><h1>InMemoryMetastoreTable.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.metastore;
+
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+
+import java.util.NavigableMap;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+
+import org.apache.bookkeeper.metastore.MSException.Code;
+import org.apache.bookkeeper.versioning.Version;
+import org.apache.bookkeeper.versioning.Versioned;
+
+/**
+ * An in-memory implementation of a Metastore table.
+ */
+public class InMemoryMetastoreTable implements MetastoreScannableTable {
+
+    /**
+     * An implementation of the Version interface for metadata.
+     */
+    public static class MetadataVersion implements Version {
+        int version;
+
+<span class="nc" id="L43">        public MetadataVersion(int v) {</span>
+<span class="nc" id="L44">            this.version = v;</span>
+<span class="nc" id="L45">        }</span>
+
+<span class="nc" id="L47">        public MetadataVersion(MetadataVersion v) {</span>
+<span class="nc" id="L48">            this.version = v.version;</span>
+<span class="nc" id="L49">        }</span>
+
+        public synchronized MetadataVersion incrementVersion() {
+<span class="nc" id="L52">            ++version;</span>
+<span class="nc" id="L53">            return this;</span>
+        }
+
+        @Override
+        public Occurred compare(Version v) {
+<span class="nc bnc" id="L58" title="All 2 branches missed.">            if (null == v) {</span>
+<span class="nc" id="L59">                throw new NullPointerException(&quot;Version is not allowed to be null.&quot;);</span>
+            }
+<span class="nc bnc" id="L61" title="All 2 branches missed.">            if (v == Version.NEW) {</span>
+<span class="nc" id="L62">                return Occurred.AFTER;</span>
+<span class="nc bnc" id="L63" title="All 2 branches missed.">            } else if (v == Version.ANY) {</span>
+<span class="nc" id="L64">                return Occurred.CONCURRENTLY;</span>
+<span class="nc bnc" id="L65" title="All 2 branches missed.">            } else if (!(v instanceof MetadataVersion)) {</span>
+<span class="nc" id="L66">                throw new IllegalArgumentException(&quot;Invalid version type&quot;);</span>
+            }
+<span class="nc" id="L68">            MetadataVersion mv = (MetadataVersion) v;</span>
+<span class="nc" id="L69">            int res = version - mv.version;</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">            if (res == 0) {</span>
+<span class="nc" id="L71">                return Occurred.CONCURRENTLY;</span>
+<span class="nc bnc" id="L72" title="All 2 branches missed.">            } else if (res &lt; 0) {</span>
+<span class="nc" id="L73">                return Occurred.BEFORE;</span>
+            } else {
+<span class="nc" id="L75">                return Occurred.AFTER;</span>
+            }
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+<span class="nc bnc" id="L81" title="All 4 branches missed.">            if (null == obj || !(obj instanceof MetadataVersion)) {</span>
+<span class="nc" id="L82">                return false;</span>
+            }
+<span class="nc" id="L84">            MetadataVersion v = (MetadataVersion) obj;</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">            return 0 == (version - v.version);</span>
+        }
+
+        @Override
+        public String toString() {
+<span class="nc" id="L90">            return &quot;version=&quot; + version;</span>
+        }
+
+        @Override
+        public int hashCode() {
+<span class="nc" id="L95">            return version;</span>
+        }
+    }
+
+    private String name;
+<span class="nc" id="L100">    private TreeMap&lt;String, Versioned&lt;Value&gt;&gt; map = null;</span>
+<span class="nc" id="L101">    private TreeMap&lt;String, MetastoreWatcher&gt; watcherMap = null;</span>
+    private ScheduledExecutorService scheduler;
+
+<span class="nc" id="L104">    public InMemoryMetastoreTable(InMemoryMetaStore metastore, String name) {</span>
+<span class="nc" id="L105">        this.map = new TreeMap&lt;String, Versioned&lt;Value&gt;&gt;();</span>
+<span class="nc" id="L106">        this.watcherMap = new TreeMap&lt;String, MetastoreWatcher&gt;();</span>
+<span class="nc" id="L107">        this.name = name;</span>
+<span class="nc" id="L108">        String thName = &quot;InMemoryMetastore-Table(&quot; + name + &quot;)-Scheduler-%d&quot;;</span>
+<span class="nc" id="L109">        ThreadFactoryBuilder tfb = new ThreadFactoryBuilder()</span>
+<span class="nc" id="L110">                .setNameFormat(thName);</span>
+<span class="nc" id="L111">        this.scheduler = Executors</span>
+<span class="nc" id="L112">                .newSingleThreadScheduledExecutor(tfb.build());</span>
+<span class="nc" id="L113">    }</span>
+
+    @Override
+    public String getName () {
+<span class="nc" id="L117">        return this.name;</span>
+    }
+
+    static Versioned&lt;Value&gt; cloneValue(Value value, Version version, Set&lt;String&gt; fields) {
+<span class="nc bnc" id="L121" title="All 2 branches missed.">        if (null != value) {</span>
+<span class="nc" id="L122">            Value newValue = new Value();</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">            if (ALL_FIELDS == fields) {</span>
+<span class="nc" id="L124">                fields = value.getFields();</span>
+            }
+<span class="nc bnc" id="L126" title="All 2 branches missed.">            for (String f : fields) {</span>
+<span class="nc" id="L127">                newValue.setField(f, value.getField(f));</span>
+<span class="nc" id="L128">            }</span>
+<span class="nc" id="L129">            value = newValue;</span>
+        }
+
+<span class="nc bnc" id="L132" title="All 2 branches missed.">        if (null == version) {</span>
+<span class="nc" id="L133">            throw new NullPointerException(&quot;Version isn't allowed to be null.&quot;);</span>
+        }
+<span class="nc bnc" id="L135" title="All 4 branches missed.">        if (Version.ANY != version &amp;&amp; Version.NEW != version) {</span>
+<span class="nc bnc" id="L136" title="All 2 branches missed.">            if (version instanceof MetadataVersion) {</span>
+<span class="nc" id="L137">                version = new MetadataVersion(((MetadataVersion) version).version);</span>
+            } else {
+<span class="nc" id="L139">                throw new IllegalStateException(&quot;Wrong version type.&quot;);</span>
+            }
+        }
+<span class="nc" id="L142">        return new Versioned&lt;Value&gt;(value, version);</span>
+    }
+
+    @Override
+    public void get(final String key, final MetastoreCallback&lt;Versioned&lt;Value&gt;&gt; cb, final Object ctx) {
+<span class="nc" id="L147">        scheduler.submit(new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="nc" id="L150">                scheduleGet(key, ALL_FIELDS, cb, ctx);</span>
+<span class="nc" id="L151">            }</span>
+        });
+<span class="nc" id="L153">    }</span>
+
+    @Override
+    public void get(final String key, final MetastoreWatcher watcher, final MetastoreCallback&lt;Versioned&lt;Value&gt;&gt; cb,
+            final Object ctx) {
+<span class="nc" id="L158">        scheduler.submit(new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="nc" id="L161">                scheduleGet(key, ALL_FIELDS, cb, ctx);</span>
+<span class="nc" id="L162">                synchronized (watcherMap) {</span>
+<span class="nc" id="L163">                    watcherMap.put(key, watcher);</span>
+<span class="nc" id="L164">                }</span>
+<span class="nc" id="L165">            }</span>
+        });
+<span class="nc" id="L167">    }</span>
+
+    @Override
+    public void get(final String key, final Set&lt;String&gt; fields, final MetastoreCallback&lt;Versioned&lt;Value&gt;&gt; cb,
+            final Object ctx) {
+<span class="nc" id="L172">        scheduler.submit(new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="nc" id="L175">                scheduleGet(key, fields, cb, ctx);</span>
+<span class="nc" id="L176">            }</span>
+        });
+<span class="nc" id="L178">    }</span>
+
+    public synchronized void scheduleGet(String key, Set&lt;String&gt; fields, MetastoreCallback&lt;Versioned&lt;Value&gt;&gt; cb,
+            Object ctx) {
+<span class="nc bnc" id="L182" title="All 2 branches missed.">        if (null == key) {</span>
+<span class="nc" id="L183">            cb.complete(Code.IllegalOp.getCode(), null, ctx);</span>
+<span class="nc" id="L184">            return;</span>
+        }
+<span class="nc" id="L186">        Versioned&lt;Value&gt; vv = get(key);</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">        int rc = null == vv ? Code.NoKey.getCode() : Code.OK.getCode();</span>
+<span class="nc bnc" id="L188" title="All 2 branches missed.">        if (vv != null) {</span>
+<span class="nc" id="L189">            vv = cloneValue(vv.getValue(), vv.getVersion(), fields);</span>
+        }
+<span class="nc" id="L191">        cb.complete(rc, vv, ctx);</span>
+<span class="nc" id="L192">    }</span>
+
+    @Override
+    public void put(final String key, final Value value, final Version version, final MetastoreCallback&lt;Version&gt; cb,
+            final Object ctx) {
+<span class="nc" id="L197">        scheduler.submit(new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="nc bnc" id="L200" title="All 6 branches missed.">                if (null == key || null == value || null == version) {</span>
+<span class="nc" id="L201">                    cb.complete(Code.IllegalOp.getCode(), null, ctx);</span>
+<span class="nc" id="L202">                    return;</span>
+                }
+<span class="nc" id="L204">                Result&lt;Version&gt; result = put(key, value, version);</span>
+<span class="nc" id="L205">                cb.complete(result.code.getCode(), result.value, ctx);</span>
+
+                /*
+                 * If there is a watcher set for this key, we need
+                 * to trigger it.
+                 */
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                if (result.code == MSException.Code.OK) {</span>
+<span class="nc" id="L212">                    triggerWatch(key, MSWatchedEvent.EventType.CHANGED);</span>
+                }
+<span class="nc" id="L214">            }</span>
+        });
+<span class="nc" id="L216">    }</span>
+
+    @Override
+    public void remove(final String key, final Version version, final MetastoreCallback&lt;Void&gt; cb, final Object ctx) {
+<span class="nc" id="L220">        scheduler.submit(new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="nc bnc" id="L223" title="All 4 branches missed.">                if (null == key || null == version) {</span>
+<span class="nc" id="L224">                    cb.complete(Code.IllegalOp.getCode(), null, ctx);</span>
+<span class="nc" id="L225">                    return;</span>
+                }
+<span class="nc" id="L227">                Code code = remove(key, version);</span>
+<span class="nc" id="L228">                cb.complete(code.getCode(), null, ctx);</span>
+
+<span class="nc bnc" id="L230" title="All 2 branches missed.">                if (code == MSException.Code.OK) {</span>
+<span class="nc" id="L231">                    triggerWatch(key, MSWatchedEvent.EventType.REMOVED);</span>
+                }
+<span class="nc" id="L233">            }</span>
+        });
+<span class="nc" id="L235">    }</span>
+
+    @Override
+    public void openCursor(MetastoreCallback&lt;MetastoreCursor&gt; cb, Object ctx) {
+<span class="nc" id="L239">        openCursor(EMPTY_START_KEY, true, EMPTY_END_KEY, true, Order.ASC,</span>
+                   ALL_FIELDS, cb, ctx);
+<span class="nc" id="L241">    }</span>
+
+    @Override
+    public void openCursor(Set&lt;String&gt; fields,
+                           MetastoreCallback&lt;MetastoreCursor&gt; cb, Object ctx) {
+<span class="nc" id="L246">        openCursor(EMPTY_START_KEY, true, EMPTY_END_KEY, true, Order.ASC,</span>
+                   fields, cb, ctx);
+<span class="nc" id="L248">    }</span>
+
+    @Override
+    public void openCursor(String firstKey, boolean firstInclusive,
+                           String lastKey, boolean lastInclusive,
+                           Order order, MetastoreCallback&lt;MetastoreCursor&gt; cb,
+                           Object ctx) {
+<span class="nc" id="L255">        openCursor(firstKey, firstInclusive, lastKey, lastInclusive,</span>
+                   order, ALL_FIELDS, cb, ctx);
+<span class="nc" id="L257">    }</span>
+
+    @Override
+    public void openCursor(final String firstKey, final boolean firstInclusive,
+                           final String lastKey, final boolean lastInclusive,
+                           final Order order, final Set&lt;String&gt; fields,
+                           final MetastoreCallback&lt;MetastoreCursor&gt; cb, final Object ctx) {
+<span class="nc" id="L264">        scheduler.submit(new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="nc" id="L267">                Result&lt;MetastoreCursor&gt; result = openCursor(firstKey, firstInclusive, lastKey, lastInclusive,</span>
+                        order, fields);
+<span class="nc" id="L269">                cb.complete(result.code.getCode(), result.value, ctx);</span>
+<span class="nc" id="L270">            }</span>
+        });
+<span class="nc" id="L272">    }</span>
+
+    private void triggerWatch(String key, MSWatchedEvent.EventType type) {
+<span class="nc" id="L275">        synchronized (watcherMap){</span>
+<span class="nc bnc" id="L276" title="All 2 branches missed.">            if (watcherMap.containsKey(key)) {</span>
+<span class="nc" id="L277">                MSWatchedEvent event = new MSWatchedEvent(key, type);</span>
+<span class="nc" id="L278">                watcherMap.get(key).process(event);</span>
+<span class="nc" id="L279">                watcherMap.remove(key);</span>
+            }
+<span class="nc" id="L281">        }</span>
+<span class="nc" id="L282">    }</span>
+
+    private synchronized Versioned&lt;Value&gt; get(String key) {
+<span class="nc" id="L285">        return map.get(key);</span>
+    }
+
+    private synchronized Code remove(String key, Version version) {
+<span class="nc" id="L289">        Versioned&lt;Value&gt; vv = map.get(key);</span>
+<span class="nc bnc" id="L290" title="All 2 branches missed.">        if (null == vv) {</span>
+<span class="nc" id="L291">            return Code.NoKey;</span>
+        }
+<span class="nc bnc" id="L293" title="All 2 branches missed.">        if (Version.Occurred.CONCURRENTLY != vv.getVersion().compare(version)) {</span>
+<span class="nc" id="L294">            return Code.BadVersion;</span>
+        }
+<span class="nc" id="L296">        map.remove(key);</span>
+<span class="nc" id="L297">        return Code.OK;</span>
+    }
+
+    static class Result&lt;T&gt; {
+        Code code;
+        T value;
+
+<span class="nc" id="L304">        public Result(Code code, T value) {</span>
+<span class="nc" id="L305">            this.code = code;</span>
+<span class="nc" id="L306">            this.value = value;</span>
+<span class="nc" id="L307">        }</span>
+    }
+
+    private synchronized Result&lt;Version&gt; put(String key, Value value, Version version) {
+<span class="nc" id="L311">        Versioned&lt;Value&gt; vv = map.get(key);</span>
+<span class="nc bnc" id="L312" title="All 2 branches missed.">        if (vv == null) {</span>
+<span class="nc bnc" id="L313" title="All 2 branches missed.">            if (Version.NEW != version) {</span>
+<span class="nc" id="L314">                return new Result&lt;Version&gt;(Code.NoKey, null);</span>
+            }
+<span class="nc" id="L316">            vv = cloneValue(value, version, ALL_FIELDS);</span>
+<span class="nc" id="L317">            vv.setVersion(new MetadataVersion(0));</span>
+<span class="nc" id="L318">            map.put(key, vv);</span>
+<span class="nc" id="L319">            return new Result&lt;Version&gt;(Code.OK, new MetadataVersion(0));</span>
+        }
+<span class="nc bnc" id="L321" title="All 2 branches missed.">        if (Version.NEW == version) {</span>
+<span class="nc" id="L322">            return new Result&lt;Version&gt;(Code.KeyExists, null);</span>
+        }
+<span class="nc bnc" id="L324" title="All 2 branches missed.">        if (Version.Occurred.CONCURRENTLY != vv.getVersion().compare(version)) {</span>
+<span class="nc" id="L325">            return new Result&lt;Version&gt;(Code.BadVersion, null);</span>
+        }
+<span class="nc" id="L327">        vv.setVersion(((MetadataVersion) vv.getVersion()).incrementVersion());</span>
+<span class="nc" id="L328">        vv.setValue(vv.getValue().merge(value));</span>
+<span class="nc" id="L329">        return new Result&lt;Version&gt;(Code.OK, new MetadataVersion((MetadataVersion) vv.getVersion()));</span>
+    }
+
+    private synchronized Result&lt;MetastoreCursor&gt; openCursor(
+            String firstKey, boolean firstInclusive,
+            String lastKey, boolean lastInclusive,
+            Order order, Set&lt;String&gt; fields) {
+<span class="nc bnc" id="L336" title="All 2 branches missed.">        if (0 == map.size()) {</span>
+<span class="nc" id="L337">            return new Result&lt;MetastoreCursor&gt;(Code.OK, MetastoreCursor.EMPTY_CURSOR);</span>
+        }
+
+<span class="nc" id="L340">        boolean isLegalCursor = false;</span>
+<span class="nc" id="L341">        NavigableMap&lt;String, Versioned&lt;Value&gt;&gt; myMap = null;</span>
+<span class="nc bnc" id="L342" title="All 2 branches missed.">        if (Order.ASC == order) {</span>
+<span class="nc" id="L343">            myMap = map;</span>
+<span class="nc bnc" id="L344" title="All 4 branches missed.">            if (EMPTY_END_KEY == lastKey || lastKey.compareTo(myMap.lastKey()) &gt; 0) {</span>
+<span class="nc" id="L345">                lastKey = myMap.lastKey();</span>
+<span class="nc" id="L346">                lastInclusive = true;</span>
+            }
+<span class="nc bnc" id="L348" title="All 4 branches missed.">            if (EMPTY_START_KEY == firstKey || firstKey.compareTo(myMap.firstKey()) &lt; 0) {</span>
+<span class="nc" id="L349">                firstKey = myMap.firstKey();</span>
+<span class="nc" id="L350">                firstInclusive = true;</span>
+            }
+<span class="nc bnc" id="L352" title="All 2 branches missed.">            if (firstKey.compareTo(lastKey) &lt;= 0) {</span>
+<span class="nc" id="L353">                isLegalCursor = true;</span>
+            }
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        } else if (Order.DESC == order) {</span>
+<span class="nc" id="L356">            myMap = map.descendingMap();</span>
+<span class="nc bnc" id="L357" title="All 4 branches missed.">            if (EMPTY_START_KEY == lastKey || lastKey.compareTo(myMap.lastKey()) &lt; 0) {</span>
+<span class="nc" id="L358">                lastKey = myMap.lastKey();</span>
+<span class="nc" id="L359">                lastInclusive = true;</span>
+            }
+<span class="nc bnc" id="L361" title="All 4 branches missed.">            if (EMPTY_END_KEY == firstKey || firstKey.compareTo(myMap.firstKey()) &gt; 0) {</span>
+<span class="nc" id="L362">                firstKey = myMap.firstKey();</span>
+<span class="nc" id="L363">                firstInclusive = true;</span>
+            }
+<span class="nc bnc" id="L365" title="All 2 branches missed.">            if (firstKey.compareTo(lastKey) &gt;= 0) {</span>
+<span class="nc" id="L366">                isLegalCursor = true;</span>
+            }
+        }
+
+<span class="nc bnc" id="L370" title="All 4 branches missed.">        if (!isLegalCursor || null == myMap) {</span>
+<span class="nc" id="L371">            return new Result&lt;MetastoreCursor&gt;(Code.IllegalOp, null);</span>
+        }
+<span class="nc" id="L373">        MetastoreCursor cursor = new InMemoryMetastoreCursor(</span>
+<span class="nc" id="L374">                myMap.subMap(firstKey, firstInclusive, lastKey, lastInclusive), fields, scheduler);</span>
+<span class="nc" id="L375">        return new Result&lt;MetastoreCursor&gt;(Code.OK, cursor);</span>
+    }
+
+    @Override
+    public void close() {
+        // do nothing
+<span class="nc" id="L381">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

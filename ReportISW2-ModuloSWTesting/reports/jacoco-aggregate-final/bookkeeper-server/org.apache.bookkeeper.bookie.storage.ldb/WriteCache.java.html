@@ -1,0 +1,307 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>WriteCache.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.storage.ldb</a> &gt; <span class="el_source">WriteCache.java</span></div><h1>WriteCache.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie.storage.ldb;
+
+import static com.google.common.base.Preconditions.checkArgument;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.Unpooled;
+
+import java.io.Closeable;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.ReentrantLock;
+
+import org.apache.bookkeeper.common.util.MathUtils;
+import org.apache.bookkeeper.util.collections.ConcurrentLongHashSet;
+import org.apache.bookkeeper.util.collections.ConcurrentLongLongHashMap;
+import org.apache.bookkeeper.util.collections.ConcurrentLongLongPairHashMap;
+import org.apache.bookkeeper.util.collections.ConcurrentLongLongPairHashMap.LongPair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Write cache implementation.
+ *
+ * &lt;p&gt;The write cache will allocate the requested size from direct memory and it
+ * will break it down into multiple segments.
+ *
+ * &lt;p&gt;The entries are appended in a common buffer and indexed though a hashmap,
+ * until the cache is cleared.
+ *
+ * &lt;p&gt;There is the possibility to iterate through the stored entries in an ordered
+ * way, by (ledgerId, entry).
+ */
+public class WriteCache implements Closeable {
+
+    /**
+     * Consumer that is used to scan the entire write cache.
+     */
+    public interface EntryConsumer {
+        void accept(long ledgerId, long entryId, ByteBuf entry);
+    }
+
+<span class="fc" id="L63">    private final ConcurrentLongLongPairHashMap index =</span>
+<span class="fc" id="L64">            new ConcurrentLongLongPairHashMap(4096, 2 * Runtime.getRuntime().availableProcessors());</span>
+
+<span class="fc" id="L66">    private final ConcurrentLongLongHashMap lastEntryMap =</span>
+<span class="fc" id="L67">            new ConcurrentLongLongHashMap(4096, 2 * Runtime.getRuntime().availableProcessors());</span>
+
+    private final ByteBuf[] cacheSegments;
+    private final int segmentsCount;
+
+    private final long maxCacheSize;
+    private final int maxSegmentSize;
+    private final long segmentOffsetMask;
+    private final long segmentOffsetBits;
+
+<span class="fc" id="L77">    private final AtomicLong cacheSize = new AtomicLong(0);</span>
+<span class="fc" id="L78">    private final AtomicLong cacheOffset = new AtomicLong(0);</span>
+<span class="fc" id="L79">    private final LongAdder cacheCount = new LongAdder();</span>
+
+<span class="fc" id="L81">    private final ConcurrentLongHashSet deletedLedgers = new ConcurrentLongHashSet();</span>
+
+    private final ByteBufAllocator allocator;
+
+    public WriteCache(ByteBufAllocator allocator, long maxCacheSize) {
+        // Default maxSegmentSize set to 1Gb
+<span class="fc" id="L87">        this(allocator, maxCacheSize, 1 * 1024 * 1024 * 1024);</span>
+<span class="fc" id="L88">    }</span>
+
+<span class="fc" id="L90">    public WriteCache(ByteBufAllocator allocator, long maxCacheSize, int maxSegmentSize) {</span>
+<span class="pc bpc" id="L91" title="1 of 2 branches missed.">        checkArgument(maxSegmentSize &gt; 0);</span>
+
+<span class="fc" id="L93">        long alignedMaxSegmentSize = alignToPowerOfTwo(maxSegmentSize);</span>
+<span class="pc bpc" id="L94" title="1 of 2 branches missed.">        checkArgument(maxSegmentSize == alignedMaxSegmentSize, &quot;Max segment size needs to be in form of 2^n&quot;);</span>
+
+<span class="fc" id="L96">        this.allocator = allocator;</span>
+<span class="fc" id="L97">        this.maxCacheSize = maxCacheSize;</span>
+<span class="fc" id="L98">        this.maxSegmentSize = (int) maxSegmentSize;</span>
+<span class="fc" id="L99">        this.segmentOffsetMask = maxSegmentSize - 1;</span>
+<span class="fc" id="L100">        this.segmentOffsetBits = 63 - Long.numberOfLeadingZeros(maxSegmentSize);</span>
+
+<span class="fc" id="L102">        this.segmentsCount = 1 + (int) (maxCacheSize / maxSegmentSize);</span>
+
+<span class="fc" id="L104">        this.cacheSegments = new ByteBuf[segmentsCount];</span>
+
+<span class="pc bpc" id="L106" title="1 of 2 branches missed.">        for (int i = 0; i &lt; segmentsCount - 1; i++) {</span>
+            // All intermediate segments will be full-size
+<span class="nc" id="L108">            cacheSegments[i] = Unpooled.directBuffer(maxSegmentSize, maxSegmentSize);</span>
+        }
+
+<span class="fc" id="L111">        int lastSegmentSize = (int) (maxCacheSize % maxSegmentSize);</span>
+<span class="fc" id="L112">        cacheSegments[segmentsCount - 1] = Unpooled.directBuffer(lastSegmentSize, lastSegmentSize);</span>
+<span class="fc" id="L113">    }</span>
+
+    public void clear() {
+<span class="fc" id="L116">        cacheSize.set(0L);</span>
+<span class="fc" id="L117">        cacheOffset.set(0L);</span>
+<span class="fc" id="L118">        cacheCount.reset();</span>
+<span class="fc" id="L119">        index.clear();</span>
+<span class="fc" id="L120">        lastEntryMap.clear();</span>
+<span class="fc" id="L121">        deletedLedgers.clear();</span>
+<span class="fc" id="L122">    }</span>
+
+    @Override
+    public void close() {
+<span class="fc bfc" id="L126" title="All 2 branches covered.">        for (ByteBuf buf : cacheSegments) {</span>
+<span class="fc" id="L127">            buf.release();</span>
+        }
+<span class="fc" id="L129">    }</span>
+
+    public boolean put(long ledgerId, long entryId, ByteBuf entry) {
+<span class="fc" id="L132">        int size = entry.readableBytes();</span>
+
+        // Align to 64 bytes so that different threads will not contend the same L1
+        // cache line
+<span class="fc" id="L136">        int alignedSize = align64(size);</span>
+
+        long offset;
+        int localOffset;
+        int segmentIdx;
+
+        while (true) {
+<span class="fc" id="L143">            offset = cacheOffset.getAndAdd(alignedSize);</span>
+<span class="fc" id="L144">            localOffset = (int) (offset &amp; segmentOffsetMask);</span>
+<span class="fc" id="L145">            segmentIdx = (int) (offset &gt;&gt;&gt; segmentOffsetBits);</span>
+
+<span class="pc bpc" id="L147" title="1 of 2 branches missed.">            if ((offset + size) &gt; maxCacheSize) {</span>
+                // Cache is full
+<span class="nc" id="L149">                return false;</span>
+<span class="pc bpc" id="L150" title="1 of 2 branches missed.">            } else if (maxSegmentSize - localOffset &lt; size) {</span>
+                // If an entry is at the end of a segment, we need to get a new offset and try
+                // again in next segment
+<span class="nc" id="L153">                continue;</span>
+            } else {
+                // Found a good offset
+                break;
+            }
+        }
+
+<span class="fc" id="L160">        cacheSegments[segmentIdx].setBytes(localOffset, entry, entry.readerIndex(), entry.readableBytes());</span>
+
+        // Update last entryId for ledger. This logic is to handle writes for the same
+        // ledger coming out of order and from different thread, though in practice it
+        // should not happen and the compareAndSet should be always uncontended.
+        while (true) {
+<span class="fc" id="L166">            long currentLastEntryId = lastEntryMap.get(ledgerId);</span>
+<span class="fc bfc" id="L167" title="All 2 branches covered.">            if (currentLastEntryId &gt; entryId) {</span>
+                // A newer entry is already there
+<span class="fc" id="L169">                break;</span>
+            }
+
+<span class="pc bpc" id="L172" title="1 of 2 branches missed.">            if (lastEntryMap.compareAndSet(ledgerId, currentLastEntryId, entryId)) {</span>
+<span class="fc" id="L173">                break;</span>
+            }
+<span class="nc" id="L175">        }</span>
+
+<span class="fc" id="L177">        index.put(ledgerId, entryId, offset, size);</span>
+<span class="fc" id="L178">        cacheCount.increment();</span>
+<span class="fc" id="L179">        cacheSize.addAndGet(size);</span>
+<span class="fc" id="L180">        return true;</span>
+    }
+
+    public ByteBuf get(long ledgerId, long entryId) {
+<span class="fc" id="L184">        LongPair result = index.get(ledgerId, entryId);</span>
+<span class="fc bfc" id="L185" title="All 2 branches covered.">        if (result == null) {</span>
+<span class="fc" id="L186">            return null;</span>
+        }
+
+<span class="fc" id="L189">        long offset = result.first;</span>
+<span class="fc" id="L190">        int size = (int) result.second;</span>
+<span class="fc" id="L191">        ByteBuf entry = allocator.buffer(size, size);</span>
+
+<span class="fc" id="L193">        int localOffset = (int) (offset &amp; segmentOffsetMask);</span>
+<span class="fc" id="L194">        int segmentIdx = (int) (offset &gt;&gt;&gt; segmentOffsetBits);</span>
+<span class="fc" id="L195">        entry.writeBytes(cacheSegments[segmentIdx], localOffset, size);</span>
+<span class="fc" id="L196">        return entry;</span>
+    }
+
+    public ByteBuf getLastEntry(long ledgerId) {
+<span class="fc" id="L200">        long lastEntryId = lastEntryMap.get(ledgerId);</span>
+<span class="pc bpc" id="L201" title="1 of 2 branches missed.">        if (lastEntryId == -1) {</span>
+            // Ledger not found in write cache
+<span class="nc" id="L203">            return null;</span>
+        } else {
+<span class="fc" id="L205">            return get(ledgerId, lastEntryId);</span>
+        }
+    }
+
+    public void deleteLedger(long ledgerId) {
+<span class="fc" id="L210">        deletedLedgers.add(ledgerId);</span>
+<span class="fc" id="L211">    }</span>
+
+<span class="fc" id="L213">    private static final ArrayGroupSort groupSorter = new ArrayGroupSort(2, 4);</span>
+
+    public void forEach(EntryConsumer consumer) {
+<span class="fc" id="L216">        sortedEntriesLock.lock();</span>
+
+        try {
+<span class="fc" id="L219">            int entriesToSort = (int) index.size();</span>
+<span class="fc" id="L220">            int arrayLen = entriesToSort * 4;</span>
+<span class="fc bfc" id="L221" title="All 4 branches covered.">            if (sortedEntries == null || sortedEntries.length &lt; arrayLen) {</span>
+<span class="fc" id="L222">                sortedEntries = new long[(int) (arrayLen * 2)];</span>
+            }
+
+<span class="fc" id="L225">            long startTime = MathUtils.nowInNano();</span>
+
+<span class="fc" id="L227">            sortedEntriesIdx = 0;</span>
+<span class="fc" id="L228">            index.forEach((ledgerId, entryId, offset, length) -&gt; {</span>
+<span class="fc bfc" id="L229" title="All 2 branches covered.">                if (deletedLedgers.contains(ledgerId)) {</span>
+                    // Ignore deleted ledgers
+<span class="fc" id="L231">                    return;</span>
+                }
+
+<span class="fc" id="L234">                sortedEntries[sortedEntriesIdx] = ledgerId;</span>
+<span class="fc" id="L235">                sortedEntries[sortedEntriesIdx + 1] = entryId;</span>
+<span class="fc" id="L236">                sortedEntries[sortedEntriesIdx + 2] = offset;</span>
+<span class="fc" id="L237">                sortedEntries[sortedEntriesIdx + 3] = length;</span>
+<span class="fc" id="L238">                sortedEntriesIdx += 4;</span>
+<span class="fc" id="L239">            });</span>
+
+<span class="pc bpc" id="L241" title="1 of 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L242">                log.debug(&quot;iteration took {} ms&quot;, MathUtils.elapsedNanos(startTime) / 1e6);</span>
+            }
+<span class="fc" id="L244">            startTime = MathUtils.nowInNano();</span>
+
+            // Sort entries by (ledgerId, entryId) maintaining the 4 items groups
+<span class="fc" id="L247">            groupSorter.sort(sortedEntries, 0, sortedEntriesIdx);</span>
+<span class="pc bpc" id="L248" title="1 of 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L249">                log.debug(&quot;sorting {} ms&quot;, (MathUtils.elapsedNanos(startTime) / 1e6));</span>
+            }
+<span class="fc" id="L251">            startTime = MathUtils.nowInNano();</span>
+
+<span class="fc" id="L253">            ByteBuf[] entrySegments = new ByteBuf[segmentsCount];</span>
+<span class="fc bfc" id="L254" title="All 2 branches covered.">            for (int i = 0; i &lt; segmentsCount; i++) {</span>
+<span class="fc" id="L255">                entrySegments[i] = cacheSegments[i].slice(0, cacheSegments[i].capacity());</span>
+            }
+
+<span class="fc bfc" id="L258" title="All 2 branches covered.">            for (int i = 0; i &lt; sortedEntriesIdx; i += 4) {</span>
+<span class="fc" id="L259">                long ledgerId = sortedEntries[i];</span>
+<span class="fc" id="L260">                long entryId = sortedEntries[i + 1];</span>
+<span class="fc" id="L261">                long offset = sortedEntries[i + 2];</span>
+<span class="fc" id="L262">                long length = sortedEntries[i + 3];</span>
+
+<span class="fc" id="L264">                int localOffset = (int) (offset &amp; segmentOffsetMask);</span>
+<span class="fc" id="L265">                int segmentIdx = (int) (offset &gt;&gt;&gt; segmentOffsetBits);</span>
+<span class="fc" id="L266">                ByteBuf entry = entrySegments[segmentIdx];</span>
+<span class="fc" id="L267">                entry.setIndex(localOffset, localOffset + (int) length);</span>
+<span class="fc" id="L268">                consumer.accept(ledgerId, entryId, entry);</span>
+            }
+
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L272">                log.debug(&quot;entry log adding {} ms&quot;, MathUtils.elapsedNanos(startTime) / 1e6);</span>
+            }
+        } finally {
+<span class="fc" id="L275">            sortedEntriesLock.unlock();</span>
+        }
+<span class="fc" id="L277">    }</span>
+
+    public long size() {
+<span class="fc" id="L280">        return cacheSize.get();</span>
+    }
+
+    public long count() {
+<span class="nc" id="L284">        return cacheCount.sum();</span>
+    }
+
+    public boolean isEmpty() {
+<span class="nc bnc" id="L288" title="All 2 branches missed.">        return cacheSize.get() == 0L;</span>
+    }
+
+    private static final int ALIGN_64_MASK = ~(64 - 1);
+
+    static int align64(int size) {
+<span class="fc" id="L294">        return (size + 64 - 1) &amp; ALIGN_64_MASK;</span>
+    }
+
+    private static long alignToPowerOfTwo(long n) {
+<span class="fc" id="L298">        return (long) Math.pow(2, 64 - Long.numberOfLeadingZeros(n - 1));</span>
+    }
+
+<span class="fc" id="L301">    private final ReentrantLock sortedEntriesLock = new ReentrantLock();</span>
+    private long[] sortedEntries;
+    private int sortedEntriesIdx;
+
+<span class="fc" id="L305">    private static final Logger log = LoggerFactory.getLogger(WriteCache.class);</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

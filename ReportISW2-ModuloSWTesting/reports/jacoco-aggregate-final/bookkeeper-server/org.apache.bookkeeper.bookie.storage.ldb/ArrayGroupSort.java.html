@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ArrayGroupSort.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.storage.ldb</a> &gt; <span class="el_source">ArrayGroupSort.java</span></div><h1>ArrayGroupSort.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie.storage.ldb;
+
+import static com.google.common.base.Preconditions.checkArgument;
+
+/**
+ * Sort an array of longs, grouping the items in tuples.
+ *
+ * &lt;p&gt;Group size decides how many longs are included in the tuples and key size controls how many items to use for
+ * comparison.
+ */
+public class ArrayGroupSort {
+
+    private final int keySize;
+    private final int groupSize;
+
+<span class="fc" id="L36">    public ArrayGroupSort(int keySize, int groupSize) {</span>
+<span class="pc bpc" id="L37" title="1 of 2 branches missed.">        checkArgument(keySize &gt; 0);</span>
+<span class="pc bpc" id="L38" title="1 of 2 branches missed.">        checkArgument(groupSize &gt; 0);</span>
+<span class="pc bpc" id="L39" title="1 of 2 branches missed.">        checkArgument(keySize &lt;= groupSize, &quot;keySize need to be less or equal the groupSize&quot;);</span>
+<span class="fc" id="L40">        this.keySize = keySize;</span>
+<span class="fc" id="L41">        this.groupSize = groupSize;</span>
+<span class="fc" id="L42">    }</span>
+
+    public void sort(long[] array) {
+<span class="nc" id="L45">        sort(array, 0, array.length);</span>
+<span class="nc" id="L46">    }</span>
+
+    public void sort(long[] array, int offset, int length) {
+<span class="pc bpc" id="L49" title="1 of 2 branches missed.">        checkArgument(length % groupSize == 0, &quot;Array length must be multiple of groupSize&quot;);</span>
+<span class="fc" id="L50">        quickSort(array, offset, (length + offset - groupSize));</span>
+<span class="fc" id="L51">    }</span>
+
+    ////// Private
+
+    private void quickSort(long[] array, int low, int high) {
+<span class="fc bfc" id="L56" title="All 2 branches covered.">        if (low &lt; high) {</span>
+<span class="fc" id="L57">            int pivotIdx = partition(array, low, high);</span>
+<span class="fc" id="L58">            quickSort(array, low, pivotIdx - groupSize);</span>
+<span class="fc" id="L59">            quickSort(array, pivotIdx + groupSize, high);</span>
+        }
+<span class="fc" id="L61">    }</span>
+
+    private int partition(long[] array, int low, int high) {
+<span class="fc" id="L64">        int pivotIdx = high;</span>
+<span class="fc" id="L65">        int i = low;</span>
+
+<span class="fc bfc" id="L67" title="All 2 branches covered.">        for (int j = low; j &lt; high; j += groupSize) {</span>
+<span class="fc bfc" id="L68" title="All 2 branches covered.">            if (isLess(array, j, pivotIdx)) {</span>
+<span class="fc" id="L69">                swap(array, j, i);</span>
+<span class="fc" id="L70">                i += groupSize;</span>
+            }
+        }
+
+<span class="fc" id="L74">        swap(array, i, high);</span>
+<span class="fc" id="L75">        return i;</span>
+    }
+
+    private void swap(long[] array, int a, int b) {
+        long tmp;
+<span class="fc bfc" id="L80" title="All 2 branches covered.">        for (int k = 0; k &lt; groupSize; k++) {</span>
+<span class="fc" id="L81">            tmp = array[a + k];</span>
+<span class="fc" id="L82">            array[a + k] = array[b + k];</span>
+<span class="fc" id="L83">            array[b + k] = tmp;</span>
+        }
+<span class="fc" id="L85">    }</span>
+
+    private boolean isLess(long[] array, int idx1, int idx2) {
+<span class="pc bpc" id="L88" title="1 of 2 branches missed.">        for (int i = 0; i &lt; keySize; i++) {</span>
+<span class="fc" id="L89">            long k1 = array[idx1 + i];</span>
+<span class="fc" id="L90">            long k2 = array[idx2 + i];</span>
+<span class="fc bfc" id="L91" title="All 2 branches covered.">            if (k1 &lt; k2) {</span>
+<span class="fc" id="L92">                return true;</span>
+<span class="fc bfc" id="L93" title="All 2 branches covered.">            } else if (k1 &gt; k2) {</span>
+<span class="fc" id="L94">                return false;</span>
+            }
+        }
+
+<span class="nc" id="L98">        return false;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

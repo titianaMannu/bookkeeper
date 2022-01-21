@@ -1,0 +1,425 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>LedgerDirsManager.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">LedgerDirsManager.java</span></div><h1>LedgerDirsManager.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie;
+
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.LD_WRITABLE_DIRS;
+
+import com.google.common.annotations.VisibleForTesting;
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.stats.Gauge;
+import org.apache.bookkeeper.stats.NullStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.util.DiskChecker;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * This class manages ledger directories used by the bookie.
+ */
+public class LedgerDirsManager {
+<span class="fc" id="L46">    private static final Logger LOG = LoggerFactory.getLogger(LedgerDirsManager.class);</span>
+
+    private volatile List&lt;File&gt; filledDirs;
+    private final List&lt;File&gt; ledgerDirectories;
+    private volatile List&lt;File&gt; writableLedgerDirectories;
+    private final List&lt;LedgerDirsListener&gt; listeners;
+<span class="fc" id="L52">    private final Random rand = new Random();</span>
+<span class="fc" id="L53">    private final ConcurrentMap&lt;File, Float&gt; diskUsages =</span>
+            new ConcurrentHashMap&lt;File, Float&gt;();
+    private final long entryLogSize;
+    private long minUsableSizeForEntryLogCreation;
+    private long minUsableSizeForIndexFileCreation;
+
+    private final DiskChecker diskChecker;
+
+    public LedgerDirsManager(ServerConfiguration conf, File[] dirs, DiskChecker diskChecker) {
+<span class="nc" id="L62">        this(conf, dirs, diskChecker, NullStatsLogger.INSTANCE);</span>
+<span class="nc" id="L63">    }</span>
+
+<span class="fc" id="L65">    public LedgerDirsManager(ServerConfiguration conf, File[] dirs, DiskChecker diskChecker, StatsLogger statsLogger) {</span>
+<span class="fc" id="L66">        this.ledgerDirectories = Arrays.asList(Bookie</span>
+<span class="fc" id="L67">                .getCurrentDirectories(dirs));</span>
+<span class="fc" id="L68">        this.writableLedgerDirectories = new ArrayList&lt;File&gt;(ledgerDirectories);</span>
+<span class="fc" id="L69">        this.filledDirs = new ArrayList&lt;File&gt;();</span>
+<span class="fc" id="L70">        this.listeners = new ArrayList&lt;LedgerDirsListener&gt;();</span>
+<span class="fc" id="L71">        this.entryLogSize = conf.getEntryLogSizeLimit();</span>
+<span class="fc" id="L72">        this.minUsableSizeForIndexFileCreation = conf.getMinUsableSizeForIndexFileCreation();</span>
+<span class="fc" id="L73">        this.minUsableSizeForEntryLogCreation = conf.getMinUsableSizeForEntryLogCreation();</span>
+<span class="fc bfc" id="L74" title="All 2 branches covered.">        for (File dir : ledgerDirectories) {</span>
+<span class="fc" id="L75">            diskUsages.put(dir, 0f);</span>
+<span class="fc" id="L76">            String statName = &quot;dir_&quot; + dir.getParent().replace('/', '_') + &quot;_usage&quot;;</span>
+<span class="fc" id="L77">            final File targetDir = dir;</span>
+<span class="fc" id="L78">            statsLogger.registerGauge(statName, new Gauge&lt;Number&gt;() {</span>
+                @Override
+                public Number getDefaultValue() {
+<span class="nc" id="L81">                    return 0;</span>
+                }
+
+                @Override
+                public Number getSample() {
+<span class="nc" id="L86">                    return diskUsages.get(targetDir) * 100;</span>
+                }
+            });
+<span class="fc" id="L89">        }</span>
+
+<span class="fc" id="L91">        this.diskChecker = diskChecker;</span>
+<span class="fc" id="L92">        statsLogger.registerGauge(LD_WRITABLE_DIRS, new Gauge&lt;Number&gt;() {</span>
+
+            @Override
+            public Number getDefaultValue() {
+<span class="nc" id="L96">                return 0;</span>
+            }
+
+            @Override
+            public Number getSample() {
+<span class="nc" id="L101">                return writableLedgerDirectories.size();</span>
+            }
+        });
+<span class="fc" id="L104">    }</span>
+
+    /**
+     * Get all ledger dirs configured.
+     */
+    public List&lt;File&gt; getAllLedgerDirs() {
+<span class="fc" id="L110">        return ledgerDirectories;</span>
+    }
+
+    /**
+     * Get all dir listeners.
+     *
+     * @return list of listeners
+     */
+    public List&lt;LedgerDirsListener&gt; getListeners() {
+<span class="nc" id="L119">        return listeners;</span>
+    }
+
+    /**
+     * Calculate the total amount of free space available in all of the ledger directories put together.
+     *
+     * @return totalDiskSpace in bytes
+     * @throws IOException
+     */
+    public long getTotalFreeSpace(List&lt;File&gt; dirs) throws IOException {
+<span class="nc" id="L129">        return diskChecker.getTotalFreeSpace(dirs);</span>
+    }
+
+    /**
+     * Calculate the total amount of free space available in all of the ledger directories put together.
+     *
+     * @return freeDiskSpace in bytes
+     * @throws IOException
+     */
+    public long getTotalDiskSpace(List&lt;File&gt; dirs) throws IOException {
+<span class="nc" id="L139">        return diskChecker.getTotalDiskSpace(dirs);</span>
+    }
+
+    /**
+     * Get disk usages map.
+     *
+     * @return disk usages map
+     */
+    public ConcurrentMap&lt;File, Float&gt; getDiskUsages() {
+<span class="nc" id="L148">        return diskUsages;</span>
+    }
+
+    /**
+     * Get only writable ledger dirs.
+     */
+    public List&lt;File&gt; getWritableLedgerDirs()
+            throws NoWritableLedgerDirException {
+<span class="pc bpc" id="L156" title="1 of 2 branches missed.">        if (writableLedgerDirectories.isEmpty()) {</span>
+<span class="nc" id="L157">            String errMsg = &quot;All ledger directories are non writable&quot;;</span>
+<span class="nc" id="L158">            NoWritableLedgerDirException e = new NoWritableLedgerDirException(</span>
+                    errMsg);
+<span class="nc" id="L160">            throw e;</span>
+        }
+<span class="fc" id="L162">        return writableLedgerDirectories;</span>
+    }
+
+    /**
+     * @return true if the writableLedgerDirs list has entries
+     */
+    public boolean hasWritableLedgerDirs() {
+<span class="nc bnc" id="L169" title="All 2 branches missed.">        return !writableLedgerDirectories.isEmpty();</span>
+    }
+
+    public List&lt;File&gt; getWritableLedgerDirsForNewLog() throws NoWritableLedgerDirException {
+<span class="pc bpc" id="L173" title="1 of 2 branches missed.">        if (!writableLedgerDirectories.isEmpty()) {</span>
+<span class="fc" id="L174">            return writableLedgerDirectories;</span>
+        }
+
+        // We don't have writable Ledger Dirs. But we are still okay to create new entry log files if we have enough
+        // disk spaces. This allows bookie can still function at readonly mode. Because compaction, journal replays
+        // can still write data to disks.
+<span class="nc" id="L180">        return getDirsAboveUsableThresholdSize(minUsableSizeForEntryLogCreation, true);</span>
+    }
+
+    List&lt;File&gt; getDirsAboveUsableThresholdSize(long thresholdSize, boolean loggingNoWritable)
+            throws NoWritableLedgerDirException {
+<span class="nc" id="L185">        List&lt;File&gt; fullLedgerDirsToAccomodate = new ArrayList&lt;File&gt;();</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">        for (File dir: this.ledgerDirectories) {</span>
+            // Pick dirs which can accommodate little more than thresholdSize
+<span class="nc bnc" id="L188" title="All 2 branches missed.">            if (dir.getUsableSpace() &gt; thresholdSize) {</span>
+<span class="nc" id="L189">                fullLedgerDirsToAccomodate.add(dir);</span>
+            }
+<span class="nc" id="L191">        }</span>
+
+<span class="nc bnc" id="L193" title="All 2 branches missed.">        if (!fullLedgerDirsToAccomodate.isEmpty()) {</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">            if (loggingNoWritable) {</span>
+<span class="nc" id="L195">                LOG.info(&quot;No writable ledger dirs below diskUsageThreshold. &quot;</span>
+<span class="nc" id="L196">                    + &quot;But Dirs that can accommodate {} are: {}&quot;, thresholdSize, fullLedgerDirsToAccomodate);</span>
+            }
+<span class="nc" id="L198">            return fullLedgerDirsToAccomodate;</span>
+        }
+
+        // We will reach here when we find no ledgerDir which has atleast
+        // thresholdSize usable space
+<span class="nc" id="L203">        String errMsg = &quot;All ledger directories are non writable and no reserved space (&quot; + thresholdSize + &quot;) left.&quot;;</span>
+<span class="nc" id="L204">        NoWritableLedgerDirException e = new NoWritableLedgerDirException(errMsg);</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">        if (loggingNoWritable) {</span>
+<span class="nc" id="L206">            LOG.error(errMsg, e);</span>
+        }
+<span class="nc" id="L208">        throw e;</span>
+    }
+
+    /**
+     * @return full-filled ledger dirs.
+     */
+    public List&lt;File&gt; getFullFilledLedgerDirs() {
+<span class="nc" id="L215">        return filledDirs;</span>
+    }
+
+    /**
+     * Get dirs, which are full more than threshold.
+     */
+    public boolean isDirFull(File dir) {
+<span class="nc" id="L222">        return filledDirs.contains(dir);</span>
+    }
+
+    /**
+     * Add the dir to filled dirs list.
+     */
+    @VisibleForTesting
+    public void addToFilledDirs(File dir) {
+<span class="nc bnc" id="L230" title="All 2 branches missed.">        if (!filledDirs.contains(dir)) {</span>
+<span class="nc" id="L231">            LOG.warn(dir + &quot; is out of space. Adding it to filled dirs list&quot;);</span>
+            // Update filled dirs list
+<span class="nc" id="L233">            List&lt;File&gt; updatedFilledDirs = new ArrayList&lt;File&gt;(filledDirs);</span>
+<span class="nc" id="L234">            updatedFilledDirs.add(dir);</span>
+<span class="nc" id="L235">            filledDirs = updatedFilledDirs;</span>
+            // Update the writable ledgers list
+<span class="nc" id="L237">            List&lt;File&gt; newDirs = new ArrayList&lt;File&gt;(writableLedgerDirectories);</span>
+<span class="nc" id="L238">            newDirs.removeAll(filledDirs);</span>
+<span class="nc" id="L239">            writableLedgerDirectories = newDirs;</span>
+            // Notify listeners about disk full
+<span class="nc bnc" id="L241" title="All 2 branches missed.">            for (LedgerDirsListener listener : listeners) {</span>
+<span class="nc" id="L242">                listener.diskFull(dir);</span>
+<span class="nc" id="L243">            }</span>
+        }
+<span class="nc" id="L245">    }</span>
+
+    /**
+     * Add the dir to writable dirs list.
+     *
+     * @param dir Dir
+     */
+    public void addToWritableDirs(File dir, boolean underWarnThreshold) {
+<span class="nc bnc" id="L253" title="All 2 branches missed.">        if (writableLedgerDirectories.contains(dir)) {</span>
+<span class="nc" id="L254">            return;</span>
+        }
+<span class="nc" id="L256">        LOG.info(&quot;{} becomes writable. Adding it to writable dirs list.&quot;, dir);</span>
+        // Update writable dirs list
+<span class="nc" id="L258">        List&lt;File&gt; updatedWritableDirs = new ArrayList&lt;File&gt;(writableLedgerDirectories);</span>
+<span class="nc" id="L259">        updatedWritableDirs.add(dir);</span>
+<span class="nc" id="L260">        writableLedgerDirectories = updatedWritableDirs;</span>
+        // Update the filled dirs list
+<span class="nc" id="L262">        List&lt;File&gt; newDirs = new ArrayList&lt;File&gt;(filledDirs);</span>
+<span class="nc" id="L263">        newDirs.removeAll(writableLedgerDirectories);</span>
+<span class="nc" id="L264">        filledDirs = newDirs;</span>
+        // Notify listeners about disk writable
+<span class="nc bnc" id="L266" title="All 2 branches missed.">        for (LedgerDirsListener listener : listeners) {</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">            if (underWarnThreshold) {</span>
+<span class="nc" id="L268">                listener.diskWritable(dir);</span>
+            } else {
+<span class="nc" id="L270">                listener.diskJustWritable(dir);</span>
+            }
+<span class="nc" id="L272">        }</span>
+<span class="nc" id="L273">    }</span>
+
+    /**
+     * Returns one of the ledger dir from writable dirs list randomly.
+     */
+    File pickRandomWritableDir() throws NoWritableLedgerDirException {
+<span class="nc" id="L279">        return pickRandomWritableDir(null);</span>
+    }
+
+    /**
+     * Pick up a writable dir from available dirs list randomly. The &lt;code&gt;excludedDir&lt;/code&gt;
+     * will not be pickedup.
+     *
+     * @param excludedDir
+     *          The directory to exclude during pickup.
+     * @throws NoWritableLedgerDirException if there is no writable dir available.
+     */
+    File pickRandomWritableDir(File excludedDir) throws NoWritableLedgerDirException {
+<span class="nc" id="L291">        List&lt;File&gt; writableDirs = getWritableLedgerDirs();</span>
+<span class="nc" id="L292">        return pickRandomDir(writableDirs, excludedDir);</span>
+    }
+
+    /**
+     * Pick up a dir randomly from writableLedgerDirectories. If writableLedgerDirectories is empty
+     * then pick up a dir randomly from the ledger/indexdirs which have usable space more than
+     * minUsableSizeForIndexFileCreation.
+     *
+     * @param excludedDir The directory to exclude during pickup.
+     * @return
+     * @throws NoWritableLedgerDirException if there is no dir available.
+     */
+    File pickRandomWritableDirForNewIndexFile(File excludedDir) throws NoWritableLedgerDirException {
+        final List&lt;File&gt; writableDirsForNewIndexFile;
+<span class="nc bnc" id="L306" title="All 2 branches missed.">        if (!writableLedgerDirectories.isEmpty()) {</span>
+<span class="nc" id="L307">            writableDirsForNewIndexFile = writableLedgerDirectories;</span>
+        } else {
+            // We don't have writable Index Dirs.
+            // That means we must have turned readonly. But
+            // during the Bookie restart, while replaying the journal there might be a need
+            // to create new Index file and it should proceed.
+<span class="nc" id="L313">            writableDirsForNewIndexFile = getDirsAboveUsableThresholdSize(minUsableSizeForIndexFileCreation, true);</span>
+        }
+<span class="nc" id="L315">        return pickRandomDir(writableDirsForNewIndexFile, excludedDir);</span>
+    }
+
+    boolean isDirWritableForNewIndexFile(File indexDir) {
+<span class="nc bnc" id="L319" title="All 2 branches missed.">        return (ledgerDirectories.contains(indexDir)</span>
+<span class="nc bnc" id="L320" title="All 2 branches missed.">                &amp;&amp; (indexDir.getUsableSpace() &gt; minUsableSizeForIndexFileCreation));</span>
+    }
+
+    /**
+     * Return one dir from all dirs, regardless writable or not.
+     */
+    File pickRandomDir(File excludedDir) throws NoWritableLedgerDirException {
+<span class="nc" id="L327">        return pickRandomDir(getAllLedgerDirs(), excludedDir);</span>
+    }
+
+    File pickRandomDir(List&lt;File&gt; dirs, File excludedDir) throws NoWritableLedgerDirException {
+<span class="nc" id="L331">        final int start = rand.nextInt(dirs.size());</span>
+<span class="nc" id="L332">        int idx = start;</span>
+<span class="nc" id="L333">        File candidate = dirs.get(idx);</span>
+<span class="nc bnc" id="L334" title="All 4 branches missed.">        while (null != excludedDir &amp;&amp; excludedDir.equals(candidate)) {</span>
+<span class="nc" id="L335">            idx = (idx + 1) % dirs.size();</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">            if (idx == start) {</span>
+                // after searching all available dirs,
+                // no writable dir is found
+<span class="nc" id="L339">                throw new NoWritableLedgerDirException(&quot;No writable directories found from &quot;</span>
+                        + &quot; available writable dirs (&quot; + dirs + &quot;) : exclude dir &quot;
+                        + excludedDir);
+            }
+<span class="nc" id="L343">            candidate = dirs.get(idx);</span>
+        }
+<span class="nc" id="L345">        return candidate;</span>
+    }
+
+    public void addLedgerDirsListener(LedgerDirsListener listener) {
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">        if (listener != null) {</span>
+<span class="fc" id="L350">            listeners.add(listener);</span>
+        }
+<span class="fc" id="L352">    }</span>
+
+    public DiskChecker getDiskChecker() {
+<span class="fc" id="L355">        return diskChecker;</span>
+    }
+
+    /**
+     * Indicates All configured ledger directories are full.
+     */
+    public static class NoWritableLedgerDirException extends IOException {
+        private static final long serialVersionUID = -8696901285061448421L;
+
+        public NoWritableLedgerDirException(String errMsg) {
+<span class="nc" id="L365">            super(errMsg);</span>
+<span class="nc" id="L366">        }</span>
+    }
+
+    /**
+     * Listener for the disk check events will be notified from the
+     * {@link LedgerDirsManager} whenever disk full/failure detected.
+     */
+    public interface LedgerDirsListener {
+        /**
+         * This will be notified on disk failure/disk error.
+         *
+         * @param disk Failed disk
+         */
+<span class="nc" id="L379">        default void diskFailed(File disk) {}</span>
+
+        /**
+         * Notified when the disk usage warn threshold is exceeded on the drive.
+         * @param disk
+         */
+<span class="nc" id="L385">        default void diskAlmostFull(File disk) {}</span>
+
+        /**
+         * This will be notified on disk detected as full.
+         *
+         * @param disk Filled disk
+         */
+<span class="nc" id="L392">        default void diskFull(File disk) {}</span>
+
+        /**
+         * This will be notified on disk detected as writable and under warn threshold.
+         *
+         * @param disk Writable disk
+         */
+<span class="nc" id="L399">        default void diskWritable(File disk) {}</span>
+
+        /**
+         * This will be notified on disk detected as writable but still in warn threshold.
+         *
+         * @param disk Writable disk
+         */
+<span class="nc" id="L406">        default void diskJustWritable(File disk) {}</span>
+
+        /**
+         * This will be notified whenever all disks are detected as full.
+         *
+         * &lt;p&gt;Normal writes will be rejected when disks are detected as &quot;full&quot;. High priority writes
+         * such as ledger recovery writes can go through if disks are still available.
+         *
+         * @param highPriorityWritesAllowed the parameter indicates we are still have disk spaces for high priority
+         *                                  writes even disks are detected as &quot;full&quot;
+         */
+<span class="nc" id="L417">        default void allDisksFull(boolean highPriorityWritesAllowed) {}</span>
+
+        /**
+         * This will notify the fatal errors.
+         */
+<span class="nc" id="L422">        default void fatalError() {}</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

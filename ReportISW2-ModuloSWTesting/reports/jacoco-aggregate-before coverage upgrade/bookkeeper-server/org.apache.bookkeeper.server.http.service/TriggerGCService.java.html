@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>TriggerGCService.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.server.http.service</a> &gt; <span class="el_source">TriggerGCService.java</span></div><h1>TriggerGCService.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.server.http.service;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import org.apache.bookkeeper.common.util.JsonUtil;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.http.HttpServer;
+import org.apache.bookkeeper.http.service.HttpEndpointService;
+import org.apache.bookkeeper.http.service.HttpServiceRequest;
+import org.apache.bookkeeper.http.service.HttpServiceResponse;
+import org.apache.bookkeeper.proto.BookieServer;
+import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * HttpEndpointService that handle force trigger GC requests.
+ *
+ * &lt;p&gt;The PUT method will force trigger GC on current bookie, and make GC run at backend.
+ *
+ * &lt;p&gt;The GET method will get the force triggered GC running or not.
+ * Output would be like:
+ *        {
+ *           &quot;is_in_force_gc&quot; : &quot;false&quot;
+ *        }
+ */
+public class TriggerGCService implements HttpEndpointService {
+
+<span class="nc" id="L47">    static final Logger LOG = LoggerFactory.getLogger(TriggerGCService.class);</span>
+
+    protected ServerConfiguration conf;
+    protected BookieServer bookieServer;
+
+<span class="nc" id="L52">    public TriggerGCService(ServerConfiguration conf, BookieServer bookieServer) {</span>
+<span class="nc" id="L53">        checkNotNull(conf);</span>
+<span class="nc" id="L54">        checkNotNull(bookieServer);</span>
+<span class="nc" id="L55">        this.conf = conf;</span>
+<span class="nc" id="L56">        this.bookieServer = bookieServer;</span>
+<span class="nc" id="L57">    }</span>
+
+    @Override
+    public HttpServiceResponse handle(HttpServiceRequest request) throws Exception {
+<span class="nc" id="L61">        HttpServiceResponse response = new HttpServiceResponse();</span>
+
+<span class="nc bnc" id="L63" title="All 2 branches missed.">        if (HttpServer.Method.PUT == request.getMethod()) {</span>
+<span class="nc" id="L64">            bookieServer.getBookie().getLedgerStorage().forceGC();</span>
+
+<span class="nc" id="L66">            String output = &quot;Triggered GC on BookieServer: &quot; + bookieServer.toString();</span>
+<span class="nc" id="L67">            String jsonResponse = JsonUtil.toJson(output);</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L69">                LOG.debug(&quot;output body:&quot; + jsonResponse);</span>
+            }
+<span class="nc" id="L71">            response.setBody(jsonResponse);</span>
+<span class="nc" id="L72">            response.setCode(HttpServer.StatusCode.OK);</span>
+<span class="nc" id="L73">            return response;</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        } else if (HttpServer.Method.GET == request.getMethod()) {</span>
+<span class="nc" id="L75">            Boolean isInForceGC = bookieServer.getBookie().getLedgerStorage().isInForceGC();</span>
+<span class="nc" id="L76">            Pair&lt;String, String&gt; output = Pair.of(&quot;is_in_force_gc&quot;, isInForceGC.toString());</span>
+<span class="nc" id="L77">            String jsonResponse = JsonUtil.toJson(output);</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L79">                LOG.debug(&quot;output body:&quot; + jsonResponse);</span>
+            }
+<span class="nc" id="L81">            response.setBody(jsonResponse);</span>
+<span class="nc" id="L82">            response.setCode(HttpServer.StatusCode.OK);</span>
+<span class="nc" id="L83">            return response;</span>
+        } else {
+<span class="nc" id="L85">            response.setCode(HttpServer.StatusCode.NOT_FOUND);</span>
+<span class="nc" id="L86">            response.setBody(&quot;Not found method. Should be PUT to trigger GC, Or GET to get Force GC state.&quot;);</span>
+<span class="nc" id="L87">            return response;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

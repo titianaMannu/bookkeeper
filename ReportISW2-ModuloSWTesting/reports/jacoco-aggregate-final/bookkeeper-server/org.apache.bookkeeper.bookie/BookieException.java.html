@@ -1,0 +1,328 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>BookieException.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">BookieException.java</span></div><h1>BookieException.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie;
+
+/**
+ * Signals that a Bookie exception of some sort has occurred. This class
+ * is the general class of exceptions produced by failed or interrupted bookie operations.
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public abstract class BookieException extends Exception {
+
+    private final int code;
+
+    public BookieException(int code) {
+<span class="nc" id="L33">        super();</span>
+<span class="nc" id="L34">        this.code = code;</span>
+<span class="nc" id="L35">    }</span>
+
+    public BookieException(int code, Throwable t) {
+<span class="nc" id="L38">        super(t);</span>
+<span class="nc" id="L39">        this.code = code;</span>
+<span class="nc" id="L40">    }</span>
+
+    public BookieException(int code, String reason) {
+<span class="nc" id="L43">        super(reason);</span>
+<span class="nc" id="L44">        this.code = code;</span>
+<span class="nc" id="L45">    }</span>
+
+    public BookieException(int code, String reason, Throwable t) {
+<span class="nc" id="L48">        super(reason, t);</span>
+<span class="nc" id="L49">        this.code = code;</span>
+<span class="nc" id="L50">    }</span>
+
+    public static BookieException create(int code) {
+<span class="nc bnc" id="L53" title="All 10 branches missed.">        switch(code) {</span>
+        case Code.UnauthorizedAccessException:
+<span class="nc" id="L55">            return new BookieUnauthorizedAccessException();</span>
+        case Code.LedgerFencedException:
+<span class="nc" id="L57">            return new LedgerFencedException();</span>
+        case Code.InvalidCookieException:
+<span class="nc" id="L59">            return new InvalidCookieException();</span>
+        case Code.UpgradeException:
+<span class="nc" id="L61">            return new UpgradeException();</span>
+        case Code.DiskPartitionDuplicationException:
+<span class="nc" id="L63">            return new DiskPartitionDuplicationException();</span>
+        case Code.CookieNotFoundException:
+<span class="nc" id="L65">            return new CookieNotFoundException();</span>
+        case Code.CookieExistsException:
+<span class="nc" id="L67">            return new CookieExistException();</span>
+        case Code.MetadataStoreException:
+<span class="nc" id="L69">            return new MetadataStoreException();</span>
+        case Code.UnknownBookieIdException:
+<span class="nc" id="L71">            return new UnknownBookieIdException();</span>
+        default:
+<span class="nc" id="L73">            return new BookieIllegalOpException();</span>
+        }
+    }
+
+    /**
+     * An exception code indicates the failure reason.
+     */
+    public interface Code {
+        int OK = 0;
+        int UnauthorizedAccessException = -1;
+
+        int IllegalOpException = -100;
+        int LedgerFencedException = -101;
+        int InvalidCookieException = -102;
+        int UpgradeException = -103;
+        int DiskPartitionDuplicationException = -104;
+        int CookieNotFoundException = -105;
+        int MetadataStoreException = -106;
+        int UnknownBookieIdException = -107;
+        int OperationRejectedException = -108;
+        int CookieExistsException = -109;
+    }
+
+    public int getCode() {
+<span class="nc" id="L97">        return this.code;</span>
+    }
+
+    public String getMessage(int code) {
+        String err;
+<span class="nc bnc" id="L102" title="All 12 branches missed.">        switch(code) {</span>
+        case Code.OK:
+<span class="nc" id="L104">            err = &quot;No problem&quot;;</span>
+<span class="nc" id="L105">            break;</span>
+        case Code.UnauthorizedAccessException:
+<span class="nc" id="L107">            err = &quot;Error while reading ledger&quot;;</span>
+<span class="nc" id="L108">            break;</span>
+        case Code.LedgerFencedException:
+<span class="nc" id="L110">            err = &quot;Ledger has been fenced; No more entries can be added&quot;;</span>
+<span class="nc" id="L111">            break;</span>
+        case Code.InvalidCookieException:
+<span class="nc" id="L113">            err = &quot;Invalid environment cookie found&quot;;</span>
+<span class="nc" id="L114">            break;</span>
+        case Code.UpgradeException:
+<span class="nc" id="L116">            err = &quot;Error performing an upgrade operation &quot;;</span>
+<span class="nc" id="L117">            break;</span>
+        case Code.DiskPartitionDuplicationException:
+<span class="nc" id="L119">            err = &quot;Disk Partition Duplication is not allowed&quot;;</span>
+<span class="nc" id="L120">            break;</span>
+        case Code.CookieNotFoundException:
+<span class="nc" id="L122">            err = &quot;Cookie not found&quot;;</span>
+<span class="nc" id="L123">            break;</span>
+        case Code.CookieExistsException:
+<span class="nc" id="L125">            err = &quot;Cookie already exists&quot;;</span>
+<span class="nc" id="L126">            break;</span>
+        case Code.MetadataStoreException:
+<span class="nc" id="L128">            err = &quot;Error performing metadata operations&quot;;</span>
+<span class="nc" id="L129">            break;</span>
+        case Code.UnknownBookieIdException:
+<span class="nc" id="L131">            err = &quot;Unknown bookie id&quot;;</span>
+<span class="nc" id="L132">            break;</span>
+        case Code.OperationRejectedException:
+<span class="nc" id="L134">            err = &quot;Operation rejected&quot;;</span>
+<span class="nc" id="L135">            break;</span>
+        default:
+<span class="nc" id="L137">            err = &quot;Invalid operation&quot;;</span>
+            break;
+        }
+<span class="nc" id="L140">        String reason = super.getMessage();</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">        if (reason == null) {</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">            if (super.getCause() != null) {</span>
+<span class="nc" id="L143">                reason = super.getCause().getMessage();</span>
+            }
+        }
+<span class="nc bnc" id="L146" title="All 2 branches missed.">        if (reason == null) {</span>
+<span class="nc" id="L147">            return err;</span>
+        } else {
+<span class="nc" id="L149">            return String.format(&quot;%s [%s]&quot;, err, reason);</span>
+        }
+    }
+
+    /**
+     * Signals that an unauthorized operation attempts to access the data in a bookie.
+     */
+    public static class BookieUnauthorizedAccessException extends BookieException {
+        public BookieUnauthorizedAccessException() {
+<span class="nc" id="L158">            super(Code.UnauthorizedAccessException);</span>
+<span class="nc" id="L159">        }</span>
+    }
+
+    /**
+     * Signals that an illegal operation attempts to access the data in a bookie.
+     */
+    public static class BookieIllegalOpException extends BookieException {
+        public BookieIllegalOpException() {
+<span class="nc" id="L167">            super(Code.IllegalOpException);</span>
+<span class="nc" id="L168">        }</span>
+
+        public BookieIllegalOpException(String reason) {
+<span class="nc" id="L171">            super(Code.IllegalOpException, reason);</span>
+<span class="nc" id="L172">        }</span>
+
+        public BookieIllegalOpException(Throwable cause) {
+<span class="nc" id="L175">            super(Code.IllegalOpException, cause);</span>
+<span class="nc" id="L176">        }</span>
+    }
+
+    /**
+     * Signals that a ledger has been fenced in a bookie. No more entries can be appended to that ledger.
+     */
+    public static class LedgerFencedException extends BookieException {
+        public LedgerFencedException() {
+<span class="nc" id="L184">            super(Code.LedgerFencedException);</span>
+<span class="nc" id="L185">        }</span>
+    }
+
+    /**
+     * Signals that a ledger has been fenced in a bookie. No more entries can be appended to that ledger.
+     */
+    public static class OperationRejectedException extends BookieException {
+        public OperationRejectedException() {
+<span class="nc" id="L193">            super(Code.OperationRejectedException);</span>
+<span class="nc" id="L194">        }</span>
+
+        @Override
+        public Throwable fillInStackTrace() {
+            // Since this exception is a way to signal a specific condition and it's triggered and very specific points,
+            // we can disable stack traces.
+<span class="nc" id="L200">            return null;</span>
+        }
+    }
+
+    /**
+     * Signal that an invalid cookie is found when starting a bookie.
+     *
+     * &lt;p&gt;This exception is mainly used for detecting if there is any malformed configuration in a bookie.
+     */
+    public static class InvalidCookieException extends BookieException {
+        public InvalidCookieException() {
+<span class="nc" id="L211">            this(&quot;&quot;);</span>
+<span class="nc" id="L212">        }</span>
+
+        public InvalidCookieException(String reason) {
+<span class="nc" id="L215">            super(Code.InvalidCookieException, reason);</span>
+<span class="nc" id="L216">        }</span>
+
+        public InvalidCookieException(Throwable cause) {
+<span class="nc" id="L219">            super(Code.InvalidCookieException, cause);</span>
+<span class="nc" id="L220">        }</span>
+    }
+
+    /**
+     * Signal that no cookie is found when starting a bookie.
+     */
+    public static class CookieNotFoundException extends BookieException {
+        public CookieNotFoundException() {
+<span class="nc" id="L228">            this(&quot;&quot;);</span>
+<span class="nc" id="L229">        }</span>
+
+        public CookieNotFoundException(String reason) {
+<span class="nc" id="L232">            super(Code.CookieNotFoundException, reason);</span>
+<span class="nc" id="L233">        }</span>
+
+        public CookieNotFoundException(Throwable cause) {
+<span class="nc" id="L236">            super(Code.CookieNotFoundException, cause);</span>
+<span class="nc" id="L237">        }</span>
+    }
+
+    /**
+     * Signal that cookie already exists when creating a new cookie.
+     */
+    public static class CookieExistException extends BookieException {
+        public CookieExistException() {
+<span class="nc" id="L245">            this(&quot;&quot;);</span>
+<span class="nc" id="L246">        }</span>
+
+        public CookieExistException(String reason) {
+<span class="nc" id="L249">            super(Code.CookieExistsException, reason);</span>
+<span class="nc" id="L250">        }</span>
+
+        public CookieExistException(Throwable cause) {
+<span class="nc" id="L253">            super(Code.CookieExistsException, cause);</span>
+<span class="nc" id="L254">        }</span>
+    }
+
+    /**
+     * Signals that an exception occurs on upgrading a bookie.
+     */
+    public static class UpgradeException extends BookieException {
+        public UpgradeException() {
+<span class="nc" id="L262">            super(Code.UpgradeException);</span>
+<span class="nc" id="L263">        }</span>
+
+        public UpgradeException(Throwable cause) {
+<span class="nc" id="L266">            super(Code.UpgradeException, cause);</span>
+<span class="nc" id="L267">        }</span>
+
+        public UpgradeException(String reason) {
+<span class="nc" id="L270">            super(Code.UpgradeException, reason);</span>
+<span class="nc" id="L271">        }</span>
+    }
+
+    /**
+     * Signals when multiple ledger/journal directories are mounted in same disk partition.
+     */
+    public static class DiskPartitionDuplicationException extends BookieException {
+        public DiskPartitionDuplicationException() {
+<span class="nc" id="L279">            super(Code.DiskPartitionDuplicationException);</span>
+<span class="nc" id="L280">        }</span>
+
+        public DiskPartitionDuplicationException(Throwable cause) {
+<span class="nc" id="L283">            super(Code.DiskPartitionDuplicationException, cause);</span>
+<span class="nc" id="L284">        }</span>
+
+        public DiskPartitionDuplicationException(String reason) {
+<span class="nc" id="L287">            super(Code.DiskPartitionDuplicationException, reason);</span>
+<span class="nc" id="L288">        }</span>
+    }
+
+    /**
+     * Signal when bookie has problems on accessing metadata store.
+     */
+    public static class MetadataStoreException extends BookieException {
+
+        public MetadataStoreException() {
+<span class="nc" id="L297">            this(&quot;&quot;);</span>
+<span class="nc" id="L298">        }</span>
+
+        public MetadataStoreException(String reason) {
+<span class="nc" id="L301">            super(Code.MetadataStoreException, reason);</span>
+<span class="nc" id="L302">        }</span>
+
+        public MetadataStoreException(Throwable cause) {
+<span class="nc" id="L305">            super(Code.MetadataStoreException, cause);</span>
+<span class="nc" id="L306">        }</span>
+
+        public MetadataStoreException(String reason, Throwable cause) {
+<span class="nc" id="L309">            super(Code.MetadataStoreException, reason, cause);</span>
+<span class="nc" id="L310">        }</span>
+    }
+
+    /**
+     * Signal when bookie has problems on accessing metadata store.
+     */
+    public static class UnknownBookieIdException extends BookieException {
+
+        public UnknownBookieIdException() {
+<span class="nc" id="L319">            super(Code.UnknownBookieIdException);</span>
+<span class="nc" id="L320">        }</span>
+
+        public UnknownBookieIdException(Throwable cause) {
+<span class="nc" id="L323">            super(Code.UnknownBookieIdException, cause);</span>
+<span class="nc" id="L324">        }</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

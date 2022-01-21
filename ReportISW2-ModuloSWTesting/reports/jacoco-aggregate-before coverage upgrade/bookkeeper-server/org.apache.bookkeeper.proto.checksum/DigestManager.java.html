@@ -1,0 +1,274 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>DigestManager.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto.checksum</a> &gt; <span class="el_source">DigestManager.java</span></div><h1>DigestManager.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.proto.checksum;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.Unpooled;
+
+import java.security.GeneralSecurityException;
+import java.security.NoSuchAlgorithmException;
+
+import org.apache.bookkeeper.client.BKException.BKDigestMatchException;
+import org.apache.bookkeeper.client.LedgerHandle;
+import org.apache.bookkeeper.proto.DataFormats.LedgerMetadataFormat.DigestType;
+import org.apache.bookkeeper.util.ByteBufList;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * This class takes an entry, attaches a digest to it and packages it with relevant
+ * data so that it can be shipped to the bookie. On the return side, it also
+ * gets a packet, checks that the digest matches, and extracts the original entry
+ * for the packet. Currently 3 types of digests are supported: MAC (based on SHA-1) and CRC32 and CRC32C.
+ */
+
+public abstract class DigestManager {
+<span class="nc" id="L42">    private static final Logger logger = LoggerFactory.getLogger(DigestManager.class);</span>
+
+    public static final int METADATA_LENGTH = 32;
+    public static final int LAC_METADATA_LENGTH = 16;
+
+    final long ledgerId;
+    final boolean useV2Protocol;
+    private final ByteBufAllocator allocator;
+
+    abstract int getMacCodeLength();
+
+    void update(byte[] data) {
+<span class="nc" id="L54">        update(Unpooled.wrappedBuffer(data, 0, data.length));</span>
+<span class="nc" id="L55">    }</span>
+
+    abstract void update(ByteBuf buffer);
+
+    abstract void populateValueAndReset(ByteBuf buffer);
+
+    final int macCodeLength;
+
+<span class="nc" id="L63">    public DigestManager(long ledgerId, boolean useV2Protocol, ByteBufAllocator allocator) {</span>
+<span class="nc" id="L64">        this.ledgerId = ledgerId;</span>
+<span class="nc" id="L65">        this.useV2Protocol = useV2Protocol;</span>
+<span class="nc" id="L66">        this.macCodeLength = getMacCodeLength();</span>
+<span class="nc" id="L67">        this.allocator = allocator;</span>
+<span class="nc" id="L68">    }</span>
+
+    public static DigestManager instantiate(long ledgerId, byte[] passwd, DigestType digestType,
+            ByteBufAllocator allocator, boolean useV2Protocol) throws GeneralSecurityException {
+<span class="nc bnc" id="L72" title="All 5 branches missed.">        switch(digestType) {</span>
+        case HMAC:
+<span class="nc" id="L74">            return new MacDigestManager(ledgerId, passwd, useV2Protocol, allocator);</span>
+        case CRC32:
+<span class="nc" id="L76">            return new CRC32DigestManager(ledgerId, useV2Protocol, allocator);</span>
+        case CRC32C:
+<span class="nc" id="L78">            return new CRC32CDigestManager(ledgerId, useV2Protocol, allocator);</span>
+        case DUMMY:
+<span class="nc" id="L80">            return new DummyDigestManager(ledgerId, useV2Protocol, allocator);</span>
+        default:
+<span class="nc" id="L82">            throw new GeneralSecurityException(&quot;Unknown checksum type: &quot; + digestType);</span>
+        }
+    }
+
+    public static byte[] generateMasterKey(byte[] password) throws NoSuchAlgorithmException {
+<span class="nc bnc" id="L87" title="All 2 branches missed.">        return password.length &gt; 0 ? MacDigestManager.genDigest(&quot;ledger&quot;, password) : MacDigestManager.EMPTY_LEDGER_KEY;</span>
+    }
+
+    /**
+     * Computes the digest for an entry and put bytes together for sending.
+     *
+     * @param entryId
+     * @param lastAddConfirmed
+     * @param length
+     * @param data
+     * @return
+     */
+    public ByteBufList computeDigestAndPackageForSending(long entryId, long lastAddConfirmed, long length,
+            ByteBuf data) {
+        ByteBuf headersBuffer;
+<span class="nc bnc" id="L102" title="All 2 branches missed.">        if (this.useV2Protocol) {</span>
+<span class="nc" id="L103">            headersBuffer = allocator.buffer(METADATA_LENGTH + macCodeLength);</span>
+        } else {
+<span class="nc" id="L105">            headersBuffer = Unpooled.buffer(METADATA_LENGTH + macCodeLength);</span>
+        }
+<span class="nc" id="L107">        headersBuffer.writeLong(ledgerId);</span>
+<span class="nc" id="L108">        headersBuffer.writeLong(entryId);</span>
+<span class="nc" id="L109">        headersBuffer.writeLong(lastAddConfirmed);</span>
+<span class="nc" id="L110">        headersBuffer.writeLong(length);</span>
+
+<span class="nc" id="L112">        update(headersBuffer);</span>
+<span class="nc" id="L113">        update(data);</span>
+<span class="nc" id="L114">        populateValueAndReset(headersBuffer);</span>
+
+<span class="nc" id="L116">        return ByteBufList.get(headersBuffer, data);</span>
+    }
+
+    /**
+     * Computes the digest for writeLac for sending.
+     *
+     * @param lac
+     * @return
+     */
+
+    public ByteBufList computeDigestAndPackageForSendingLac(long lac) {
+        ByteBuf headersBuffer;
+<span class="nc bnc" id="L128" title="All 2 branches missed.">        if (this.useV2Protocol) {</span>
+<span class="nc" id="L129">            headersBuffer = allocator.buffer(LAC_METADATA_LENGTH + macCodeLength);</span>
+        } else {
+<span class="nc" id="L131">            headersBuffer = Unpooled.buffer(LAC_METADATA_LENGTH + macCodeLength);</span>
+        }
+<span class="nc" id="L133">        headersBuffer.writeLong(ledgerId);</span>
+<span class="nc" id="L134">        headersBuffer.writeLong(lac);</span>
+
+<span class="nc" id="L136">        update(headersBuffer);</span>
+<span class="nc" id="L137">        populateValueAndReset(headersBuffer);</span>
+
+<span class="nc" id="L139">        return ByteBufList.get(headersBuffer);</span>
+    }
+
+    private void verifyDigest(ByteBuf dataReceived) throws BKDigestMatchException {
+<span class="nc" id="L143">        verifyDigest(LedgerHandle.INVALID_ENTRY_ID, dataReceived, true);</span>
+<span class="nc" id="L144">    }</span>
+
+    private void verifyDigest(long entryId, ByteBuf dataReceived) throws BKDigestMatchException {
+<span class="nc" id="L147">        verifyDigest(entryId, dataReceived, false);</span>
+<span class="nc" id="L148">    }</span>
+
+    private void verifyDigest(long entryId, ByteBuf dataReceived, boolean skipEntryIdCheck)
+            throws BKDigestMatchException {
+
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        if ((METADATA_LENGTH + macCodeLength) &gt; dataReceived.readableBytes()) {</span>
+<span class="nc" id="L154">            logger.error(&quot;Data received is smaller than the minimum for this digest type. &quot;</span>
+                    + &quot; Either the packet it corrupt, or the wrong digest is configured. &quot;
+                    + &quot; Digest type: {}, Packet Length: {}&quot;,
+<span class="nc" id="L157">                    this.getClass().getName(), dataReceived.readableBytes());</span>
+<span class="nc" id="L158">            throw new BKDigestMatchException();</span>
+        }
+<span class="nc" id="L160">        update(dataReceived.slice(0, METADATA_LENGTH));</span>
+
+<span class="nc" id="L162">        int offset = METADATA_LENGTH + macCodeLength;</span>
+<span class="nc" id="L163">        update(dataReceived.slice(offset, dataReceived.readableBytes() - offset));</span>
+
+<span class="nc" id="L165">        ByteBuf digest = allocator.buffer(macCodeLength);</span>
+<span class="nc" id="L166">        populateValueAndReset(digest);</span>
+
+        try {
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            if (digest.compareTo(dataReceived.slice(METADATA_LENGTH, macCodeLength)) != 0) {</span>
+<span class="nc" id="L170">                logger.error(&quot;Mac mismatch for ledger-id: &quot; + ledgerId + &quot;, entry-id: &quot; + entryId);</span>
+<span class="nc" id="L171">                throw new BKDigestMatchException();</span>
+            }
+        } finally {
+<span class="nc" id="L174">            digest.release();</span>
+        }
+
+<span class="nc" id="L177">        long actualLedgerId = dataReceived.readLong();</span>
+<span class="nc" id="L178">        long actualEntryId = dataReceived.readLong();</span>
+
+<span class="nc bnc" id="L180" title="All 2 branches missed.">        if (actualLedgerId != ledgerId) {</span>
+<span class="nc" id="L181">            logger.error(&quot;Ledger-id mismatch in authenticated message, expected: &quot; + ledgerId + &quot; , actual: &quot;</span>
+                         + actualLedgerId);
+<span class="nc" id="L183">            throw new BKDigestMatchException();</span>
+        }
+
+<span class="nc bnc" id="L186" title="All 4 branches missed.">        if (!skipEntryIdCheck &amp;&amp; actualEntryId != entryId) {</span>
+<span class="nc" id="L187">            logger.error(&quot;Entry-id mismatch in authenticated message, expected: &quot; + entryId + &quot; , actual: &quot;</span>
+                         + actualEntryId);
+<span class="nc" id="L189">            throw new BKDigestMatchException();</span>
+        }
+
+<span class="nc" id="L192">    }</span>
+
+    public long verifyDigestAndReturnLac(ByteBuf dataReceived) throws BKDigestMatchException{
+<span class="nc bnc" id="L195" title="All 2 branches missed.">        if ((LAC_METADATA_LENGTH + macCodeLength) &gt; dataReceived.readableBytes()) {</span>
+<span class="nc" id="L196">            logger.error(&quot;Data received is smaller than the minimum for this digest type.&quot;</span>
+                    + &quot; Either the packet it corrupt, or the wrong digest is configured. &quot;
+                    + &quot; Digest type: {}, Packet Length: {}&quot;,
+<span class="nc" id="L199">                    this.getClass().getName(), dataReceived.readableBytes());</span>
+<span class="nc" id="L200">            throw new BKDigestMatchException();</span>
+        }
+
+<span class="nc" id="L203">        update(dataReceived.slice(0, LAC_METADATA_LENGTH));</span>
+
+<span class="nc" id="L205">        ByteBuf digest = allocator.buffer(macCodeLength);</span>
+        try {
+<span class="nc" id="L207">            populateValueAndReset(digest);</span>
+
+<span class="nc bnc" id="L209" title="All 2 branches missed.">            if (digest.compareTo(dataReceived.slice(LAC_METADATA_LENGTH, macCodeLength)) != 0) {</span>
+<span class="nc" id="L210">                logger.error(&quot;Mac mismatch for ledger-id LAC: &quot; + ledgerId);</span>
+<span class="nc" id="L211">                throw new BKDigestMatchException();</span>
+            }
+        } finally {
+<span class="nc" id="L214">            digest.release();</span>
+        }
+
+<span class="nc" id="L217">        long actualLedgerId = dataReceived.readLong();</span>
+<span class="nc" id="L218">        long lac = dataReceived.readLong();</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">        if (actualLedgerId != ledgerId) {</span>
+<span class="nc" id="L220">            logger.error(&quot;Ledger-id mismatch in authenticated message, expected: &quot; + ledgerId + &quot; , actual: &quot;</span>
+                         + actualLedgerId);
+<span class="nc" id="L222">            throw new BKDigestMatchException();</span>
+        }
+<span class="nc" id="L224">        return lac;</span>
+    }
+
+    /**
+     * Verify that the digest matches and returns the data in the entry.
+     *
+     * @param entryId
+     * @param dataReceived
+     * @return
+     * @throws BKDigestMatchException
+     */
+    public ByteBuf verifyDigestAndReturnData(long entryId, ByteBuf dataReceived)
+            throws BKDigestMatchException {
+<span class="nc" id="L237">        verifyDigest(entryId, dataReceived);</span>
+<span class="nc" id="L238">        dataReceived.readerIndex(METADATA_LENGTH + macCodeLength);</span>
+<span class="nc" id="L239">        return dataReceived;</span>
+    }
+
+    /**
+     * A representation of RecoveryData.
+     */
+    public static final class RecoveryData {
+        final long lastAddConfirmed;
+        final long length;
+
+<span class="nc" id="L249">        public RecoveryData(long lastAddConfirmed, long length) {</span>
+<span class="nc" id="L250">            this.lastAddConfirmed = lastAddConfirmed;</span>
+<span class="nc" id="L251">            this.length = length;</span>
+<span class="nc" id="L252">        }</span>
+
+        public long getLastAddConfirmed() {
+<span class="nc" id="L255">            return lastAddConfirmed;</span>
+        }
+
+        public long getLength() {
+<span class="nc" id="L259">            return length;</span>
+        }
+
+    }
+
+    public RecoveryData verifyDigestAndReturnLastConfirmed(ByteBuf dataReceived) throws BKDigestMatchException {
+<span class="nc" id="L265">        verifyDigest(dataReceived);</span>
+<span class="nc" id="L266">        dataReceived.readerIndex(8);</span>
+
+<span class="nc" id="L268">        dataReceived.readLong(); // skip unused entryId</span>
+<span class="nc" id="L269">        long lastAddConfirmed = dataReceived.readLong();</span>
+<span class="nc" id="L270">        long length = dataReceived.readLong();</span>
+<span class="nc" id="L271">        return new RecoveryData(lastAddConfirmed, length);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

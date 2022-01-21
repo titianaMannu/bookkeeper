@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>SimpleTestCommand.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tools.cli.commands.client</a> &gt; <span class="el_source">SimpleTestCommand.java</span></div><h1>SimpleTestCommand.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.tools.cli.commands.client;
+
+import static org.apache.bookkeeper.common.concurrent.FutureUtils.result;
+
+import com.beust.jcommander.Parameter;
+import java.util.concurrent.TimeUnit;
+import lombok.Setter;
+import lombok.experimental.Accessors;
+import org.apache.bookkeeper.client.api.BookKeeper;
+import org.apache.bookkeeper.client.api.DigestType;
+import org.apache.bookkeeper.client.api.WriteHandle;
+import org.apache.bookkeeper.tools.cli.commands.client.SimpleTestCommand.Flags;
+import org.apache.bookkeeper.tools.cli.helpers.ClientCommand;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.tools.framework.CliSpec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A client command that simply tests if a cluster is healthy.
+ */
+public class SimpleTestCommand extends ClientCommand&lt;Flags&gt; {
+
+    private static final String NAME = &quot;simpletest&quot;;
+    private static final String DESC = &quot;Simple test to create a ledger and write entries to it.&quot;;
+<span class="nc" id="L44">    private static final Logger LOG = LoggerFactory.getLogger(SimpleTestCommand.class);</span>
+
+    /**
+     * Flags for simple test command.
+     */
+    @Accessors(fluent = true)
+<span class="nc" id="L50">    @Setter</span>
+<span class="nc" id="L51">    public static class Flags extends CliFlags {</span>
+
+<span class="nc" id="L53">        @Parameter(names = { &quot;-e&quot;, &quot;--ensemble-size&quot; }, description = &quot;Ensemble size (default 3)&quot;)</span>
+        private int ensembleSize = 3;
+<span class="nc" id="L55">        @Parameter(names = { &quot;-w&quot;, &quot;--write-quorum-size&quot; }, description = &quot;Write quorum size (default 2)&quot;)</span>
+        private int writeQuorumSize = 2;
+<span class="nc" id="L57">        @Parameter(names = { &quot;-a&quot;, &quot;--ack-quorum-size&quot; }, description = &quot;Ack quorum size (default 2)&quot;)</span>
+        private int ackQuorumSize = 2;
+<span class="nc" id="L59">        @Parameter(names = { &quot;-n&quot;, &quot;--num-entries&quot; }, description = &quot;Entries to write (default 100)&quot;)</span>
+        private int numEntries = 100;
+
+    }
+    public SimpleTestCommand() {
+<span class="nc" id="L64">        this(new Flags());</span>
+<span class="nc" id="L65">    }</span>
+
+    public SimpleTestCommand(Flags flags) {
+<span class="nc" id="L68">        super(CliSpec.&lt;Flags&gt;newBuilder()</span>
+<span class="nc" id="L69">            .withName(NAME)</span>
+<span class="nc" id="L70">            .withDescription(DESC)</span>
+<span class="nc" id="L71">            .withFlags(flags)</span>
+<span class="nc" id="L72">            .build());</span>
+<span class="nc" id="L73">    }</span>
+
+    @Override
+    protected void run(BookKeeper bk, Flags flags) throws Exception {
+<span class="nc" id="L77">        byte[] data = new byte[100]; // test data</span>
+
+<span class="nc" id="L79">        try (WriteHandle wh = result(bk.newCreateLedgerOp()</span>
+<span class="nc" id="L80">            .withEnsembleSize(flags.ensembleSize)</span>
+<span class="nc" id="L81">            .withWriteQuorumSize(flags.writeQuorumSize)</span>
+<span class="nc" id="L82">            .withAckQuorumSize(flags.ackQuorumSize)</span>
+<span class="nc" id="L83">            .withDigestType(DigestType.CRC32C)</span>
+<span class="nc" id="L84">            .withPassword(new byte[0])</span>
+<span class="nc" id="L85">            .execute())) {</span>
+
+<span class="nc" id="L87">            LOG.info(&quot;Ledger ID: &quot; + wh.getId());</span>
+<span class="nc" id="L88">            long lastReport = System.nanoTime();</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">            for (int i = 0; i &lt; flags.numEntries; i++) {</span>
+<span class="nc" id="L90">                wh.append(data);</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">                if (TimeUnit.SECONDS.convert(System.nanoTime() - lastReport,</span>
+                        TimeUnit.NANOSECONDS) &gt; 1) {
+<span class="nc" id="L93">                    LOG.info(i + &quot; entries written&quot;);</span>
+<span class="nc" id="L94">                    lastReport = System.nanoTime();</span>
+                }
+            }
+<span class="nc" id="L97">            LOG.info(flags.numEntries + &quot; entries written to ledger &quot; + wh.getId());</span>
+        }
+<span class="nc" id="L99">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

@@ -1,0 +1,3408 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ServerConfiguration.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.conf</a> &gt; <span class="el_source">ServerConfiguration.java</span></div><h1>ServerConfiguration.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.conf;
+
+import static org.apache.bookkeeper.util.BookKeeperConstants.MAX_LOG_SIZE_LIMIT;
+
+import com.google.common.annotations.Beta;
+import com.google.common.base.Strings;
+import com.google.common.collect.Lists;
+import java.io.File;
+import java.util.concurrent.TimeUnit;
+import org.apache.bookkeeper.bookie.InterleavedLedgerStorage;
+import org.apache.bookkeeper.bookie.LedgerStorage;
+import org.apache.bookkeeper.bookie.SortedLedgerStorage;
+import org.apache.bookkeeper.bookie.storage.ldb.DbLedgerStorage;
+import org.apache.bookkeeper.common.conf.ConfigDef;
+import org.apache.bookkeeper.common.conf.ConfigException;
+import org.apache.bookkeeper.common.conf.ConfigKey;
+import org.apache.bookkeeper.common.conf.ConfigKeyGroup;
+import org.apache.bookkeeper.common.conf.Type;
+import org.apache.bookkeeper.common.conf.validators.ClassValidator;
+import org.apache.bookkeeper.common.conf.validators.RangeValidator;
+import org.apache.bookkeeper.common.util.ReflectionUtils;
+import org.apache.bookkeeper.discover.RegistrationManager;
+import org.apache.bookkeeper.discover.ZKRegistrationManager;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.stats.NullStatsProvider;
+import org.apache.bookkeeper.stats.StatsProvider;
+import org.apache.commons.configuration.ConfigurationException;
+import org.apache.commons.lang3.StringUtils;
+
+/**
+ * Configuration manages server-side settings.
+ */
+public class ServerConfiguration extends AbstractConfiguration&lt;ServerConfiguration&gt; {
+
+    // Ledger Storage Settings
+
+<span class="fc" id="L54">    private static final ConfigKeyGroup GROUP_LEDGER_STORAGE = ConfigKeyGroup.builder(&quot;ledgerstorage&quot;)</span>
+<span class="fc" id="L55">        .description(&quot;Ledger Storage related settings&quot;)</span>
+<span class="fc" id="L56">        .order(10) // place a place holder here</span>
+<span class="fc" id="L57">        .build();</span>
+
+    protected static final String LEDGER_STORAGE_CLASS = &quot;ledgerStorageClass&quot;;
+<span class="fc" id="L60">    protected static final ConfigKey LEDGER_STORAGE_CLASS_KEY = ConfigKey.builder(LEDGER_STORAGE_CLASS)</span>
+<span class="fc" id="L61">        .type(Type.CLASS)</span>
+<span class="fc" id="L62">        .description(&quot;Ledger storage implementation class&quot;)</span>
+<span class="fc" id="L63">        .defaultValue(SortedLedgerStorage.class)</span>
+<span class="fc" id="L64">        .optionValues(Lists.newArrayList(</span>
+<span class="fc" id="L65">            InterleavedLedgerStorage.class.getName(),</span>
+<span class="fc" id="L66">            SortedLedgerStorage.class.getName(),</span>
+<span class="fc" id="L67">            DbLedgerStorage.class.getName()</span>
+        ))
+<span class="fc" id="L69">        .validator(ClassValidator.of(LedgerStorage.class))</span>
+<span class="fc" id="L70">        .group(GROUP_LEDGER_STORAGE)</span>
+<span class="fc" id="L71">        .build();</span>
+
+    // Entry Log Parameters
+
+<span class="fc" id="L75">    private static final ConfigKeyGroup GROUP_LEDGER_STORAGE_ENTRY_LOGGER = ConfigKeyGroup.builder(&quot;entrylogger&quot;)</span>
+<span class="fc" id="L76">        .description(&quot;EntryLogger related settings&quot;)</span>
+<span class="fc" id="L77">        .order(11)</span>
+<span class="fc" id="L78">        .build();</span>
+
+    protected static final String ENTRY_LOG_SIZE_LIMIT = &quot;logSizeLimit&quot;;
+<span class="fc" id="L81">    protected static final ConfigKey ENTRY_LOG_SIZE_LIMIT_KEY = ConfigKey.builder(ENTRY_LOG_SIZE_LIMIT)</span>
+<span class="fc" id="L82">        .type(Type.LONG)</span>
+<span class="fc" id="L83">        .description(&quot;Max file size of entry logger, in bytes&quot;)</span>
+<span class="fc" id="L84">        .documentation(&quot;A new entry log file will be created when the old one reaches this file size limitation&quot;)</span>
+<span class="fc" id="L85">        .defaultValue(MAX_LOG_SIZE_LIMIT)</span>
+<span class="fc" id="L86">        .validator(RangeValidator.between(0, MAX_LOG_SIZE_LIMIT))</span>
+<span class="fc" id="L87">        .group(GROUP_LEDGER_STORAGE_ENTRY_LOGGER)</span>
+<span class="fc" id="L88">        .build();</span>
+
+    protected static final String ENTRY_LOG_FILE_PREALLOCATION_ENABLED = &quot;entryLogFilePreallocationEnabled&quot;;
+
+
+    protected static final String MINOR_COMPACTION_INTERVAL = &quot;minorCompactionInterval&quot;;
+    protected static final String MINOR_COMPACTION_THRESHOLD = &quot;minorCompactionThreshold&quot;;
+    protected static final String MAJOR_COMPACTION_INTERVAL = &quot;majorCompactionInterval&quot;;
+    protected static final String MAJOR_COMPACTION_THRESHOLD = &quot;majorCompactionThreshold&quot;;
+    protected static final String IS_THROTTLE_BY_BYTES = &quot;isThrottleByBytes&quot;;
+    protected static final String COMPACTION_MAX_OUTSTANDING_REQUESTS = &quot;compactionMaxOutstandingRequests&quot;;
+    protected static final String COMPACTION_RATE = &quot;compactionRate&quot;;
+    protected static final String COMPACTION_RATE_BY_ENTRIES = &quot;compactionRateByEntries&quot;;
+    protected static final String COMPACTION_RATE_BY_BYTES = &quot;compactionRateByBytes&quot;;
+
+    // Gc Parameters
+    protected static final String GC_WAIT_TIME = &quot;gcWaitTime&quot;;
+    protected static final String IS_FORCE_GC_ALLOW_WHEN_NO_SPACE = &quot;isForceGCAllowWhenNoSpace&quot;;
+    protected static final String GC_OVERREPLICATED_LEDGER_WAIT_TIME = &quot;gcOverreplicatedLedgerWaitTime&quot;;
+    protected static final String USE_TRANSACTIONAL_COMPACTION = &quot;useTransactionalCompaction&quot;;
+    protected static final String VERIFY_METADATA_ON_GC = &quot;verifyMetadataOnGC&quot;;
+    // Scrub Parameters
+    protected static final String LOCAL_SCRUB_PERIOD = &quot;localScrubInterval&quot;;
+    protected static final String LOCAL_SCRUB_RATE_LIMIT = &quot;localScrubRateLimit&quot;;
+    // Sync Parameters
+    protected static final String FLUSH_INTERVAL = &quot;flushInterval&quot;;
+    protected static final String FLUSH_ENTRYLOG_INTERVAL_BYTES = &quot;flushEntrylogBytes&quot;;
+    // Bookie death watch interval
+    protected static final String DEATH_WATCH_INTERVAL = &quot;bookieDeathWatchInterval&quot;;
+    // Ledger Cache Parameters
+    protected static final String OPEN_FILE_LIMIT = &quot;openFileLimit&quot;;
+    protected static final String PAGE_LIMIT = &quot;pageLimit&quot;;
+    protected static final String PAGE_SIZE = &quot;pageSize&quot;;
+    protected static final String FILEINFO_CACHE_INITIAL_CAPACITY = &quot;fileInfoCacheInitialCapacity&quot;;
+    protected static final String FILEINFO_MAX_IDLE_TIME = &quot;fileInfoMaxIdleTime&quot;;
+    protected static final String FILEINFO_FORMAT_VERSION_TO_WRITE = &quot;fileInfoFormatVersionToWrite&quot;;
+    // Journal Parameters
+    protected static final String MAX_JOURNAL_SIZE = &quot;journalMaxSizeMB&quot;;
+    protected static final String MAX_BACKUP_JOURNALS = &quot;journalMaxBackups&quot;;
+    protected static final String JOURNAL_SYNC_DATA = &quot;journalSyncData&quot;;
+    protected static final String JOURNAL_ADAPTIVE_GROUP_WRITES = &quot;journalAdaptiveGroupWrites&quot;;
+    protected static final String JOURNAL_MAX_GROUP_WAIT_MSEC = &quot;journalMaxGroupWaitMSec&quot;;
+    protected static final String JOURNAL_BUFFERED_WRITES_THRESHOLD = &quot;journalBufferedWritesThreshold&quot;;
+    protected static final String JOURNAL_BUFFERED_ENTRIES_THRESHOLD = &quot;journalBufferedEntriesThreshold&quot;;
+    protected static final String JOURNAL_FLUSH_WHEN_QUEUE_EMPTY = &quot;journalFlushWhenQueueEmpty&quot;;
+    protected static final String JOURNAL_REMOVE_FROM_PAGE_CACHE = &quot;journalRemoveFromPageCache&quot;;
+    protected static final String JOURNAL_PRE_ALLOC_SIZE = &quot;journalPreAllocSizeMB&quot;;
+    protected static final String JOURNAL_WRITE_BUFFER_SIZE = &quot;journalWriteBufferSizeKB&quot;;
+    protected static final String JOURNAL_ALIGNMENT_SIZE = &quot;journalAlignmentSize&quot;;
+    protected static final String NUM_JOURNAL_CALLBACK_THREADS = &quot;numJournalCallbackThreads&quot;;
+    protected static final String JOURNAL_FORMAT_VERSION_TO_WRITE = &quot;journalFormatVersionToWrite&quot;;
+    protected static final String JOURNAL_QUEUE_SIZE = &quot;journalQueueSize&quot;;
+    protected static final String JOURNAL_PAGECACHE_FLUSH_INTERVAL_MSEC = &quot;journalPageCacheFlushIntervalMSec&quot;;
+    // backpressure control
+    protected static final String MAX_ADDS_IN_PROGRESS_LIMIT = &quot;maxAddsInProgressLimit&quot;;
+    protected static final String MAX_READS_IN_PROGRESS_LIMIT = &quot;maxReadsInProgressLimit&quot;;
+    protected static final String CLOSE_CHANNEL_ON_RESPONSE_TIMEOUT = &quot;closeChannelOnResponseTimeout&quot;;
+    protected static final String WAIT_TIMEOUT_ON_RESPONSE_BACKPRESSURE = &quot;waitTimeoutOnResponseBackpressureMs&quot;;
+
+    // Bookie Parameters
+    protected static final String BOOKIE_PORT = &quot;bookiePort&quot;;
+    protected static final String LISTENING_INTERFACE = &quot;listeningInterface&quot;;
+    protected static final String ALLOW_LOOPBACK = &quot;allowLoopback&quot;;
+    protected static final String ADVERTISED_ADDRESS = &quot;advertisedAddress&quot;;
+    protected static final String BOOKIE_ID = &quot;bookieId&quot;;
+    protected static final String ALLOW_EPHEMERAL_PORTS = &quot;allowEphemeralPorts&quot;;
+
+    protected static final String JOURNAL_DIR = &quot;journalDirectory&quot;;
+    protected static final String JOURNAL_DIRS = &quot;journalDirectories&quot;;
+    protected static final String LEDGER_DIRS = &quot;ledgerDirectories&quot;;
+    protected static final String INDEX_DIRS = &quot;indexDirectories&quot;;
+    protected static final String ALLOW_STORAGE_EXPANSION = &quot;allowStorageExpansion&quot;;
+    // NIO and Netty Parameters
+    protected static final String SERVER_TCP_NODELAY = &quot;serverTcpNoDelay&quot;;
+    protected static final String SERVER_SOCK_KEEPALIVE = &quot;serverSockKeepalive&quot;;
+    protected static final String SERVER_SOCK_LINGER = &quot;serverTcpLinger&quot;;
+    protected static final String SERVER_WRITEBUFFER_LOW_WATER_MARK = &quot;serverWriteBufferLowWaterMark&quot;;
+    protected static final String SERVER_WRITEBUFFER_HIGH_WATER_MARK = &quot;serverWriteBufferHighWaterMark&quot;;
+    protected static final String SERVER_NUM_IO_THREADS = &quot;serverNumIOThreads&quot;;
+
+    // Zookeeper Parameters
+    protected static final String ZK_RETRY_BACKOFF_START_MS = &quot;zkRetryBackoffStartMs&quot;;
+    protected static final String ZK_RETRY_BACKOFF_MAX_MS = &quot;zkRetryBackoffMaxMs&quot;;
+    protected static final String OPEN_LEDGER_REREPLICATION_GRACE_PERIOD = &quot;openLedgerRereplicationGracePeriod&quot;;
+    protected static final String LOCK_RELEASE_OF_FAILED_LEDGER_GRACE_PERIOD = &quot;lockReleaseOfFailedLedgerGracePeriod&quot;;
+    //ReadOnly mode support on all disk full
+    protected static final String READ_ONLY_MODE_ENABLED = &quot;readOnlyModeEnabled&quot;;
+    //Whether the bookie is force started in ReadOnly mode
+    protected static final String FORCE_READ_ONLY_BOOKIE = &quot;forceReadOnlyBookie&quot;;
+    //Whether to persist the bookie status
+    protected static final String PERSIST_BOOKIE_STATUS_ENABLED = &quot;persistBookieStatusEnabled&quot;;
+    //Disk utilization
+    protected static final String DISK_USAGE_THRESHOLD = &quot;diskUsageThreshold&quot;;
+    protected static final String DISK_USAGE_WARN_THRESHOLD = &quot;diskUsageWarnThreshold&quot;;
+    protected static final String DISK_USAGE_LWM_THRESHOLD = &quot;diskUsageLwmThreshold&quot;;
+    protected static final String DISK_CHECK_INTERVAL = &quot;diskCheckInterval&quot;;
+
+    // Replication parameters
+    protected static final String AUDITOR_PERIODIC_CHECK_INTERVAL = &quot;auditorPeriodicCheckInterval&quot;;
+    protected static final String AUDITOR_PERIODIC_BOOKIE_CHECK_INTERVAL = &quot;auditorPeriodicBookieCheckInterval&quot;;
+    protected static final String AUDITOR_PERIODIC_PLACEMENT_POLICY_CHECK_INTERVAL =
+                                                                &quot;auditorPeriodicPlacementPolicyCheckInterval&quot;;
+    protected static final String AUDITOR_LEDGER_VERIFICATION_PERCENTAGE = &quot;auditorLedgerVerificationPercentage&quot;;
+    protected static final String AUTO_RECOVERY_DAEMON_ENABLED = &quot;autoRecoveryDaemonEnabled&quot;;
+    protected static final String LOST_BOOKIE_RECOVERY_DELAY = &quot;lostBookieRecoveryDelay&quot;;
+    protected static final String RW_REREPLICATE_BACKOFF_MS = &quot;rwRereplicateBackoffMs&quot;;
+    protected static final String UNDERREPLICATED_LEDGER_RECOVERY_GRACE_PERIOD =
+            &quot;underreplicatedLedgerRecoveryGracePeriod&quot;;
+    protected static final String AUDITOR_REPLICAS_CHECK_INTERVAL = &quot;auditorReplicasCheckInterval&quot;;
+
+    // Worker Thread parameters.
+    protected static final String NUM_ADD_WORKER_THREADS = &quot;numAddWorkerThreads&quot;;
+    protected static final String NUM_READ_WORKER_THREADS = &quot;numReadWorkerThreads&quot;;
+    protected static final String MAX_PENDING_READ_REQUESTS_PER_THREAD = &quot;maxPendingReadRequestsPerThread&quot;;
+    protected static final String MAX_PENDING_ADD_REQUESTS_PER_THREAD = &quot;maxPendingAddRequestsPerThread&quot;;
+    protected static final String NUM_LONG_POLL_WORKER_THREADS = &quot;numLongPollWorkerThreads&quot;;
+    protected static final String NUM_HIGH_PRIORITY_WORKER_THREADS = &quot;numHighPriorityWorkerThreads&quot;;
+
+    // Long poll parameters
+    protected static final String REQUEST_TIMER_TICK_DURATION_MILLISEC = &quot;requestTimerTickDurationMs&quot;;
+    protected static final String REQUEST_TIMER_NO_OF_TICKS = &quot;requestTimerNumTicks&quot;;
+
+    protected static final String READ_BUFFER_SIZE = &quot;readBufferSizeBytes&quot;;
+    protected static final String WRITE_BUFFER_SIZE = &quot;writeBufferSizeBytes&quot;;
+    // Whether the bookie should use its hostname or ipaddress for the
+    // registration.
+    protected static final String USE_HOST_NAME_AS_BOOKIE_ID = &quot;useHostNameAsBookieID&quot;;
+    protected static final String USE_SHORT_HOST_NAME = &quot;useShortHostName&quot;;
+    protected static final String ENABLE_LOCAL_TRANSPORT = &quot;enableLocalTransport&quot;;
+    protected static final String DISABLE_SERVER_SOCKET_BIND = &quot;disableServerSocketBind&quot;;
+
+    protected static final String SORTED_LEDGER_STORAGE_ENABLED = &quot;sortedLedgerStorageEnabled&quot;;
+    protected static final String SKIP_LIST_SIZE_LIMIT = &quot;skipListSizeLimit&quot;;
+    protected static final String SKIP_LIST_CHUNK_SIZE_ENTRY = &quot;skipListArenaChunkSize&quot;;
+    protected static final String SKIP_LIST_MAX_ALLOC_ENTRY = &quot;skipListArenaMaxAllocSize&quot;;
+
+    // Statistics Parameters
+    protected static final String ENABLE_STATISTICS = &quot;enableStatistics&quot;;
+    protected static final String STATS_PROVIDER_CLASS = &quot;statsProviderClass&quot;;
+
+
+    // Rx adaptive ByteBuf allocator parameters
+    protected static final String BYTEBUF_ALLOCATOR_SIZE_INITIAL = &quot;byteBufAllocatorSizeInitial&quot;;
+    protected static final String BYTEBUF_ALLOCATOR_SIZE_MIN = &quot;byteBufAllocatorSizeMin&quot;;
+    protected static final String BYTEBUF_ALLOCATOR_SIZE_MAX = &quot;byteBufAllocatorSizeMax&quot;;
+
+    // Bookie auth provider factory class name
+    protected static final String BOOKIE_AUTH_PROVIDER_FACTORY_CLASS = &quot;bookieAuthProviderFactoryClass&quot;;
+
+    protected static final String MIN_USABLESIZE_FOR_INDEXFILE_CREATION = &quot;minUsableSizeForIndexFileCreation&quot;;
+    protected static final String MIN_USABLESIZE_FOR_ENTRYLOG_CREATION = &quot;minUsableSizeForEntryLogCreation&quot;;
+    protected static final String MIN_USABLESIZE_FOR_HIGH_PRIORITY_WRITES = &quot;minUsableSizeForHighPriorityWrites&quot;;
+
+    protected static final String ALLOW_MULTIPLEDIRS_UNDER_SAME_DISKPARTITION =
+        &quot;allowMultipleDirsUnderSameDiskPartition&quot;;
+
+    // Http Server parameters
+    protected static final String HTTP_SERVER_ENABLED = &quot;httpServerEnabled&quot;;
+    protected static final String HTTP_SERVER_PORT = &quot;httpServerPort&quot;;
+
+    // Lifecycle Components
+    protected static final String EXTRA_SERVER_COMPONENTS = &quot;extraServerComponents&quot;;
+    protected static final String IGNORE_EXTRA_SERVER_COMPONENTS_STARTUP_FAILURES =
+        &quot;ignoreExtraServerComponentsStartupFailures&quot;;
+
+    // Registration
+    protected static final String REGISTRATION_MANAGER_CLASS = &quot;registrationManagerClass&quot;;
+
+    // Stats
+    protected static final String ENABLE_TASK_EXECUTION_STATS = &quot;enableTaskExecutionStats&quot;;
+
+    /*
+     * config specifying if the entrylog per ledger is enabled or not.
+     */
+    protected static final String ENTRY_LOG_PER_LEDGER_ENABLED = &quot;entryLogPerLedgerEnabled&quot;;
+    // In the case of multipleentrylogs, multiple threads can be used to flush the memtable parallelly.
+    protected static final String NUMBER_OF_MEMTABLE_FLUSH_THREADS = &quot;numOfMemtableFlushThreads&quot;;
+
+
+    /*
+     * config specifying if the entrylog per ledger is enabled, then the amount
+     * of time EntryLogManagerForEntryLogPerLedger should wait for closing the
+     * entrylog file after the last addEntry call for that ledger, if explicit
+     * writeclose for that ledger is not received.
+     */
+    protected static final String ENTRYLOGMAP_ACCESS_EXPIRYTIME_INSECONDS = &quot;entrylogMapAccessExpiryTimeInSeconds&quot;;
+
+    /*
+     * in entryLogPerLedger feature, this specifies the maximum number of
+     * entrylogs that can be active at a given point in time. If there are more
+     * number of active entryLogs then the maximumNumberOfActiveEntryLogs then
+     * the entrylog will be evicted from the cache.
+     */
+    protected static final String MAXIMUM_NUMBER_OF_ACTIVE_ENTRYLOGS = &quot;maximumNumberOfActiveEntryLogs&quot;;
+
+    /*
+     * in EntryLogManagerForEntryLogPerLedger, this config value specifies the
+     * metrics cache size limits in multiples of entrylogMap cache size limits.
+     */
+    protected static final String ENTRY_LOG_PER_LEDGER_COUNTER_LIMITS_MULT_FACTOR =
+            &quot;entryLogPerLedgerCounterLimitsMultFactor&quot;;
+
+    // Perform local consistency check on bookie startup
+    protected static final String LOCAL_CONSISTENCY_CHECK_ON_STARTUP = &quot;localConsistencyCheckOnStartup&quot;;
+
+    // Certificate role based authorization
+    protected static final String AUTHORIZED_ROLES = &quot;authorizedRoles&quot;;
+
+    /**
+     * Construct a default configuration object.
+     */
+    public ServerConfiguration() {
+<span class="fc" id="L300">        super();</span>
+<span class="fc" id="L301">    }</span>
+
+    /**
+     * Construct a configuration based on other configuration.
+     *
+     * @param conf
+     *          Other configuration
+     */
+    public ServerConfiguration(AbstractConfiguration conf) {
+<span class="nc" id="L310">        super();</span>
+<span class="nc" id="L311">        loadConf(conf);</span>
+<span class="nc" id="L312">    }</span>
+
+    /**
+     * Get entry logger size limitation.
+     *
+     * @return entry logger size limitation
+     */
+    public long getEntryLogSizeLimit() {
+<span class="fc" id="L320">        return ENTRY_LOG_SIZE_LIMIT_KEY.getLong(this);</span>
+    }
+
+    /**
+     * Set entry logger size limitation.
+     *
+     * @param logSizeLimit
+     *          new log size limitation
+     */
+    public ServerConfiguration setEntryLogSizeLimit(long logSizeLimit) {
+<span class="nc" id="L330">        ENTRY_LOG_SIZE_LIMIT_KEY.set(this, logSizeLimit);</span>
+<span class="nc" id="L331">        return this;</span>
+    }
+
+    /**
+     * Is entry log file preallocation enabled.
+     *
+     * @return whether entry log file preallocation is enabled or not.
+     */
+    public boolean isEntryLogFilePreAllocationEnabled() {
+<span class="fc" id="L340">        return this.getBoolean(ENTRY_LOG_FILE_PREALLOCATION_ENABLED, true);</span>
+    }
+
+    /**
+     * Enable/disable entry log file preallocation.
+     *
+     * @param enabled
+     *          enable/disable entry log file preallocation.
+     * @return server configuration object.
+     */
+    public ServerConfiguration setEntryLogFilePreAllocationEnabled(boolean enabled) {
+<span class="nc" id="L351">        this.setProperty(ENTRY_LOG_FILE_PREALLOCATION_ENABLED, enabled);</span>
+<span class="nc" id="L352">        return this;</span>
+    }
+
+    /**
+     * Get Garbage collection wait time. Default value is 10 minutes.
+     * The guideline is not to set a too low value for this, if using zookeeper based
+     * ledger manager. And it would be nice to align with the average lifecyle time of
+     * ledgers in the system.
+     *
+     * @return gc wait time
+     */
+    public long getGcWaitTime() {
+<span class="fc" id="L364">        return this.getLong(GC_WAIT_TIME, 600000);</span>
+    }
+
+    /**
+     * Set garbage collection wait time.
+     *
+     * @param gcWaitTime
+     *          gc wait time
+     * @return server configuration
+     */
+    public ServerConfiguration setGcWaitTime(long gcWaitTime) {
+<span class="fc" id="L375">        this.setProperty(GC_WAIT_TIME, Long.toString(gcWaitTime));</span>
+<span class="fc" id="L376">        return this;</span>
+    }
+
+    /**
+     * Get wait time in millis for garbage collection of overreplicated ledgers.
+     *
+     * @return gc wait time
+     */
+    public long getGcOverreplicatedLedgerWaitTimeMillis() {
+<span class="fc" id="L385">        return this.getLong(GC_OVERREPLICATED_LEDGER_WAIT_TIME, TimeUnit.DAYS.toMillis(1));</span>
+    }
+
+    /**
+     * Set wait time for garbage collection of overreplicated ledgers. Default: 1 day
+     *
+     * &lt;p&gt;A ledger can be overreplicated under the following circumstances:
+     * 1. The ledger with few entries has bk1 and bk2 as its ensemble.
+     * 2. bk1 crashes.
+     * 3. bk3 replicates the ledger from bk2 and updates the ensemble to bk2 and bk3.
+     * 4. bk1 comes back up.
+     * 5. Now there are 3 copies of the ledger.
+     *
+     * @param gcWaitTime
+     * @return server configuration
+     */
+    public ServerConfiguration setGcOverreplicatedLedgerWaitTime(long gcWaitTime, TimeUnit unit) {
+<span class="nc" id="L402">        this.setProperty(GC_OVERREPLICATED_LEDGER_WAIT_TIME, Long.toString(unit.toMillis(gcWaitTime)));</span>
+<span class="nc" id="L403">        return this;</span>
+    }
+
+    /**
+     * Get whether to use transactional compaction and using a separate log for compaction or not.
+     *
+     * @return use transactional compaction
+     */
+    public boolean getUseTransactionalCompaction() {
+<span class="fc" id="L412">        return this.getBoolean(USE_TRANSACTIONAL_COMPACTION, false);</span>
+    }
+
+    /**
+     * Set whether to use transactional compaction and using a separate log for compaction or not.
+     * @param useTransactionalCompaction
+     * @return server configuration
+     */
+    public ServerConfiguration setUseTransactionalCompaction(boolean useTransactionalCompaction) {
+<span class="nc" id="L421">        this.setProperty(USE_TRANSACTIONAL_COMPACTION, useTransactionalCompaction);</span>
+<span class="nc" id="L422">        return this;</span>
+    }
+
+    /**
+     * Get whether the bookie is configured to double check prior to gc.
+     *
+     * @return use transactional compaction
+     */
+    public boolean getVerifyMetadataOnGC() {
+<span class="fc" id="L431">        return this.getBoolean(VERIFY_METADATA_ON_GC, false);</span>
+    }
+
+    /**
+     * Set whether the bookie is configured to double check prior to gc.
+     * @param verifyMetadataOnGC
+     * @return server configuration
+     */
+    public ServerConfiguration setVerifyMetadataOnGc(boolean verifyMetadataOnGC) {
+<span class="nc" id="L440">        this.setProperty(VERIFY_METADATA_ON_GC, verifyMetadataOnGC);</span>
+<span class="nc" id="L441">        return this;</span>
+    }
+
+    /**
+     * Get whether local scrub is enabled.
+     *
+     * @return Whether local scrub is enabled.
+     */
+    public boolean isLocalScrubEnabled() {
+<span class="nc bnc" id="L450" title="All 2 branches missed.">        return this.getLocalScrubPeriod() &gt; 0;</span>
+    }
+
+    /**
+     * Get local scrub interval.
+     *
+     * @return Number of seconds between scrubs, &lt;= 0 for disabled.
+     */
+    public long getLocalScrubPeriod() {
+<span class="nc" id="L459">        return this.getLong(LOCAL_SCRUB_PERIOD, 0);</span>
+    }
+
+    /**
+     * Set local scrub period in seconds (&lt;= 0 for disabled). Scrub will be scheduled at delays
+     * chosen from the interval (.5 * interval, 1.5 * interval)
+     */
+    public void setLocalScrubPeriod(long period) {
+<span class="nc" id="L467">        this.setProperty(LOCAL_SCRUB_PERIOD, period);</span>
+<span class="nc" id="L468">    }</span>
+
+    /**
+     * Get local scrub rate limit (entries/second).
+     *
+     * @return Max number of entries to scrub per second, 0 for disabled.
+     */
+    public double getLocalScrubRateLimit() {
+<span class="nc" id="L476">        return this.getDouble(LOCAL_SCRUB_RATE_LIMIT, 60);</span>
+    }
+
+    /**
+     * Get local scrub rate limit (entries/second).
+     *
+     * @param scrubRateLimit Max number of entries per second to scan.
+     */
+    public void setLocalScrubRateLimit(double scrubRateLimit) {
+<span class="nc" id="L485">        this.setProperty(LOCAL_SCRUB_RATE_LIMIT, scrubRateLimit);</span>
+<span class="nc" id="L486">    }</span>
+
+    /**
+     * Get flush interval. Default value is 10 second. It isn't useful to decrease
+     * this value, since ledger storage only checkpoints when an entry logger file
+     * is rolled.
+     *
+     * @return flush interval
+     */
+    public int getFlushInterval() {
+<span class="nc" id="L496">        return this.getInt(FLUSH_INTERVAL, 10000);</span>
+    }
+
+    /**
+     * Set flush interval.
+     *
+     * @param flushInterval
+     *          Flush Interval
+     * @return server configuration
+     */
+    public ServerConfiguration setFlushInterval(int flushInterval) {
+<span class="nc" id="L507">        this.setProperty(FLUSH_INTERVAL, Integer.toString(flushInterval));</span>
+<span class="nc" id="L508">        return this;</span>
+    }
+
+    /**
+     * Set entry log flush interval in bytes.
+     *
+     * &lt;p&gt;Default is 0. 0 or less disables this feature and effectively flush
+     * happens on log rotation.
+     *
+     * &lt;p&gt;Flushing in smaller chunks but more frequently reduces spikes in disk
+     * I/O. Flushing too frequently may also affect performance negatively.
+     *
+     * @return Entry log flush interval in bytes
+     */
+    public long getFlushIntervalInBytes() {
+<span class="fc" id="L523">        return this.getLong(FLUSH_ENTRYLOG_INTERVAL_BYTES, 0);</span>
+    }
+
+    /**
+     * Set entry log flush interval in bytes.
+     *
+     * @param flushInterval in bytes
+     * @return server configuration
+     */
+    public ServerConfiguration setFlushIntervalInBytes(long flushInterval) {
+<span class="nc" id="L533">        this.setProperty(FLUSH_ENTRYLOG_INTERVAL_BYTES, Long.toString(flushInterval));</span>
+<span class="nc" id="L534">        return this;</span>
+    }
+
+
+    /**
+     * Get bookie death watch interval.
+     *
+     * @return watch interval
+     */
+    public int getDeathWatchInterval() {
+<span class="nc" id="L544">        return this.getInt(DEATH_WATCH_INTERVAL, 1000);</span>
+    }
+
+    /**
+     * Get open file limit. Default value is 20000.
+     *
+     * @return max number of files to open
+     */
+    public int getOpenFileLimit() {
+<span class="nc" id="L553">        return this.getInt(OPEN_FILE_LIMIT, 20000);</span>
+    }
+
+    /**
+     * Set limitation of number of open files.
+     *
+     * @param fileLimit
+     *          Limitation of number of open files.
+     * @return server configuration
+     */
+    public ServerConfiguration setOpenFileLimit(int fileLimit) {
+<span class="nc" id="L564">        setProperty(OPEN_FILE_LIMIT, fileLimit);</span>
+<span class="nc" id="L565">        return this;</span>
+    }
+
+    /**
+     * Get limitation number of index pages in ledger cache.
+     *
+     * @return max number of index pages in ledger cache
+     */
+    public int getPageLimit() {
+<span class="nc" id="L574">        return this.getInt(PAGE_LIMIT, -1);</span>
+    }
+
+    /**
+     * Set limitation number of index pages in ledger cache.
+     *
+     * @param pageLimit
+     *          Limitation of number of index pages in ledger cache.
+     * @return server configuration
+     */
+    public ServerConfiguration setPageLimit(int pageLimit) {
+<span class="nc" id="L585">        this.setProperty(PAGE_LIMIT, pageLimit);</span>
+<span class="nc" id="L586">        return this;</span>
+    }
+
+    /**
+     * Get page size.
+     *
+     * @return page size in ledger cache
+     */
+    public int getPageSize() {
+<span class="nc" id="L595">        return this.getInt(PAGE_SIZE, 8192);</span>
+    }
+
+    /**
+     * Set page size.
+     *
+     * @see #getPageSize()
+     *
+     * @param pageSize
+     *          Page Size
+     * @return Server Configuration
+     */
+    public ServerConfiguration setPageSize(int pageSize) {
+<span class="nc" id="L608">        this.setProperty(PAGE_SIZE, pageSize);</span>
+<span class="nc" id="L609">        return this;</span>
+    }
+
+    /**
+     * Get the minimum total size for the internal file info cache tables.
+     * Providing a large enough estimate at construction time avoids the need for
+     * expensive resizing operations later, but setting this value unnecessarily high
+     * wastes memory.
+     *
+     * @return minimum size of initial file info cache.
+     */
+    public int getFileInfoCacheInitialCapacity() {
+<span class="nc" id="L621">        return getInt(FILEINFO_CACHE_INITIAL_CAPACITY, Math.max(getOpenFileLimit() / 4, 64));</span>
+    }
+
+    /**
+     * Set the minimum total size for the internal file info cache tables for initialization.
+     *
+     * @param initialCapacity
+     *          Initial capacity of file info cache table.
+     * @return server configuration instance.
+     */
+    public ServerConfiguration setFileInfoCacheInitialCapacity(int initialCapacity) {
+<span class="nc" id="L632">        setProperty(FILEINFO_CACHE_INITIAL_CAPACITY, initialCapacity);</span>
+<span class="nc" id="L633">        return this;</span>
+    }
+
+    /**
+     * Get the max idle time allowed for a open file info existed in file info cache.
+     * If the file info is idle for a long time, exceed the given time period. The file
+     * info will be evicted and closed. If the value is zero, the file info is evicted
+     * only when opened files reached openFileLimit.
+     *
+     * @see #getOpenFileLimit
+     * @return max idle time of a file info in the file info cache.
+     */
+    public long getFileInfoMaxIdleTime() {
+<span class="nc" id="L646">        return this.getLong(FILEINFO_MAX_IDLE_TIME, 0L);</span>
+    }
+
+    /**
+     * Set the max idle time allowed for a open file info existed in file info cache.
+     *
+     * @param idleTime
+     *          Idle time, in seconds.
+     * @see #getFileInfoMaxIdleTime
+     * @return server configuration object.
+     */
+    public ServerConfiguration setFileInfoMaxIdleTime(long idleTime) {
+<span class="nc" id="L658">        setProperty(FILEINFO_MAX_IDLE_TIME, idleTime);</span>
+<span class="nc" id="L659">        return this;</span>
+    }
+
+    /**
+     * Get fileinfo format version to write.
+     *
+     * @return fileinfo format version to write.
+     */
+    public int getFileInfoFormatVersionToWrite() {
+<span class="nc" id="L668">        return this.getInt(FILEINFO_FORMAT_VERSION_TO_WRITE, 1);</span>
+    }
+
+    /**
+     * Set fileinfo format version to write.
+     *
+     * @param version
+     *            fileinfo format version to write.
+     * @return server configuration.
+     */
+    public ServerConfiguration setFileInfoFormatVersionToWrite(int version) {
+<span class="nc" id="L679">        this.setProperty(FILEINFO_FORMAT_VERSION_TO_WRITE, version);</span>
+<span class="nc" id="L680">        return this;</span>
+    }
+
+    /**
+     * Max journal file size.
+     *
+     * @return max journal file size
+     */
+    public long getMaxJournalSizeMB() {
+<span class="fc" id="L689">        return this.getLong(MAX_JOURNAL_SIZE, 2 * 1024);</span>
+    }
+
+    /**
+     * Set new max journal file size.
+     *
+     * @param maxJournalSize
+     *          new max journal file size
+     * @return server configuration
+     */
+    public ServerConfiguration setMaxJournalSizeMB(long maxJournalSize) {
+<span class="nc" id="L700">        this.setProperty(MAX_JOURNAL_SIZE, Long.toString(maxJournalSize));</span>
+<span class="nc" id="L701">        return this;</span>
+    }
+
+    /**
+     * How much space should we pre-allocate at a time in the journal.
+     *
+     * @return journal pre-allocation size in MB
+     */
+    public int getJournalPreAllocSizeMB() {
+<span class="fc" id="L710">        return this.getInt(JOURNAL_PRE_ALLOC_SIZE, 16);</span>
+    }
+
+    /**
+     * Size of the write buffers used for the journal.
+     *
+     * @return journal write buffer size in KB
+     */
+    public int getJournalWriteBufferSizeKB() {
+<span class="fc" id="L719">        return this.getInt(JOURNAL_WRITE_BUFFER_SIZE, 64);</span>
+    }
+
+    /**
+     * Set the size of the write buffers used for the journal.
+     *
+     * @param bufferSizeKB the size of the write buffer used for the journal, in KB.
+     * @return server configuration
+     */
+    public ServerConfiguration setJournalWriteBufferSizeKB(int bufferSizeKB) {
+<span class="nc" id="L729">        setProperty(JOURNAL_WRITE_BUFFER_SIZE, bufferSizeKB);</span>
+<span class="nc" id="L730">        return this;</span>
+    }
+
+    /**
+     * Max number of older journal files kept.
+     *
+     * @return max number of older journal files to kept
+     */
+    public int getMaxBackupJournals() {
+<span class="fc" id="L739">        return this.getInt(MAX_BACKUP_JOURNALS, 5);</span>
+    }
+
+    /**
+     * Set max number of older journal files to kept.
+     *
+     * @param maxBackupJournals
+     *          Max number of older journal files
+     * @return server configuration
+     */
+    public ServerConfiguration setMaxBackupJournals(int maxBackupJournals) {
+<span class="nc" id="L750">        this.setProperty(MAX_BACKUP_JOURNALS, Integer.toString(maxBackupJournals));</span>
+<span class="nc" id="L751">        return this;</span>
+    }
+
+    /**
+     * All the journal writes and commits should be aligned to given size. If not,
+     * zeros will be padded to align to given size.
+     *
+     * @return journal alignment size
+     */
+    public int getJournalAlignmentSize() {
+<span class="fc" id="L761">        return this.getInt(JOURNAL_ALIGNMENT_SIZE, 512);</span>
+    }
+
+    /**
+     * Set journal alignment size.
+     *
+     * @param size
+     *          journal alignment size.
+     * @return server configuration.
+     */
+    public ServerConfiguration setJournalAlignmentSize(int size) {
+<span class="nc" id="L772">        this.setProperty(JOURNAL_ALIGNMENT_SIZE, size);</span>
+<span class="nc" id="L773">        return this;</span>
+    }
+
+    /**
+     * Get journal format version to write.
+     *
+     * @return journal format version to write.
+     */
+    public int getJournalFormatVersionToWrite() {
+<span class="fc" id="L782">        return this.getInt(JOURNAL_FORMAT_VERSION_TO_WRITE, 6);</span>
+    }
+
+    /**
+     * Set journal format version to write.
+     *
+     * @param version
+     *          journal format version to write.
+     * @return server configuration.
+     */
+    public ServerConfiguration setJournalFormatVersionToWrite(int version) {
+<span class="fc" id="L793">        this.setProperty(JOURNAL_FORMAT_VERSION_TO_WRITE, version);</span>
+<span class="fc" id="L794">        return this;</span>
+    }
+
+    /**
+     * Set the size of the journal queue.
+     *
+     * @param journalQueueSize
+     *            the max size of journal queue
+     * @return server configuration.
+     */
+    public ServerConfiguration setJournalQueueSize(int journalQueueSize) {
+<span class="nc" id="L805">        this.setProperty(JOURNAL_QUEUE_SIZE, journalQueueSize);</span>
+<span class="nc" id="L806">        return this;</span>
+    }
+
+    /**
+     * Get size of journal queue.
+     *
+     * @return the max size of journal queue.
+     */
+    public int getJournalQueueSize() {
+<span class="fc" id="L815">        return this.getInt(JOURNAL_QUEUE_SIZE, 10_000);</span>
+    }
+
+    /**
+     * Set PageCache flush interval in second.
+     *
+     * @Param journalPageCacheFlushInterval
+     *          journal pageCache flush interval when journalSyncData closed
+     * @return server configuration.
+     */
+    public ServerConfiguration setJournalPageCacheFlushIntervalMSec(long journalPageCacheFlushIntervalMSec) {
+<span class="nc" id="L826">        this.setProperty(JOURNAL_PAGECACHE_FLUSH_INTERVAL_MSEC, journalPageCacheFlushIntervalMSec);</span>
+<span class="nc" id="L827">        return this;</span>
+    }
+
+    /**
+     * Get journal pageCache flush interval.
+     *
+     * @return journal pageCache flush interval.
+     */
+    public long getJournalPageCacheFlushIntervalMSec() {
+<span class="fc" id="L836">        return this.getLong(JOURNAL_PAGECACHE_FLUSH_INTERVAL_MSEC, 1000);</span>
+    }
+
+    /**
+     * Get max number of adds in progress. 0 == unlimited.
+     *
+     * @return Max number of adds in progress.
+     */
+    public int getMaxAddsInProgressLimit() {
+<span class="nc" id="L845">        return this.getInt(MAX_ADDS_IN_PROGRESS_LIMIT, 0);</span>
+    }
+
+    /**
+     * Set max number of adds in progress. 0 == unlimited.
+     *
+     * @param value
+     *          max number of adds in progress.
+     * @return server configuration.
+     */
+    public ServerConfiguration setMaxAddsInProgressLimit(int value) {
+<span class="nc" id="L856">        this.setProperty(MAX_ADDS_IN_PROGRESS_LIMIT, value);</span>
+<span class="nc" id="L857">        return this;</span>
+    }
+
+    /**
+     * Get max number of reads in progress. 0 == unlimited.
+     *
+     * @return Max number of reads in progress.
+     */
+    public int getMaxReadsInProgressLimit() {
+<span class="nc" id="L866">        return this.getInt(MAX_READS_IN_PROGRESS_LIMIT, 0);</span>
+    }
+
+    /**
+     * Set max number of reads in progress. 0 == unlimited.
+     *
+     * @param value
+     *          max number of reads in progress.
+     * @return server configuration.
+     */
+    public ServerConfiguration setMaxReadsInProgressLimit(int value) {
+<span class="nc" id="L877">        this.setProperty(MAX_READS_IN_PROGRESS_LIMIT, value);</span>
+<span class="nc" id="L878">        return this;</span>
+    }
+
+    /**
+     * Configures action in case if server timed out sending response to the client.
+     * true == close the channel and drop response
+     * false == drop response
+     * Requires waitTimeoutOnBackpressureMs &gt;= 0 otherwise ignored.
+     *
+     * @return value indicating if channel should be closed.
+     */
+    public boolean getCloseChannelOnResponseTimeout(){
+<span class="nc" id="L890">        return this.getBoolean(CLOSE_CHANNEL_ON_RESPONSE_TIMEOUT, false);</span>
+    }
+
+    /**
+     * Configures action in case if server timed out sending response to the client.
+     * true == close the channel and drop response
+     * false == drop response
+     * Requires waitTimeoutOnBackpressureMs &gt;= 0 otherwise ignored.
+     *
+     * @param value
+     * @return server configuration.
+     */
+    public ServerConfiguration setCloseChannelOnResponseTimeout(boolean value) {
+<span class="nc" id="L903">        this.setProperty(CLOSE_CHANNEL_ON_RESPONSE_TIMEOUT, value);</span>
+<span class="nc" id="L904">        return this;</span>
+    }
+
+    /**
+     * Timeout controlling wait on response send in case of unresponsive client
+     * (i.e. client in long GC etc.)
+     *
+     * @return timeout value
+     *        negative value disables the feature
+     *        0 to allow request to fail immediately
+     *        Default is -1 (disabled)
+     */
+    public long getWaitTimeoutOnResponseBackpressureMillis() {
+<span class="nc" id="L917">        return getLong(WAIT_TIMEOUT_ON_RESPONSE_BACKPRESSURE, -1);</span>
+    }
+
+    /**
+     * Timeout controlling wait on response send in case of unresponsive client
+     * (i.e. client in long GC etc.)
+     *
+     * @param value
+     *        negative value disables the feature
+     *        0 to allow request to fail immediately
+     *        Default is -1 (disabled)
+     * @return client configuration.
+     */
+    public ServerConfiguration setWaitTimeoutOnResponseBackpressureMillis(long value) {
+<span class="nc" id="L931">        setProperty(WAIT_TIMEOUT_ON_RESPONSE_BACKPRESSURE, value);</span>
+<span class="nc" id="L932">        return this;</span>
+    }
+
+    /**
+     * Get bookie port that bookie server listen on.
+     *
+     * @return bookie port
+     */
+    public int getBookiePort() {
+<span class="fc" id="L941">        return this.getInt(BOOKIE_PORT, 3181);</span>
+    }
+
+    /**
+     * Set new bookie port that bookie server listen on.
+     *
+     * @param port
+     *          Port to listen on
+     * @return server configuration
+     */
+    public ServerConfiguration setBookiePort(int port) {
+<span class="fc" id="L952">        this.setProperty(BOOKIE_PORT, Integer.toString(port));</span>
+<span class="fc" id="L953">        return this;</span>
+    }
+
+    /**
+     * Get the network interface that the bookie should
+     * listen for connections on. If this is null, then the bookie
+     * will listen for connections on all interfaces.
+     *
+     * @return the network interface to listen on, e.g. eth0, or
+     *         null if none is specified
+     */
+    public String getListeningInterface() {
+<span class="fc" id="L965">        return this.getString(LISTENING_INTERFACE);</span>
+    }
+
+    /**
+     * Set the network interface that the bookie should listen on.
+     * If not set, the bookie will listen on all interfaces.
+     *
+     * @param iface the interface to listen on
+     */
+    public ServerConfiguration setListeningInterface(String iface) {
+<span class="fc" id="L975">        this.setProperty(LISTENING_INTERFACE, iface);</span>
+<span class="fc" id="L976">        return this;</span>
+    }
+
+    /**
+     * Is the bookie allowed to use a loopback interface as its primary
+     * interface(i.e. the interface it uses to establish its identity)?
+     *
+     * &lt;p&gt;By default, loopback interfaces are not allowed as the primary
+     * interface.
+     *
+     * &lt;p&gt;Using a loopback interface as the primary interface usually indicates
+     * a configuration error. For example, its fairly common in some VPS setups
+     * to not configure a hostname, or to have the hostname resolve to
+     * 127.0.0.1. If this is the case, then all bookies in the cluster will
+     * establish their identities as 127.0.0.1:3181, and only one will be able
+     * to join the cluster. For VPSs configured like this, you should explicitly
+     * set the listening interface.
+     *
+     * @see #setListeningInterface(String)
+     * @return whether a loopback interface can be used as the primary interface
+     */
+    public boolean getAllowLoopback() {
+<span class="nc" id="L998">        return this.getBoolean(ALLOW_LOOPBACK, false);</span>
+    }
+
+    /**
+     * Configure the bookie to allow loopback interfaces to be used
+     * as the primary bookie interface.
+     *
+     * @see #getAllowLoopback
+     * @param allow whether to allow loopback interfaces
+     * @return server configuration
+     */
+    public ServerConfiguration setAllowLoopback(boolean allow) {
+<span class="fc" id="L1010">        this.setProperty(ALLOW_LOOPBACK, allow);</span>
+<span class="fc" id="L1011">        return this;</span>
+    }
+
+     /**
+     * Get the configured BookieId for the bookie.
+     *
+     * &lt;p&gt;If present, this setting will take precedence over the
+     * automatic BookieId generation, based on Network Addresses.
+     *
+     * @see #setBookieId(java.lang.String)
+     * @see #getAdvertisedAddress()
+     * @return the configure address to be advertised
+     */
+    public String getBookieId() {
+<span class="fc" id="L1025">        return this.getString(BOOKIE_ID, null);</span>
+    }
+
+    /**
+     * Configure the bookie to advertise a specific BookieId.
+     *
+     * &lt;p&gt;By default, a bookie will advertise a BookieId computed
+     * from the primary network endpoint addresss.
+     *
+     * @see #getBookieId()
+     * @see #setAdvertisedAddress(java.lang.String)
+     * @param bookieId the bookie id
+     *
+     * @return server configuration
+     */
+    public ServerConfiguration setBookieId(String bookieId) {
+<span class="nc" id="L1041">        BookieId.parse(bookieId);</span>
+<span class="nc" id="L1042">        this.setProperty(BOOKIE_ID, bookieId);</span>
+<span class="nc" id="L1043">        return this;</span>
+    }
+
+    /**
+     * Get the configured advertised address for the bookie.
+     *
+     * &lt;p&gt;If present, this setting will take precedence over the
+     * {@link #setListeningInterface(String)} and
+     * {@link #setUseHostNameAsBookieID(boolean)}.
+     *
+     * @see #setAdvertisedAddress(String)
+     * @return the configure address to be advertised
+     */
+    public String getAdvertisedAddress() {
+<span class="fc" id="L1057">        return this.getString(ADVERTISED_ADDRESS, null);</span>
+    }
+
+    /**
+     * Configure the bookie to advertise a specific address.
+     *
+     * &lt;p&gt;By default, a bookie will advertise either its own IP or hostname,
+     * depending on the {@link getUseHostNameAsBookieID()} setting.
+     *
+     * &lt;p&gt;When the advertised is set to a non-empty string, the bookie will
+     * register and advertise using this address.
+     *
+     * &lt;p&gt;If present, this setting will take precedence over the
+     * {@link #setListeningInterface(String)} and
+     * {@link #setUseHostNameAsBookieID(boolean)}.
+     *
+     * @see #getAdvertisedAddress()
+     * @param advertisedAddress
+     *            whether to allow loopback interfaces
+     * @return server configuration
+     */
+    public ServerConfiguration setAdvertisedAddress(String advertisedAddress) {
+<span class="nc" id="L1079">        this.setProperty(ADVERTISED_ADDRESS, advertisedAddress);</span>
+<span class="nc" id="L1080">        return this;</span>
+    }
+
+    /**
+     * Is the bookie allowed to use an ephemeral port (port 0) as its server port.
+     *
+     * &lt;p&gt;By default, an ephemeral port is not allowed. Using an ephemeral port
+     * as the service port usually indicates a configuration error. However, in unit
+     * tests, using ephemeral port will address port conflicts problem and allow
+     * running tests in parallel.
+     *
+     * @return whether is allowed to use an ephemeral port.
+     */
+    public boolean getAllowEphemeralPorts() {
+<span class="nc" id="L1094">        return this.getBoolean(ALLOW_EPHEMERAL_PORTS, false);</span>
+    }
+
+    /**
+     * Configure the bookie to allow using an ephemeral port.
+     *
+     * @param allow whether to allow using an ephemeral port.
+     * @return server configuration
+     */
+    public ServerConfiguration setAllowEphemeralPorts(boolean allow) {
+<span class="fc" id="L1104">        this.setProperty(ALLOW_EPHEMERAL_PORTS, allow);</span>
+<span class="fc" id="L1105">        return this;</span>
+    }
+
+    /**
+     * Return whether we should allow addition of ledger/index dirs to an existing bookie.
+     *
+     * @return true if the addition is allowed; false otherwise
+     */
+    public boolean getAllowStorageExpansion() {
+<span class="nc" id="L1114">        return this.getBoolean(ALLOW_STORAGE_EXPANSION, false);</span>
+    }
+
+    /**
+     * Change the setting of whether or not we should allow ledger/index
+     * dirs to be added to the current set of dirs.
+     *
+     * @param val - true if new ledger/index dirs can be added; false otherwise.
+     *
+     * @return server configuration
+     */
+    public ServerConfiguration setAllowStorageExpansion(boolean val) {
+<span class="nc" id="L1126">        this.setProperty(ALLOW_STORAGE_EXPANSION, val);</span>
+<span class="nc" id="L1127">        return this;</span>
+    }
+
+    /**
+     * Get dir names to store journal files.
+     *
+     * @return journal dir name
+     */
+    public String[] getJournalDirNames() {
+<span class="fc" id="L1136">        String[] journalDirs = this.getStringArray(JOURNAL_DIRS);</span>
+<span class="pc bpc" id="L1137" title="4 of 6 branches missed.">        if (journalDirs == null || journalDirs.length == 0</span>
+<span class="nc bnc" id="L1138" title="All 2 branches missed.">                || (journalDirs.length == 1 &amp;&amp; StringUtils.isEmpty(journalDirs[0]))) {</span>
+<span class="fc" id="L1139">            return new String[] { getJournalDirName() };</span>
+        }
+<span class="nc" id="L1141">        return journalDirs;</span>
+    }
+
+    /**
+     * Get dir name to store journal files.
+     *
+     * @return journal dir name
+     */
+    @Deprecated
+    public String getJournalDirName() {
+<span class="fc" id="L1151">        return this.getString(JOURNAL_DIR, &quot;/tmp/bk-txn&quot;);</span>
+    }
+
+    /**
+     * Get dir name to store journal files.
+     *
+     * @return journal dir name
+     */
+    public String getJournalDirNameWithoutDefault() {
+<span class="nc" id="L1160">        return this.getString(JOURNAL_DIR);</span>
+    }
+
+
+    /**
+     * Set dir name to store journal files.
+     *
+     * @param journalDir
+     *          Dir to store journal files
+     * @return server configuration
+     */
+    public ServerConfiguration setJournalDirName(String journalDir) {
+<span class="nc" id="L1172">        this.setProperty(JOURNAL_DIRS, new String[] {journalDir});</span>
+<span class="nc" id="L1173">        return this;</span>
+    }
+
+    /**
+     * Set dir names to store journal files.
+     *
+     * @param journalDirs
+     *          Dir to store journal files
+     * @return server configuration
+     */
+    public ServerConfiguration setJournalDirsName(String[] journalDirs) {
+<span class="nc" id="L1184">        this.setProperty(JOURNAL_DIRS, journalDirs);</span>
+<span class="nc" id="L1185">        return this;</span>
+    }
+
+    /**
+     * Get dirs to store journal files.
+     *
+     * @return journal dirs, if no journal dir provided return null
+     */
+    public File[] getJournalDirs() {
+<span class="fc" id="L1194">        String[] journalDirNames = getJournalDirNames();</span>
+<span class="fc" id="L1195">        File[] journalDirs = new File[journalDirNames.length];</span>
+<span class="fc bfc" id="L1196" title="All 2 branches covered.">        for (int i = 0; i &lt; journalDirNames.length; i++) {</span>
+<span class="fc" id="L1197">            journalDirs[i] = new File(journalDirNames[i]);</span>
+        }
+<span class="fc" id="L1199">        return journalDirs;</span>
+    }
+
+    /**
+     * Get dir names to store ledger data.
+     *
+     * @return ledger dir names, if not provided return null
+     */
+    public String[] getLedgerDirWithoutDefault() {
+<span class="nc" id="L1208">        return this.getStringArray(LEDGER_DIRS);</span>
+    }
+
+    /**
+     * Get dir names to store ledger data.
+     *
+     * @return ledger dir names, if not provided return null
+     */
+    public String[] getLedgerDirNames() {
+<span class="fc" id="L1217">        String[] ledgerDirs = this.getStringArray(LEDGER_DIRS);</span>
+<span class="pc bpc" id="L1218" title="2 of 4 branches missed.">        if ((null == ledgerDirs) || (0 == ledgerDirs.length)) {</span>
+<span class="nc" id="L1219">            return new String[] { &quot;/tmp/bk-data&quot; };</span>
+        }
+<span class="fc" id="L1221">        return ledgerDirs;</span>
+    }
+
+    /**
+     * Set dir names to store ledger data.
+     *
+     * @param ledgerDirs
+     *          Dir names to store ledger data
+     * @return server configuration
+     */
+    public ServerConfiguration setLedgerDirNames(String[] ledgerDirs) {
+<span class="pc bpc" id="L1232" title="1 of 2 branches missed.">        if (null == ledgerDirs) {</span>
+<span class="nc" id="L1233">            return this;</span>
+        }
+<span class="fc" id="L1235">        this.setProperty(LEDGER_DIRS, ledgerDirs);</span>
+<span class="fc" id="L1236">        return this;</span>
+    }
+
+    /**
+     * Get dirs that stores ledger data.
+     *
+     * @return ledger dirs
+     */
+    public File[] getLedgerDirs() {
+<span class="fc" id="L1245">        String[] ledgerDirNames = getLedgerDirNames();</span>
+
+<span class="fc" id="L1247">        File[] ledgerDirs = new File[ledgerDirNames.length];</span>
+<span class="fc bfc" id="L1248" title="All 2 branches covered.">        for (int i = 0; i &lt; ledgerDirNames.length; i++) {</span>
+<span class="fc" id="L1249">            ledgerDirs[i] = new File(ledgerDirNames[i]);</span>
+        }
+<span class="fc" id="L1251">        return ledgerDirs;</span>
+    }
+
+    /**
+     * Get dir name to store index files.
+     *
+     * @return ledger index dir name, if no index dirs provided return null
+     */
+    public String[] getIndexDirNames() {
+<span class="pc bpc" id="L1260" title="1 of 2 branches missed.">        if (!this.containsKey(INDEX_DIRS)) {</span>
+<span class="fc" id="L1261">            return null;</span>
+        }
+<span class="nc" id="L1263">        return this.getStringArray(INDEX_DIRS);</span>
+    }
+
+    /**
+     * Set dir name to store index files.
+     *
+     * @param indexDirs
+     *          Index dir names
+     * @return server configuration.
+     */
+    public ServerConfiguration setIndexDirName(String[] indexDirs) {
+<span class="nc" id="L1274">        this.setProperty(INDEX_DIRS, indexDirs);</span>
+<span class="nc" id="L1275">        return this;</span>
+    }
+
+    /**
+     * Get index dir to store ledger index files.
+     *
+     * @return index dirs, if no index dirs provided return null
+     */
+    public File[] getIndexDirs() {
+<span class="fc" id="L1284">        String[] idxDirNames = getIndexDirNames();</span>
+<span class="pc bpc" id="L1285" title="1 of 2 branches missed.">        if (null == idxDirNames) {</span>
+<span class="fc" id="L1286">            return null;</span>
+        }
+<span class="nc" id="L1288">        File[] idxDirs = new File[idxDirNames.length];</span>
+<span class="nc bnc" id="L1289" title="All 2 branches missed.">        for (int i = 0; i &lt; idxDirNames.length; i++) {</span>
+<span class="nc" id="L1290">            idxDirs[i] = new File(idxDirNames[i]);</span>
+        }
+<span class="nc" id="L1292">        return idxDirs;</span>
+    }
+
+    /**
+     * Is tcp connection no delay.
+     *
+     * @return tcp socket nodelay setting
+     */
+    public boolean getServerTcpNoDelay() {
+<span class="nc" id="L1301">        return getBoolean(SERVER_TCP_NODELAY, true);</span>
+    }
+
+    /**
+     * Set socket nodelay setting.
+     *
+     * @param noDelay
+     *          NoDelay setting
+     * @return server configuration
+     */
+    public ServerConfiguration setServerTcpNoDelay(boolean noDelay) {
+<span class="nc" id="L1312">        setProperty(SERVER_TCP_NODELAY, Boolean.toString(noDelay));</span>
+<span class="nc" id="L1313">        return this;</span>
+    }
+
+    /**
+     * Get the number of IO threads. This is the number of
+     * threads used by Netty to handle TCP connections.
+     *
+     * @return the number of IO threads
+     */
+    public int getServerNumIOThreads() {
+<span class="nc" id="L1323">        return getInt(SERVER_NUM_IO_THREADS, 2 * Runtime.getRuntime().availableProcessors());</span>
+    }
+
+    /**
+     * Set the number of IO threads.
+     *
+     * &lt;p&gt;
+     * This is the number of threads used by Netty to handle TCP connections.
+     * &lt;/p&gt;
+     *
+     * @see #getNumIOThreads()
+     * @param numThreads number of IO threads used for bookkeeper
+     * @return client configuration
+     */
+    public ServerConfiguration setServerNumIOThreads(int numThreads) {
+<span class="nc" id="L1338">        setProperty(SERVER_NUM_IO_THREADS, Integer.toString(numThreads));</span>
+<span class="nc" id="L1339">        return this;</span>
+    }
+
+    /**
+     * Timeout to drain the socket on close.
+     *
+     * @return socket linger setting
+     */
+    public int getServerSockLinger() {
+<span class="nc" id="L1348">        return getInt(SERVER_SOCK_LINGER, 0);</span>
+    }
+
+    /**
+     * Set socket linger timeout on close.
+     *
+     * &lt;p&gt;When enabled, a close or shutdown will not return until all queued messages for the socket have been
+     * successfully sent or the linger timeout has been reached. Otherwise, the call returns immediately and the
+     * closing is done in the background.
+     *
+     * @param linger
+     *            NoDelay setting
+     * @return server configuration
+     */
+    public ServerConfiguration setServerSockLinger(int linger) {
+<span class="nc" id="L1363">        setProperty(SERVER_SOCK_LINGER, Integer.toString(linger));</span>
+<span class="nc" id="L1364">        return this;</span>
+    }
+
+    /**
+     * Get socket keepalive.
+     *
+     * @return socket keepalive setting
+     */
+    public boolean getServerSockKeepalive() {
+<span class="nc" id="L1373">        return getBoolean(SERVER_SOCK_KEEPALIVE, true);</span>
+    }
+
+    /**
+     * Set socket keepalive setting.
+     *
+     * &lt;p&gt;This setting is used to send keep-alive messages on connection-oriented sockets.
+     *
+     * @param keepalive
+     *            KeepAlive setting
+     * @return server configuration
+     */
+    public ServerConfiguration setServerSockKeepalive(boolean keepalive) {
+<span class="nc" id="L1386">        setProperty(SERVER_SOCK_KEEPALIVE, Boolean.toString(keepalive));</span>
+<span class="nc" id="L1387">        return this;</span>
+    }
+
+    /**
+     * Get zookeeper client backoff retry start time in millis.
+     *
+     * @return zk backoff retry start time in millis.
+     */
+    public int getZkRetryBackoffStartMs() {
+<span class="nc" id="L1396">        return getInt(ZK_RETRY_BACKOFF_START_MS, getZkTimeout());</span>
+    }
+
+    /**
+     * Set zookeeper client backoff retry start time in millis.
+     *
+     * @param retryMs
+     *          backoff retry start time in millis.
+     * @return server configuration.
+     */
+    public ServerConfiguration setZkRetryBackoffStartMs(int retryMs) {
+<span class="nc" id="L1407">        setProperty(ZK_RETRY_BACKOFF_START_MS, retryMs);</span>
+<span class="nc" id="L1408">        return this;</span>
+    }
+
+    /**
+     * Get zookeeper client backoff retry max time in millis.
+     *
+     * @return zk backoff retry max time in millis.
+     */
+    public int getZkRetryBackoffMaxMs() {
+<span class="nc" id="L1417">        return getInt(ZK_RETRY_BACKOFF_MAX_MS, getZkTimeout());</span>
+    }
+
+    /**
+     * Set zookeeper client backoff retry max time in millis.
+     *
+     * @param retryMs
+     *          backoff retry max time in millis.
+     * @return server configuration.
+     */
+    public ServerConfiguration setZkRetryBackoffMaxMs(int retryMs) {
+<span class="nc" id="L1428">        setProperty(ZK_RETRY_BACKOFF_MAX_MS, retryMs);</span>
+<span class="nc" id="L1429">        return this;</span>
+    }
+
+    /**
+     * Is statistics enabled.
+     *
+     * @return is statistics enabled
+     */
+    public boolean isStatisticsEnabled() {
+<span class="nc" id="L1438">        return getBoolean(ENABLE_STATISTICS, true);</span>
+    }
+
+    /**
+     * Turn on/off statistics.
+     *
+     * @param enabled
+     *          Whether statistics enabled or not.
+     * @return server configuration
+     */
+    public ServerConfiguration setStatisticsEnabled(boolean enabled) {
+<span class="nc" id="L1449">        setProperty(ENABLE_STATISTICS, Boolean.toString(enabled));</span>
+<span class="nc" id="L1450">        return this;</span>
+    }
+
+    /**
+     * Get threshold of minor compaction.
+     *
+     * &lt;p&gt;For those entry log files whose remaining size percentage reaches below
+     * this threshold  will be compacted in a minor compaction.
+     *
+     * &lt;p&gt;If it is set to less than zero, the minor compaction is disabled.
+     *
+     * @return threshold of minor compaction
+     */
+    public double getMinorCompactionThreshold() {
+<span class="fc" id="L1464">        return getDouble(MINOR_COMPACTION_THRESHOLD, 0.2f);</span>
+    }
+
+    /**
+     * Set threshold of minor compaction.
+     *
+     * @see #getMinorCompactionThreshold()
+     *
+     * @param threshold
+     *          Threshold for minor compaction
+     * @return server configuration
+     */
+    public ServerConfiguration setMinorCompactionThreshold(double threshold) {
+<span class="nc" id="L1477">        setProperty(MINOR_COMPACTION_THRESHOLD, threshold);</span>
+<span class="nc" id="L1478">        return this;</span>
+    }
+
+    /**
+     * Get threshold of major compaction.
+     *
+     * &lt;p&gt;For those entry log files whose remaining size percentage reaches below
+     * this threshold  will be compacted in a major compaction.
+     *
+     * &lt;p&gt;If it is set to less than zero, the major compaction is disabled.
+     *
+     * @return threshold of major compaction
+     */
+    public double getMajorCompactionThreshold() {
+<span class="fc" id="L1492">        return getDouble(MAJOR_COMPACTION_THRESHOLD, 0.8f);</span>
+    }
+
+    /**
+     * Set threshold of major compaction.
+     *
+     * @see #getMajorCompactionThreshold()
+     *
+     * @param threshold
+     *          Threshold of major compaction
+     * @return server configuration
+     */
+    public ServerConfiguration setMajorCompactionThreshold(double threshold) {
+<span class="nc" id="L1505">        setProperty(MAJOR_COMPACTION_THRESHOLD, threshold);</span>
+<span class="nc" id="L1506">        return this;</span>
+    }
+
+    /**
+     * Get interval to run minor compaction, in seconds.
+     *
+     * &lt;p&gt;If it is set to less than zero, the minor compaction is disabled.
+     *
+     * @return threshold of minor compaction
+     */
+    public long getMinorCompactionInterval() {
+<span class="fc" id="L1517">        return getLong(MINOR_COMPACTION_INTERVAL, 3600);</span>
+    }
+
+    /**
+     * Set interval to run minor compaction.
+     *
+     * @see #getMinorCompactionInterval()
+     *
+     * @param interval
+     *          Interval to run minor compaction
+     * @return server configuration
+     */
+    public ServerConfiguration setMinorCompactionInterval(long interval) {
+<span class="nc" id="L1530">        setProperty(MINOR_COMPACTION_INTERVAL, interval);</span>
+<span class="nc" id="L1531">        return this;</span>
+    }
+
+    /**
+     * Get interval to run major compaction, in seconds.
+     *
+     * &lt;p&gt;If it is set to less than zero, the major compaction is disabled.
+     *
+     * @return high water mark
+     */
+    public long getMajorCompactionInterval() {
+<span class="fc" id="L1542">        return getLong(MAJOR_COMPACTION_INTERVAL, 86400);</span>
+    }
+
+    /**
+     * Set interval to run major compaction.
+     *
+     * @see #getMajorCompactionInterval()
+     *
+     * @param interval
+     *          Interval to run major compaction
+     * @return server configuration
+     */
+    public ServerConfiguration setMajorCompactionInterval(long interval) {
+<span class="nc" id="L1555">        setProperty(MAJOR_COMPACTION_INTERVAL, interval);</span>
+<span class="nc" id="L1556">        return this;</span>
+    }
+
+    /**
+     * Get whether force compaction is allowed when disk full or almost full.
+     *
+     * &lt;p&gt;Force GC may get some space back, but may also fill up disk space more
+     * quickly. This is because new log files are created before GC, while old
+     * garbage log files deleted after GC.
+     *
+     * @return true  - do force GC when disk full,
+     *         false - suspend GC when disk full.
+     */
+    public boolean getIsForceGCAllowWhenNoSpace() {
+<span class="fc" id="L1570">        return getBoolean(IS_FORCE_GC_ALLOW_WHEN_NO_SPACE, false);</span>
+    }
+
+    /**
+     * Set whether force GC is allowed when disk full or almost full.
+     *
+     * @param force true to allow force GC; false to suspend GC
+     *
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setIsForceGCAllowWhenNoSpace(boolean force) {
+<span class="nc" id="L1581">        setProperty(IS_FORCE_GC_ALLOW_WHEN_NO_SPACE, force);</span>
+<span class="nc" id="L1582">        return this;</span>
+    }
+
+    /**
+     * Set the grace period which the rereplication worker will wait before
+     * fencing and rereplicating a ledger fragment which is still being written
+     * to, on bookie failure.
+     *
+     * &lt;p&gt;The grace period allows the writer to detect the bookie failure, and and
+     * start writing to another ledger fragment. If the writer writes nothing
+     * during the grace period, the rereplication worker assumes that it has
+     * crashed and therefore fences the ledger, preventing any further writes to
+     * that ledger.
+     *
+     * @see org.apache.bookkeeper.client.BookKeeper#openLedger
+     *
+     * @param waitTime time to wait before replicating ledger fragment
+     */
+    public void setOpenLedgerRereplicationGracePeriod(String waitTime) {
+<span class="nc" id="L1601">        setProperty(OPEN_LEDGER_REREPLICATION_GRACE_PERIOD, waitTime);</span>
+<span class="nc" id="L1602">    }</span>
+
+    /**
+     * Get the grace period which the rereplication worker to wait before
+     * fencing and rereplicating a ledger fragment which is still being written
+     * to, on bookie failure.
+     *
+     * @return long
+     */
+    public long getOpenLedgerRereplicationGracePeriod() {
+<span class="nc" id="L1612">        return getLong(OPEN_LEDGER_REREPLICATION_GRACE_PERIOD, 30000);</span>
+    }
+
+    /**
+     * Set the grace period, in milliseconds, which the replication worker has
+     * to wait before releasing the lock after it failed to replicate a ledger.
+     * For the first ReplicationWorker.NUM_OF_EXPONENTIAL_BACKOFF_RETRIALS
+     * failures it will do exponential backoff then it will bound at
+     * LOCK_RELEASE_OF_FAILED_LEDGER_GRACE_PERIOD.
+     *
+     * &lt;p&gt;On replication failure, instead of releasing the lock immediately
+     * after failed attempt, it will hold under replicated ledger lock for the
+     * grace period and then it will release the lock.
+     *
+     * @param waitTime
+     */
+    public void setLockReleaseOfFailedLedgerGracePeriod(String waitTime) {
+<span class="nc" id="L1629">        setProperty(LOCK_RELEASE_OF_FAILED_LEDGER_GRACE_PERIOD, waitTime);</span>
+<span class="nc" id="L1630">    }</span>
+
+    /**
+     * Get the grace period, in milliseconds, which the replication worker has
+     * to wait before releasing the lock after it failed to replicate a ledger.
+     * For the first ReplicationWorker.NUM_OF_EXPONENTIAL_BACKOFF_RETRIALS
+     * failures it will do exponential backoff then it will bound at
+     * LOCK_RELEASE_OF_FAILED_LEDGER_GRACE_PERIOD.
+     *
+     * @return
+     */
+    public long getLockReleaseOfFailedLedgerGracePeriod() {
+<span class="nc" id="L1642">        return getLong(LOCK_RELEASE_OF_FAILED_LEDGER_GRACE_PERIOD, 300000);</span>
+    }
+
+    /**
+     * Get the number of bytes we should use as capacity for
+     * org.apache.bookkeeper.bookie.BufferedReadChannel.
+     * Default is 512 bytes
+     * @return read buffer size
+     */
+    public int getReadBufferBytes() {
+<span class="fc" id="L1652">        return getInt(READ_BUFFER_SIZE, 512);</span>
+    }
+
+    /**
+     * Set the number of bytes we should use as capacity for
+     * org.apache.bookkeeper.bookie.BufferedReadChannel.
+     *
+     * @param readBufferSize
+     *          Read Buffer Size
+     * @return server configuration
+     */
+    public ServerConfiguration setReadBufferBytes(int readBufferSize) {
+<span class="nc" id="L1664">        setProperty(READ_BUFFER_SIZE, readBufferSize);</span>
+<span class="nc" id="L1665">        return this;</span>
+    }
+
+    /**
+     * Set the number of threads that would handle write requests.
+     *
+     * @param numThreads
+     *          number of threads to handle write requests.
+     * @return server configuration
+     */
+    public ServerConfiguration setNumAddWorkerThreads(int numThreads) {
+<span class="nc" id="L1676">        setProperty(NUM_ADD_WORKER_THREADS, numThreads);</span>
+<span class="nc" id="L1677">        return this;</span>
+    }
+
+    /**
+     * Get the number of threads that should handle write requests.
+     *
+     * @return the number of threads that handle write requests.
+     */
+    public int getNumAddWorkerThreads() {
+<span class="nc" id="L1686">        return getInt(NUM_ADD_WORKER_THREADS, 1);</span>
+    }
+
+    /**
+     * Set the number of threads that should handle long poll requests.
+     *
+     * @param numThreads
+     *          number of threads to handle long poll requests.
+     * @return server configuration
+     */
+    public ServerConfiguration setNumLongPollWorkerThreads(int numThreads) {
+<span class="nc" id="L1697">        setProperty(NUM_LONG_POLL_WORKER_THREADS, numThreads);</span>
+<span class="nc" id="L1698">        return this;</span>
+    }
+
+    /**
+     * Get the number of threads that should handle long poll requests.
+     *
+     * &lt;p&gt;If the number of threads is zero or negative, bookie will fallback to
+     * use read threads. If there is no read threads used, it will create a thread pool
+     * with {@link Runtime#availableProcessors()} threads.
+     *
+     * @return the number of threads that should handle long poll requests, default value is 0.
+     */
+    public int getNumLongPollWorkerThreads() {
+<span class="nc" id="L1711">        return getInt(NUM_LONG_POLL_WORKER_THREADS, 0);</span>
+    }
+
+    /**
+     * Set the number of threads that should be used for high priority requests
+     * (i.e. recovery reads and adds, and fencing)
+     *
+     * @param numThreads
+     *          number of threads to handle high priority requests.
+     * @return server configuration
+     */
+    public ServerConfiguration setNumHighPriorityWorkerThreads(int numThreads) {
+<span class="nc" id="L1723">        setProperty(NUM_HIGH_PRIORITY_WORKER_THREADS, numThreads);</span>
+<span class="nc" id="L1724">        return this;</span>
+    }
+
+    /**
+     * Get the number of threads that should be used for high priority requests
+     * (i.e. recovery reads and adds, and fencing)
+     * @return
+     */
+    public int getNumHighPriorityWorkerThreads() {
+<span class="nc" id="L1733">        return getInt(NUM_HIGH_PRIORITY_WORKER_THREADS, 8);</span>
+    }
+
+
+    /**
+     * Set the number of threads that would handle read requests.
+     *
+     * @param numThreads
+     *          Number of threads to handle read requests.
+     * @return server configuration
+     */
+    public ServerConfiguration setNumReadWorkerThreads(int numThreads) {
+<span class="nc" id="L1745">        setProperty(NUM_READ_WORKER_THREADS, numThreads);</span>
+<span class="nc" id="L1746">        return this;</span>
+    }
+
+    /**
+     * Get the number of threads that should handle read requests.
+     */
+    public int getNumReadWorkerThreads() {
+<span class="nc" id="L1753">        return getInt(NUM_READ_WORKER_THREADS, 8);</span>
+    }
+
+    /**
+     * Set the tick duration in milliseconds.
+     *
+     * @param tickDuration
+     *          tick duration in milliseconds.
+     * @return server configuration
+     */
+    public ServerConfiguration setRequestTimerTickDurationMs(int tickDuration) {
+<span class="nc" id="L1764">        setProperty(REQUEST_TIMER_TICK_DURATION_MILLISEC, tickDuration);</span>
+<span class="nc" id="L1765">        return this;</span>
+    }
+
+    /**
+     * Set the max number of pending read requests for each read worker thread. After the quota is reached,
+     * new requests will be failed immediately.
+     *
+     * @param maxPendingReadRequestsPerThread
+     * @return server configuration
+     */
+    public ServerConfiguration setMaxPendingReadRequestPerThread(int maxPendingReadRequestsPerThread) {
+<span class="nc" id="L1776">        setProperty(MAX_PENDING_READ_REQUESTS_PER_THREAD, maxPendingReadRequestsPerThread);</span>
+<span class="nc" id="L1777">        return this;</span>
+    }
+
+    /**
+     * If read workers threads are enabled, limit the number of pending requests, to avoid the executor queue to grow
+     * indefinitely (default: 10000 entries).
+     */
+    public int getMaxPendingReadRequestPerThread() {
+<span class="nc" id="L1785">        return getInt(MAX_PENDING_READ_REQUESTS_PER_THREAD, 10000);</span>
+    }
+
+    /**
+     * Set the max number of pending add requests for each add worker thread. After the quota is reached, new requests
+     * will be failed immediately.
+     *
+     * @param maxPendingAddRequestsPerThread
+     * @return server configuration
+     */
+    public ServerConfiguration setMaxPendingAddRequestPerThread(int maxPendingAddRequestsPerThread) {
+<span class="nc" id="L1796">        setProperty(MAX_PENDING_ADD_REQUESTS_PER_THREAD, maxPendingAddRequestsPerThread);</span>
+<span class="nc" id="L1797">        return this;</span>
+    }
+
+    /**
+     * If add workers threads are enabled, limit the number of pending requests, to avoid the executor queue to grow
+     * indefinitely (default: 10000 entries).
+     */
+    public int getMaxPendingAddRequestPerThread() {
+<span class="nc" id="L1805">        return getInt(MAX_PENDING_ADD_REQUESTS_PER_THREAD, 10000);</span>
+    }
+
+
+
+    /**
+     * Get the tick duration in milliseconds.
+     * @return
+     */
+    public int getRequestTimerTickDurationMs() {
+<span class="nc" id="L1815">        return getInt(REQUEST_TIMER_TICK_DURATION_MILLISEC, 10);</span>
+    }
+
+    /**
+     * Set the number of ticks per wheel for the request timer.
+     *
+     * @param tickCount
+     *          number of ticks per wheel for the request timer.
+     * @return server configuration
+     */
+    public ServerConfiguration setRequestTimerNumTicks(int tickCount) {
+<span class="nc" id="L1826">        setProperty(REQUEST_TIMER_NO_OF_TICKS, tickCount);</span>
+<span class="nc" id="L1827">        return this;</span>
+    }
+
+    /**
+     * Get the number of ticks per wheel for the request timer.
+     * @return
+     */
+    public int getRequestTimerNumTicks() {
+<span class="nc" id="L1835">        return getInt(REQUEST_TIMER_NO_OF_TICKS, 1024);</span>
+    }
+
+    /**
+     * Get the number of bytes used as capacity for the write buffer. Default is
+     * 64KB.
+     * NOTE: Make sure this value is greater than the maximum message size.
+     * @return the size of the write buffer in bytes
+     */
+    public int getWriteBufferBytes() {
+<span class="fc" id="L1845">        return getInt(WRITE_BUFFER_SIZE, 65536);</span>
+    }
+
+    /**
+     * Set the number of bytes used as capacity for the write buffer.
+     *
+     * @param writeBufferBytes
+     *          Write Buffer Bytes
+     * @return server configuration
+     */
+    public ServerConfiguration setWriteBufferBytes(int writeBufferBytes) {
+<span class="nc" id="L1856">        setProperty(WRITE_BUFFER_SIZE, writeBufferBytes);</span>
+<span class="nc" id="L1857">        return this;</span>
+    }
+
+    /**
+     * Set the number of threads that would handle journal callbacks.
+     *
+     * @param numThreads
+     *          number of threads to handle journal callbacks.
+     * @return server configuration
+     */
+    public ServerConfiguration setNumJournalCallbackThreads(int numThreads) {
+<span class="nc" id="L1868">        setProperty(NUM_JOURNAL_CALLBACK_THREADS, numThreads);</span>
+<span class="nc" id="L1869">        return this;</span>
+    }
+
+    /**
+     * Get the number of threads that should handle journal callbacks.
+     *
+     * @return the number of threads that handle journal callbacks.
+     */
+    public int getNumJournalCallbackThreads() {
+<span class="fc" id="L1878">        return getInt(NUM_JOURNAL_CALLBACK_THREADS, 1);</span>
+    }
+
+    /**
+     * Set sorted-ledger storage enabled or not.
+     *
+     * @deprecated Use {@link #setLedgerStorageClass(String)} to configure the implementation class
+     * @param enabled
+     */
+    public ServerConfiguration setSortedLedgerStorageEnabled(boolean enabled) {
+<span class="nc" id="L1888">        this.setProperty(SORTED_LEDGER_STORAGE_ENABLED, enabled);</span>
+<span class="nc" id="L1889">        return this;</span>
+    }
+
+    /**
+     * Check if sorted-ledger storage enabled (default true).
+     *
+     * @return true if sorted ledger storage is enabled, false otherwise
+     */
+    public boolean getSortedLedgerStorageEnabled() {
+<span class="nc" id="L1898">        return this.getBoolean(SORTED_LEDGER_STORAGE_ENABLED, true);</span>
+    }
+
+    /**
+     * Get skip list data size limitation (default 64MB).
+     * Max value is 1,073,741,823
+     *
+     * @return skip list data size limitation
+     */
+    public long getSkipListSizeLimit() {
+<span class="nc" id="L1908">        return this.getLong(SKIP_LIST_SIZE_LIMIT, 64 * 1024 * 1024L);</span>
+    }
+
+    /**
+     * Set skip list size limit.
+     *
+     * @param size skip list size limit.
+     * @return server configuration object.
+     */
+    public ServerConfiguration setSkipListSizeLimit(int size) {
+<span class="nc bnc" id="L1918" title="All 2 branches missed.">        if (size &gt; (Integer.MAX_VALUE - 1) / 2) {</span>
+            // gives max of 2*1023MB for mem table (one being checkpointed and still writable).
+<span class="nc" id="L1920">            throw new IllegalArgumentException(&quot;skiplist size over &quot; + ((Integer.MAX_VALUE - 1) / 2));</span>
+        }
+<span class="nc" id="L1922">        setProperty(SKIP_LIST_SIZE_LIMIT, size);</span>
+<span class="nc" id="L1923">        return this;</span>
+    }
+
+    /**
+     * Get the number of bytes we should use as chunk allocation for
+     * org.apache.bookkeeper.bookie.SkipListArena.
+     * Default is 4 MB
+     * @return the number of bytes to use for each chunk in the skiplist arena
+     */
+    public int getSkipListArenaChunkSize() {
+<span class="nc" id="L1933">        return getInt(SKIP_LIST_CHUNK_SIZE_ENTRY, 4096 * 1024);</span>
+    }
+
+    /**
+     * Set the number of bytes we used as chunk allocation for
+     * org.apache.bookkeeper.bookie.SkipListArena.
+     *
+     * @param size chunk size.
+     * @return server configuration object.
+     */
+    public ServerConfiguration setSkipListArenaChunkSize(int size) {
+<span class="nc" id="L1944">        setProperty(SKIP_LIST_CHUNK_SIZE_ENTRY, size);</span>
+<span class="nc" id="L1945">        return this;</span>
+    }
+
+    /**
+     * Get the max size we should allocate from the skiplist arena. Allocations
+     * larger than this should be allocated directly by the VM to avoid fragmentation.
+     *
+     * @return max size allocatable from the skiplist arena (Default is 128 KB)
+     */
+    public int getSkipListArenaMaxAllocSize() {
+<span class="nc" id="L1955">        return getInt(SKIP_LIST_MAX_ALLOC_ENTRY, 128 * 1024);</span>
+    }
+
+    /**
+     * Set the max size we should allocate from the skiplist arena. Allocations
+     * larger than this should be allocated directly by the VM to avoid fragmentation.
+     *
+     * @param size max alloc size.
+     * @return server configuration object.
+     */
+    public ServerConfiguration setSkipListArenaMaxAllocSize(int size) {
+<span class="nc" id="L1966">        setProperty(SKIP_LIST_MAX_ALLOC_ENTRY, size);</span>
+<span class="nc" id="L1967">        return this;</span>
+    }
+
+    /**
+     * Should the data be fsynced on journal before acknowledgment.
+     *
+     * &lt;p&gt;Default is true
+     *
+     * @return
+     */
+    public boolean getJournalSyncData() {
+<span class="fc" id="L1978">        return getBoolean(JOURNAL_SYNC_DATA, true);</span>
+    }
+
+    /**
+     * Enable or disable journal syncs.
+     *
+     * &lt;p&gt;By default, data sync is enabled to guarantee durability of writes.
+     *
+     * &lt;p&gt;Beware: while disabling data sync in the Bookie journal might improve the bookie write performance, it will
+     * also introduce the possibility of data loss. With no sync, the journal entries are written in the OS page cache
+     * but not flushed to disk. In case of power failure, the affected bookie might lose the unflushed data. If the
+     * ledger is replicated to multiple bookies, the chances of data loss are reduced though still present.
+     *
+     * @param syncData
+     *            whether to sync data on disk before acknowledgement
+     * @return server configuration object
+     */
+    public ServerConfiguration setJournalSyncData(boolean syncData) {
+<span class="nc" id="L1996">        setProperty(JOURNAL_SYNC_DATA, syncData);</span>
+<span class="nc" id="L1997">        return this;</span>
+    }
+
+    /**
+     * Should we group journal force writes.
+     *
+     * @return group journal force writes
+     */
+    public boolean getJournalAdaptiveGroupWrites() {
+<span class="fc" id="L2006">        return getBoolean(JOURNAL_ADAPTIVE_GROUP_WRITES, true);</span>
+    }
+
+    /**
+     * Enable/disable group journal force writes.
+     *
+     * @param enabled flag to enable/disable group journal force writes
+     */
+    public ServerConfiguration setJournalAdaptiveGroupWrites(boolean enabled) {
+<span class="nc" id="L2015">        setProperty(JOURNAL_ADAPTIVE_GROUP_WRITES, enabled);</span>
+<span class="nc" id="L2016">        return this;</span>
+    }
+
+    /**
+     * Maximum latency to impose on a journal write to achieve grouping. Default is 2ms.
+     *
+     * @return max wait for grouping
+     */
+    public long getJournalMaxGroupWaitMSec() {
+<span class="fc" id="L2025">        return getLong(JOURNAL_MAX_GROUP_WAIT_MSEC, 2);</span>
+    }
+
+    /**
+     * Sets the maximum latency to impose on a journal write to achieve grouping.
+     *
+     * @param journalMaxGroupWaitMSec
+     *          maximum time to wait in milliseconds.
+     * @return server configuration.
+     */
+    public ServerConfiguration setJournalMaxGroupWaitMSec(long journalMaxGroupWaitMSec) {
+<span class="nc" id="L2036">        setProperty(JOURNAL_MAX_GROUP_WAIT_MSEC, journalMaxGroupWaitMSec);</span>
+<span class="nc" id="L2037">        return this;</span>
+    }
+
+    /**
+     * Maximum bytes to buffer to impose on a journal write to achieve grouping.
+     *
+     * @return max bytes to buffer
+     */
+    public long getJournalBufferedWritesThreshold() {
+<span class="fc" id="L2046">        return getLong(JOURNAL_BUFFERED_WRITES_THRESHOLD, 512 * 1024);</span>
+    }
+
+    /**
+     * Set maximum bytes to buffer to impose on a journal write to achieve grouping.
+     *
+     * @param maxBytes maximum bytes to buffer to impose on a journal write
+     * @return max bytes to buffer
+     */
+    public ServerConfiguration setJournalBufferedWritesThreshold(long maxBytes) {
+<span class="nc" id="L2056">        setProperty(JOURNAL_BUFFERED_WRITES_THRESHOLD, maxBytes);</span>
+<span class="nc" id="L2057">        return this;</span>
+    }
+
+    /**
+     * Maximum entries to buffer to impose on a journal write to achieve grouping.
+     * Use {@link #getJournalBufferedWritesThreshold()} if this is set to zero or
+     * less than zero.
+     *
+     * @return max entries to buffer.
+     */
+    public long getJournalBufferedEntriesThreshold() {
+<span class="fc" id="L2068">        return getLong(JOURNAL_BUFFERED_ENTRIES_THRESHOLD, 0);</span>
+    }
+
+    /**
+     * Set maximum entries to buffer to impose on a journal write to achieve grouping.
+     * Use {@link #getJournalBufferedWritesThreshold()} set this to zero or less than
+     * zero.
+     *
+     * @param maxEntries
+     *          maximum entries to buffer.
+     * @return server configuration.
+     */
+    public ServerConfiguration setJournalBufferedEntriesThreshold(int maxEntries) {
+<span class="nc" id="L2081">        setProperty(JOURNAL_BUFFERED_ENTRIES_THRESHOLD, maxEntries);</span>
+<span class="nc" id="L2082">        return this;</span>
+    }
+
+    /**
+     * Set if we should flush the journal when queue is empty.
+     */
+    public ServerConfiguration setJournalFlushWhenQueueEmpty(boolean enabled) {
+<span class="fc" id="L2089">        setProperty(JOURNAL_FLUSH_WHEN_QUEUE_EMPTY, enabled);</span>
+<span class="fc" id="L2090">        return this;</span>
+    }
+
+    /**
+     * Should we flush the journal when queue is empty.
+     *
+     * @return flush when queue is empty
+     */
+    public boolean getJournalFlushWhenQueueEmpty() {
+<span class="fc" id="L2099">        return getBoolean(JOURNAL_FLUSH_WHEN_QUEUE_EMPTY, false);</span>
+    }
+
+    /**
+     * Set whether the bookie is able to go into read-only mode.
+     * If this is set to false, the bookie will shutdown on encountering
+     * an error condition.
+     *
+     * @param enabled whether to enable read-only mode.
+     *
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setReadOnlyModeEnabled(boolean enabled) {
+<span class="nc" id="L2112">        setProperty(READ_ONLY_MODE_ENABLED, enabled);</span>
+<span class="nc" id="L2113">        return this;</span>
+    }
+
+    /**
+     * Get whether read-only mode is enabled. The default is true.
+     *
+     * @return boolean
+     */
+    public boolean isReadOnlyModeEnabled() {
+<span class="nc" id="L2122">        return getBoolean(READ_ONLY_MODE_ENABLED, true);</span>
+    }
+
+    /**
+     * Set the warning threshold for disk usage.
+     *
+     * @param threshold warning threshold to force gc.
+     *
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setDiskUsageWarnThreshold(float threshold) {
+<span class="fc" id="L2133">        setProperty(DISK_USAGE_WARN_THRESHOLD, threshold);</span>
+<span class="fc" id="L2134">        return this;</span>
+    }
+
+    /**
+     * Returns the warning threshold for disk usage. If disk usage
+     * goes beyond this, a garbage collection cycle will be forced.
+     * @return the percentage at which a disk usage warning will trigger
+     */
+    public float getDiskUsageWarnThreshold() {
+<span class="fc" id="L2143">        return getFloat(DISK_USAGE_WARN_THRESHOLD, 0.90f);</span>
+    }
+
+    /**
+     * Whether to persist the bookie status so that when bookie server restarts,
+     * it will continue using the previous status.
+     *
+     * @param enabled
+     *            - true if persist the bookie status. Otherwise false.
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setPersistBookieStatusEnabled(boolean enabled) {
+<span class="nc" id="L2155">        setProperty(PERSIST_BOOKIE_STATUS_ENABLED, enabled);</span>
+<span class="nc" id="L2156">        return this;</span>
+    }
+
+    /**
+     * Get whether to persist the bookie status so that when bookie server restarts,
+     * it will continue using the previous status.
+     *
+     * @return true - if need to start a bookie in read only mode. Otherwise false.
+     */
+    public boolean isPersistBookieStatusEnabled() {
+<span class="nc" id="L2166">        return getBoolean(PERSIST_BOOKIE_STATUS_ENABLED, false);</span>
+    }
+
+    /**
+     * Set the Disk free space threshold as a fraction of the total
+     * after which disk will be considered as full during disk check.
+     *
+     * @param threshold threshold to declare a disk full
+     *
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setDiskUsageThreshold(float threshold) {
+<span class="fc" id="L2178">        setProperty(DISK_USAGE_THRESHOLD, threshold);</span>
+<span class="fc" id="L2179">        return this;</span>
+    }
+
+    /**
+     * Returns disk free space threshold. By default it is 0.95.
+     *
+     * @return the percentage at which a disk will be considered full
+     */
+    public float getDiskUsageThreshold() {
+<span class="fc" id="L2188">        return getFloat(DISK_USAGE_THRESHOLD, 0.95f);</span>
+    }
+
+    /**
+     * Set the disk free space low water mark threshold.
+     * Disk is considered full when usage threshold is exceeded.
+     * Disk returns back to non-full state when usage is below low water mark threshold.
+     * This prevents it from going back and forth between these states frequently
+     * when concurrent writes and compaction are happening. This also prevent bookie from
+     * switching frequently between read-only and read-writes states in the same cases.
+     *
+     * @param threshold threshold to declare a disk full
+     *
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setDiskLowWaterMarkUsageThreshold(float threshold) {
+<span class="nc" id="L2204">        setProperty(DISK_USAGE_LWM_THRESHOLD, threshold);</span>
+<span class="nc" id="L2205">        return this;</span>
+    }
+
+    /**
+     * Returns disk free space low water mark threshold. By default it is the
+     * same as usage threshold (for backwards-compatibility).
+     *
+     * @return the percentage below which a disk will NOT be considered full
+     */
+    public float getDiskLowWaterMarkUsageThreshold() {
+<span class="nc" id="L2215">        return getFloat(DISK_USAGE_LWM_THRESHOLD, getDiskUsageThreshold());</span>
+    }
+
+    /**
+     * Set the disk checker interval to monitor ledger disk space.
+     *
+     * @param interval interval between disk checks for space.
+     *
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setDiskCheckInterval(int interval) {
+<span class="nc" id="L2226">        setProperty(DISK_CHECK_INTERVAL, interval);</span>
+<span class="nc" id="L2227">        return this;</span>
+    }
+
+    /**
+     * Get the disk checker interval.
+     *
+     * @return int
+     */
+    public int getDiskCheckInterval() {
+<span class="fc" id="L2236">        return getInt(DISK_CHECK_INTERVAL, 10 * 1000);</span>
+    }
+
+    /**
+     * Set the regularity at which the auditor will run a check
+     * of all ledgers. This should not be run very often, and at most,
+     * once a day. Setting this to 0 will completely disable the periodic
+     * check.
+     *
+     * @param interval The interval in seconds. e.g. 86400 = 1 day, 604800 = 1 week
+     */
+    public void setAuditorPeriodicCheckInterval(long interval) {
+<span class="nc" id="L2248">        setProperty(AUDITOR_PERIODIC_CHECK_INTERVAL, interval);</span>
+<span class="nc" id="L2249">    }</span>
+
+    /**
+     * Get the regularity at which the auditor checks all ledgers.
+     * @return The interval in seconds. Default is 604800 (1 week).
+     */
+    public long getAuditorPeriodicCheckInterval() {
+<span class="nc" id="L2256">        return getLong(AUDITOR_PERIODIC_CHECK_INTERVAL, 604800);</span>
+    }
+
+    /**
+     * Set the interval between auditor bookie checks.
+     * The auditor bookie check, checks ledger metadata to see which bookies
+     * contain entries for each ledger. If a bookie which should contain entries
+     * is unavailable, then the ledger containing that entry is marked for recovery.
+     * Setting this to 0 disabled the periodic check. Bookie checks will still
+     * run when a bookie fails.
+     *
+     * @param interval The period in seconds.
+     */
+    public void setAuditorPeriodicBookieCheckInterval(long interval) {
+<span class="nc" id="L2270">        setProperty(AUDITOR_PERIODIC_BOOKIE_CHECK_INTERVAL, interval);</span>
+<span class="nc" id="L2271">    }</span>
+
+    /**
+     * Get the interval between auditor bookie check runs.
+     * @see #setAuditorPeriodicBookieCheckInterval(long)
+     * @return the interval between bookie check runs, in seconds. Default is 86400 (= 1 day)
+     */
+    public long getAuditorPeriodicBookieCheckInterval() {
+<span class="nc" id="L2279">        return getLong(AUDITOR_PERIODIC_BOOKIE_CHECK_INTERVAL, 86400);</span>
+    }
+
+    /**
+     * Sets the regularity/interval at which the auditor will run a placement
+     * policy check of all ledgers, which are closed. This should not be run
+     * very often, and should be run at most once a day. Setting this to 0 will
+     * completely disable the periodic metadata check.
+     *
+     * @param interval
+     *            The interval in seconds. e.g. 86400 = 1 day, 604800 = 1 week
+     */
+    public void setAuditorPeriodicPlacementPolicyCheckInterval(long interval) {
+<span class="nc" id="L2292">        setProperty(AUDITOR_PERIODIC_PLACEMENT_POLICY_CHECK_INTERVAL, interval);</span>
+<span class="nc" id="L2293">    }</span>
+
+    /**
+     * Get the regularity at which the auditor does placement policy check of
+     * all ledgers, which are closed.
+     *
+     * @return The interval in seconds. By default it is disabled.
+     */
+    public long getAuditorPeriodicPlacementPolicyCheckInterval() {
+<span class="nc" id="L2302">        return getLong(AUDITOR_PERIODIC_PLACEMENT_POLICY_CHECK_INTERVAL, 0);</span>
+    }
+
+    /**
+     * Sets the grace period (in seconds) for underreplicated ledgers recovery.
+     * If ledger is marked underreplicated for more than this period then it
+     * will be reported by placementPolicyCheck in Auditor. Setting this to 0
+     * will disable this check.
+     *
+     * @param gracePeriod
+     *            The interval in seconds. e.g. 3600 = 1 hour
+     */
+    public void setUnderreplicatedLedgerRecoveryGracePeriod(long gracePeriod) {
+<span class="nc" id="L2315">        setProperty(UNDERREPLICATED_LEDGER_RECOVERY_GRACE_PERIOD, gracePeriod);</span>
+<span class="nc" id="L2316">    }</span>
+
+    /**
+     * Gets the grace period (in seconds) for underreplicated ledgers recovery.
+     * If ledger is marked underreplicated for more than this period then it
+     * will be reported by placementPolicyCheck in Auditor. Setting this to 0
+     * will disable this check.
+     *
+     * @return The interval in seconds. By default it is disabled.
+     */
+    public long getUnderreplicatedLedgerRecoveryGracePeriod() {
+<span class="nc" id="L2327">        return getLong(UNDERREPLICATED_LEDGER_RECOVERY_GRACE_PERIOD, 0);</span>
+    }
+
+    /**
+     * Sets the interval at which the auditor will run a replicas check of all
+     * ledgers. This should not be run very often since it validates
+     * availability of replicas of all ledgers by querying bookies. Setting this
+     * to 0 will disable the periodic replicas check.
+     *
+     * @param interval
+     *            The interval in seconds. e.g. 86400 = 1 day, 604800 = 1 week
+     */
+    public void setAuditorPeriodicReplicasCheckInterval(long interval) {
+<span class="nc" id="L2340">        setProperty(AUDITOR_REPLICAS_CHECK_INTERVAL, interval);</span>
+<span class="nc" id="L2341">    }</span>
+
+    /**
+     * Get the interval at which the auditor does replicas check of all ledgers.
+     *
+     * @return The interval in seconds. By default it is disabled.
+     */
+    public long getAuditorPeriodicReplicasCheckInterval() {
+<span class="nc" id="L2349">        return getLong(AUDITOR_REPLICAS_CHECK_INTERVAL, 0);</span>
+    }
+
+    /**
+     * Set what percentage of a ledger (fragment)'s entries will be verified.
+     * 0 - only the first and last entry of each ledger fragment would be verified
+     * 100 - the entire ledger fragment would be verified
+     * anything else - randomly picked entries from over the fragment would be verifiec
+     * @param auditorLedgerVerificationPercentage The verification proportion as a percentage
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setAuditorLedgerVerificationPercentage(long auditorLedgerVerificationPercentage) {
+<span class="nc" id="L2361">        setProperty(AUDITOR_LEDGER_VERIFICATION_PERCENTAGE, auditorLedgerVerificationPercentage);</span>
+<span class="nc" id="L2362">        return this;</span>
+    }
+
+    /**
+     * Get what percentage of a ledger (fragment)'s entries will be verified.
+     * @see #setAuditorLedgerVerificationPercentage(long)
+     * @return percentage of a ledger (fragment)'s entries will be verified. Default is 0.
+     */
+    public long getAuditorLedgerVerificationPercentage() {
+<span class="nc" id="L2371">        return getLong(AUDITOR_LEDGER_VERIFICATION_PERCENTAGE, 0);</span>
+    }
+
+    /**
+     * Sets that whether the auto-recovery service can start along with Bookie
+     * server itself or not.
+     *
+     * @param enabled
+     *            - true if need to start auto-recovery service. Otherwise
+     *            false.
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setAutoRecoveryDaemonEnabled(boolean enabled) {
+<span class="nc" id="L2384">        setProperty(AUTO_RECOVERY_DAEMON_ENABLED, enabled);</span>
+<span class="nc" id="L2385">        return this;</span>
+    }
+
+    /**
+     * Get whether the Bookie itself can start auto-recovery service also or not.
+     *
+     * @return true - if Bookie should start auto-recovery service along with
+     *         it. false otherwise.
+     */
+    public boolean isAutoRecoveryDaemonEnabled() {
+<span class="nc" id="L2395">        return getBoolean(AUTO_RECOVERY_DAEMON_ENABLED, false);</span>
+    }
+
+    /**
+     * Get how long to delay the recovery of ledgers of a lost bookie.
+     *
+     * @return delay interval in seconds
+     */
+    public int getLostBookieRecoveryDelay() {
+<span class="nc" id="L2404">        return getInt(LOST_BOOKIE_RECOVERY_DELAY, 0);</span>
+    }
+
+    /**
+     * Set the delay interval for starting recovery of a lost bookie.
+     */
+    public void setLostBookieRecoveryDelay(int interval) {
+<span class="nc" id="L2411">        setProperty(LOST_BOOKIE_RECOVERY_DELAY, interval);</span>
+<span class="nc" id="L2412">    }</span>
+
+    /**
+     * Get how long to backoff when encountering exception on rereplicating a ledger.
+     *
+     * @return backoff time in milliseconds
+     */
+    public int getRwRereplicateBackoffMs() {
+<span class="nc" id="L2420">        return getInt(RW_REREPLICATE_BACKOFF_MS, 5000);</span>
+    }
+
+    /**
+     * Set how long to backoff when encountering exception on rereplicating a ledger.
+     *
+     * @param backoffMs backoff time in milliseconds
+     */
+    public void setRwRereplicateBackoffMs(int backoffMs) {
+<span class="nc" id="L2429">        setProperty(RW_REREPLICATE_BACKOFF_MS, backoffMs);</span>
+<span class="nc" id="L2430">    }</span>
+
+    /**
+     * Sets that whether force start a bookie in readonly mode.
+     *
+     * @param enabled
+     *            - true if need to start a bookie in read only mode. Otherwise
+     *            false.
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setForceReadOnlyBookie(boolean enabled) {
+<span class="nc" id="L2441">        setProperty(FORCE_READ_ONLY_BOOKIE, enabled);</span>
+<span class="nc" id="L2442">        return this;</span>
+    }
+
+    /**
+     * Get whether the Bookie is force started in read only mode or not.
+     *
+     * @return true - if need to start a bookie in read only mode. Otherwise
+     *         false.
+     */
+    public boolean isForceReadOnlyBookie() {
+<span class="nc" id="L2452">        return getBoolean(FORCE_READ_ONLY_BOOKIE, false);</span>
+    }
+
+    /**
+     * Get whether use bytes to throttle garbage collector compaction or not.
+     *
+     * @return true  - use Bytes,
+     *         false - use Entries.
+     */
+    public boolean getIsThrottleByBytes() {
+<span class="fc" id="L2462">        return getBoolean(IS_THROTTLE_BY_BYTES, false);</span>
+    }
+
+    /**
+     * Set whether use bytes to throttle garbage collector compaction or not.
+     *
+     * @param byBytes true to use by bytes; false to use by entries
+     *
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setIsThrottleByBytes(boolean byBytes) {
+<span class="nc" id="L2473">        setProperty(IS_THROTTLE_BY_BYTES, byBytes);</span>
+<span class="nc" id="L2474">        return this;</span>
+    }
+
+    /**
+     * Get the maximum number of entries which can be compacted without flushing.
+     * Default is 100,000.
+     *
+     * @return the maximum number of unflushed entries
+     */
+    public int getCompactionMaxOutstandingRequests() {
+<span class="fc" id="L2484">        return getInt(COMPACTION_MAX_OUTSTANDING_REQUESTS, 100000);</span>
+    }
+
+    /**
+     * Set the maximum number of entries which can be compacted without flushing.
+     *
+     * &lt;p&gt;When compacting, the entries are written to the entrylog and the new offsets
+     * are cached in memory. Once the entrylog is flushed the index is updated with
+     * the new offsets. This parameter controls the number of entries added to the
+     * entrylog before a flush is forced. A higher value for this parameter means
+     * more memory will be used for offsets. Each offset consists of 3 longs.
+     *
+     * &lt;p&gt;This parameter should _not_ be modified unless you know what you're doing.
+     * The default is 100,000.
+     *
+     * @param maxOutstandingRequests number of entries to compact before flushing
+     *
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setCompactionMaxOutstandingRequests(int maxOutstandingRequests) {
+<span class="nc" id="L2504">        setProperty(COMPACTION_MAX_OUTSTANDING_REQUESTS, maxOutstandingRequests);</span>
+<span class="nc" id="L2505">        return this;</span>
+    }
+
+    /**
+     * Get the rate of compaction adds. Default is 1,000.
+     *
+     * @return rate of compaction (adds per second)
+     * @deprecated  replaced by {@link #getCompactionRateByEntries()}
+     */
+    @Deprecated
+    public int getCompactionRate() {
+<span class="fc" id="L2516">        return getInt(COMPACTION_RATE, 1000);</span>
+    }
+
+    /**
+     * Set the rate of compaction adds.
+     *
+     * @param rate rate of compaction adds (adds entries per second)
+     *
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setCompactionRate(int rate) {
+<span class="nc" id="L2527">        setProperty(COMPACTION_RATE, rate);</span>
+<span class="nc" id="L2528">        return this;</span>
+    }
+
+    /**
+     * Get the rate of compaction adds. Default is 1,000.
+     *
+     * @return rate of compaction (adds entries per second)
+     */
+    public int getCompactionRateByEntries() {
+<span class="fc" id="L2537">        return getInt(COMPACTION_RATE_BY_ENTRIES, getCompactionRate());</span>
+    }
+
+    /**
+     * Set the rate of compaction adds.
+     *
+     * @param rate rate of compaction adds (adds entries per second)
+     *
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setCompactionRateByEntries(int rate) {
+<span class="nc" id="L2548">        setProperty(COMPACTION_RATE_BY_ENTRIES, rate);</span>
+<span class="nc" id="L2549">        return this;</span>
+    }
+
+    /**
+     * Get the rate of compaction adds. Default is 1,000,000.
+     *
+     * @return rate of compaction (adds bytes per second)
+     */
+    public int getCompactionRateByBytes() {
+<span class="nc" id="L2558">        return getInt(COMPACTION_RATE_BY_BYTES, 1000000);</span>
+    }
+
+    /**
+     * Set the rate of compaction adds.
+     *
+     * @param rate rate of compaction adds (adds bytes per second)
+     *
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setCompactionRateByBytes(int rate) {
+<span class="nc" id="L2569">        setProperty(COMPACTION_RATE_BY_BYTES, rate);</span>
+<span class="nc" id="L2570">        return this;</span>
+    }
+
+    /**
+     * Should we remove pages from page cache after force write.
+     *
+     * @return remove pages from cache
+     */
+    @Beta
+    public boolean getJournalRemovePagesFromCache() {
+<span class="fc" id="L2580">        return getBoolean(JOURNAL_REMOVE_FROM_PAGE_CACHE, true);</span>
+    }
+
+    /**
+     * Sets that whether should we remove pages from page cache after force write.
+     *
+     * @param enabled
+     *            - true if we need to remove pages from page cache. otherwise, false
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setJournalRemovePagesFromCache(boolean enabled) {
+<span class="nc" id="L2591">        setProperty(JOURNAL_REMOVE_FROM_PAGE_CACHE, enabled);</span>
+<span class="nc" id="L2592">        return this;</span>
+    }
+
+    /*
+     * Get the {@link LedgerStorage} implementation class name.
+     *
+     * @return the class name
+     */
+    public String getLedgerStorageClass() {
+<span class="fc" id="L2601">        String ledgerStorageClass = LEDGER_STORAGE_CLASS_KEY.getString(this);</span>
+<span class="pc bpc" id="L2602" title="1 of 2 branches missed.">        if (ledgerStorageClass.equals(SortedLedgerStorage.class.getName())</span>
+<span class="nc bnc" id="L2603" title="All 2 branches missed.">                &amp;&amp; !getSortedLedgerStorageEnabled()) {</span>
+            // This is to retain compatibility with BK-4.3 configuration
+            // In BK-4.3, the ledger storage is configured through the &quot;sortedLedgerStorageEnabled&quot; flag :
+            // sortedLedgerStorageEnabled == true (default) ---&gt; use SortedLedgerStorage
+            // sortedLedgerStorageEnabled == false ---&gt; use InterleavedLedgerStorage
+            //
+            // Since BK-4.4, one can specify the implementation class, but if it was using InterleavedLedgerStorage it
+            // should continue to use that with the same configuration
+<span class="nc" id="L2611">            ledgerStorageClass = InterleavedLedgerStorage.class.getName();</span>
+        }
+
+<span class="fc" id="L2614">        return ledgerStorageClass;</span>
+    }
+
+    /**
+     * Set the {@link LedgerStorage} implementation class name.
+     *
+     * @param ledgerStorageClass the class name
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setLedgerStorageClass(String ledgerStorageClass) {
+<span class="fc" id="L2624">        LEDGER_STORAGE_CLASS_KEY.set(this, ledgerStorageClass);</span>
+<span class="fc" id="L2625">        return this;</span>
+    }
+
+    /**
+     * Get whether bookie is using hostname for registration and in ledger
+     * metadata. Defaults to false.
+     *
+     * @return true, then bookie will be registered with its hostname and
+     *         hostname will be used in ledger metadata. Otherwise bookie will
+     *         use its ipaddress
+     */
+    public boolean getUseHostNameAsBookieID() {
+<span class="fc" id="L2637">        return getBoolean(USE_HOST_NAME_AS_BOOKIE_ID, false);</span>
+    }
+
+    /**
+     * Configure the bookie to use its hostname to register with the
+     * co-ordination service(eg: zookeeper) and in ledger metadata.
+     *
+     * @see #getUseHostNameAsBookieID
+     * @param useHostName
+     *            whether to use hostname for registration and in ledgermetadata
+     * @return server configuration
+     */
+    public ServerConfiguration setUseHostNameAsBookieID(boolean useHostName) {
+<span class="nc" id="L2650">        setProperty(USE_HOST_NAME_AS_BOOKIE_ID, useHostName);</span>
+<span class="nc" id="L2651">        return this;</span>
+    }
+
+    /**
+     * If bookie is using hostname for registration and in ledger metadata then
+     * whether to use short hostname or FQDN hostname. Defaults to false.
+     *
+     * @return true, then bookie will be registered with its short hostname and
+     *         short hostname will be used in ledger metadata. Otherwise bookie
+     *         will use its FQDN hostname
+     */
+    public boolean getUseShortHostName() {
+<span class="nc" id="L2663">        return getBoolean(USE_SHORT_HOST_NAME, false);</span>
+    }
+
+    /**
+     * Configure the bookie to use its short hostname or FQDN hostname to
+     * register with the co-ordination service(eg: zookeeper) and in ledger
+     * metadata.
+     *
+     * @see #getUseShortHostName
+     * @param useShortHostName
+     *            whether to use short hostname for registration and in
+     *            ledgermetadata
+     * @return server configuration
+     */
+    public ServerConfiguration setUseShortHostName(boolean useShortHostName) {
+<span class="nc" id="L2678">        setProperty(USE_SHORT_HOST_NAME, useShortHostName);</span>
+<span class="nc" id="L2679">        return this;</span>
+    }
+
+    /**
+     * Get whether to listen for local JVM clients. Defaults to false.
+     *
+     * @return true, then bookie will be listen for local JVM clients
+     */
+    public boolean isEnableLocalTransport() {
+<span class="nc" id="L2688">        return getBoolean(ENABLE_LOCAL_TRANSPORT, false);</span>
+    }
+
+    /**
+     * Configure the bookie to listen for BookKeeper clients executed on the local JVM.
+     *
+     * @see #isEnableLocalTransport
+     * @param enableLocalTransport
+     *            whether to use listen for local JVM clients
+     * @return server configuration
+     */
+    public ServerConfiguration setEnableLocalTransport(boolean enableLocalTransport) {
+<span class="nc" id="L2700">        setProperty(ENABLE_LOCAL_TRANSPORT, enableLocalTransport);</span>
+<span class="nc" id="L2701">        return this;</span>
+    }
+
+    /**
+     * Get whether to disable bind of server-side sockets. Defaults to false.
+     *
+     * @return true, then bookie will not listen for network connections
+     */
+    public boolean isDisableServerSocketBind() {
+<span class="nc" id="L2710">        return getBoolean(DISABLE_SERVER_SOCKET_BIND, false);</span>
+    }
+
+    /**
+     * Configure the bookie to disable bind on network interfaces,
+     * this bookie will be available only to BookKeeper clients executed on the local JVM.
+     *
+     * @see #isDisableServerSocketBind
+     * @param disableServerSocketBind
+     *            whether to disable binding on network interfaces
+     * @return server configuration
+     */
+    public ServerConfiguration setDisableServerSocketBind(boolean disableServerSocketBind) {
+<span class="nc" id="L2723">        setProperty(DISABLE_SERVER_SOCKET_BIND, disableServerSocketBind);</span>
+<span class="nc" id="L2724">        return this;</span>
+    }
+
+    /**
+     * Get the stats provider used by bookie.
+     *
+     * @return stats provider class
+     * @throws ConfigurationException
+     */
+    public Class&lt;? extends StatsProvider&gt; getStatsProviderClass()
+        throws ConfigurationException {
+<span class="nc" id="L2735">        return ReflectionUtils.getClass(this, STATS_PROVIDER_CLASS,</span>
+                                        NullStatsProvider.class, StatsProvider.class,
+                                        DEFAULT_LOADER);
+    }
+
+    /**
+     * Set the stats provider used by bookie.
+     *
+     * @param providerClass
+     *          stats provider class
+     * @return server configuration
+     */
+    public ServerConfiguration setStatsProviderClass(Class&lt;? extends StatsProvider&gt; providerClass) {
+<span class="nc" id="L2748">        setProperty(STATS_PROVIDER_CLASS, providerClass.getName());</span>
+<span class="nc" id="L2749">        return this;</span>
+    }
+
+    /**
+     * Validate the configuration.
+     * @throws ConfigurationException
+     */
+    public void validate() throws ConfigurationException {
+        // generate config def
+<span class="nc" id="L2758">        ConfigDef configDef = ConfigDef.of(ServerConfiguration.class);</span>
+        try {
+<span class="nc" id="L2760">            configDef.validate(this);</span>
+<span class="nc" id="L2761">        } catch (ConfigException e) {</span>
+<span class="nc" id="L2762">            throw new ConfigurationException(e.getMessage(), e.getCause());</span>
+<span class="nc" id="L2763">        }</span>
+
+<span class="nc bnc" id="L2765" title="All 2 branches missed.">        if (getSkipListArenaChunkSize() &lt; getSkipListArenaMaxAllocSize()) {</span>
+<span class="nc" id="L2766">            throw new ConfigurationException(&quot;Arena max allocation size should be smaller than the chunk size.&quot;);</span>
+        }
+<span class="nc bnc" id="L2768" title="All 4 branches missed.">        if (getJournalAlignmentSize() &lt; 512 || getJournalAlignmentSize() % 512 != 0) {</span>
+<span class="nc" id="L2769">            throw new ConfigurationException(&quot;Invalid journal alignment size : &quot; + getJournalAlignmentSize());</span>
+        }
+<span class="nc bnc" id="L2771" title="All 2 branches missed.">        if (getJournalAlignmentSize() &gt; getJournalPreAllocSizeMB() * 1024 * 1024) {</span>
+<span class="nc" id="L2772">            throw new ConfigurationException(&quot;Invalid preallocation size : &quot; + getJournalPreAllocSizeMB() + &quot; MB&quot;);</span>
+        }
+<span class="nc bnc" id="L2774" title="All 4 branches missed.">        if (0 == getBookiePort() &amp;&amp; !getAllowEphemeralPorts()) {</span>
+<span class="nc" id="L2775">            throw new ConfigurationException(&quot;Invalid port specified, using ephemeral ports accidentally?&quot;);</span>
+        }
+<span class="nc bnc" id="L2777" title="All 4 branches missed.">        if (isEntryLogPerLedgerEnabled() &amp;&amp; getUseTransactionalCompaction()) {</span>
+<span class="nc" id="L2778">            throw new ConfigurationException(</span>
+                    &quot;When entryLogPerLedger is enabled , it is unnecessary to use transactional compaction&quot;);
+        }
+<span class="nc bnc" id="L2781" title="All 6 branches missed.">        if ((getJournalFormatVersionToWrite() &gt;= 6) ^ (getFileInfoFormatVersionToWrite() &gt;= 1)) {</span>
+<span class="nc" id="L2782">            throw new ConfigurationException(&quot;For persisiting explicitLac, journalFormatVersionToWrite should be &gt;= 6&quot;</span>
+                    + &quot;and FileInfoFormatVersionToWrite should be &gt;= 1&quot;);
+        }
+<span class="nc" id="L2785">    }</span>
+
+    /**
+     * Get Recv ByteBuf allocator initial buf size.
+     *
+     * @return initial byteBuf size
+     */
+    public int getRecvByteBufAllocatorSizeInitial() {
+<span class="nc" id="L2793">        return getInt(BYTEBUF_ALLOCATOR_SIZE_INITIAL, 64 * 1024);</span>
+    }
+
+    /**
+     * Set Recv ByteBuf allocator initial buf size.
+     *
+     * @param size
+     *            buffer size
+     */
+    public void setRecvByteBufAllocatorSizeInitial(int size) {
+<span class="nc" id="L2803">        setProperty(BYTEBUF_ALLOCATOR_SIZE_INITIAL, size);</span>
+<span class="nc" id="L2804">    }</span>
+
+    /**
+     * Get Recv ByteBuf allocator min buf size.
+     *
+     * @return min byteBuf size
+     */
+    public int getRecvByteBufAllocatorSizeMin() {
+<span class="nc" id="L2812">        return getInt(BYTEBUF_ALLOCATOR_SIZE_MIN, 64 * 1024);</span>
+    }
+
+    /**
+     * Set Recv ByteBuf allocator min buf size.
+     *
+     * @param size
+     *            buffer size
+     */
+    public void setRecvByteBufAllocatorSizeMin(int size) {
+<span class="nc" id="L2822">        setProperty(BYTEBUF_ALLOCATOR_SIZE_MIN, size);</span>
+<span class="nc" id="L2823">    }</span>
+
+    /**
+     * Get Recv ByteBuf allocator max buf size.
+     *
+     * @return max byteBuf size
+     */
+    public int getRecvByteBufAllocatorSizeMax() {
+<span class="nc" id="L2831">        return getInt(BYTEBUF_ALLOCATOR_SIZE_MAX, 1 * 1024 * 1024);</span>
+    }
+
+    /**
+     * Set Recv ByteBuf allocator max buf size.
+     *
+     * @param size
+     *            buffer size
+     */
+    public void setRecvByteBufAllocatorSizeMax(int size) {
+<span class="nc" id="L2841">        setProperty(BYTEBUF_ALLOCATOR_SIZE_MAX, size);</span>
+<span class="nc" id="L2842">    }</span>
+
+    /**
+     * Set the bookie authentication provider factory class name.
+     * If this is not set, no authentication will be used.
+     *
+     * @param factoryClass
+     *          the bookie authentication provider factory class name
+     */
+    public void setBookieAuthProviderFactoryClass(String factoryClass) {
+<span class="nc" id="L2852">        setProperty(BOOKIE_AUTH_PROVIDER_FACTORY_CLASS, factoryClass);</span>
+<span class="nc" id="L2853">    }</span>
+
+    /**
+     * Get the bookie authentication provider factory class name.
+     * If this returns null, no authentication will take place.
+     *
+     * @return the bookie authentication provider factory class name or null.
+     */
+    public String getBookieAuthProviderFactoryClass() {
+<span class="nc" id="L2862">        return getString(BOOKIE_AUTH_PROVIDER_FACTORY_CLASS, null);</span>
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public ServerConfiguration setNettyMaxFrameSizeBytes(int maxSize) {
+<span class="nc" id="L2870">        super.setNettyMaxFrameSizeBytes(maxSize);</span>
+<span class="nc" id="L2871">        return this;</span>
+    }
+
+    /**
+     * Get the truststore type for client. Default is JKS.
+     *
+     * @return
+     */
+    public String getTLSTrustStoreType() {
+<span class="nc" id="L2880">        return getString(TLS_TRUSTSTORE_TYPE, &quot;JKS&quot;);</span>
+    }
+
+    /**
+     * Set the keystore type for client.
+     *
+     * @return
+     */
+    public ServerConfiguration setTLSKeyStoreType(String arg) {
+<span class="nc" id="L2889">        setProperty(TLS_KEYSTORE_TYPE, arg);</span>
+<span class="nc" id="L2890">        return this;</span>
+    }
+
+    /**
+     * Get the keystore path for the client.
+     *
+     * @return
+     */
+    public String getTLSKeyStore() {
+<span class="nc" id="L2899">        return getString(TLS_KEYSTORE, null);</span>
+    }
+
+    /**
+     * Set the keystore path for the client.
+     *
+     * @return
+     */
+    public ServerConfiguration setTLSKeyStore(String arg) {
+<span class="nc" id="L2908">        setProperty(TLS_KEYSTORE, arg);</span>
+<span class="nc" id="L2909">        return this;</span>
+    }
+
+    /**
+     * Get the path to file containing keystore password if the client keystore is password protected. Default is null.
+     *
+     * @return
+     */
+    public String getTLSKeyStorePasswordPath() {
+<span class="nc" id="L2918">        return getString(TLS_KEYSTORE_PASSWORD_PATH, null);</span>
+    }
+
+    /**
+     * Set the path to file containing keystore password, if the client keystore is password protected.
+     *
+     * @return
+     */
+    public ServerConfiguration setTLSKeyStorePasswordPath(String arg) {
+<span class="nc" id="L2927">        setProperty(TLS_KEYSTORE_PASSWORD_PATH, arg);</span>
+<span class="nc" id="L2928">        return this;</span>
+    }
+
+    /**
+     * Get the keystore type for client. Default is JKS.
+     *
+     * @return
+     */
+    public String getTLSKeyStoreType() {
+<span class="nc" id="L2937">        return getString(TLS_KEYSTORE_TYPE, &quot;JKS&quot;);</span>
+    }
+
+    /**
+     * Set the truststore type for client.
+     *
+     * @return
+     */
+    public ServerConfiguration setTLSTrustStoreType(String arg) {
+<span class="nc" id="L2946">        setProperty(TLS_TRUSTSTORE_TYPE, arg);</span>
+<span class="nc" id="L2947">        return this;</span>
+    }
+
+    /**
+     * Get the truststore path for the client.
+     *
+     * @return
+     */
+    public String getTLSTrustStore() {
+<span class="nc" id="L2956">        return getString(TLS_TRUSTSTORE, null);</span>
+    }
+
+    /**
+     * Set the truststore path for the client.
+     *
+     * @return
+     */
+    public ServerConfiguration setTLSTrustStore(String arg) {
+<span class="nc" id="L2965">        setProperty(TLS_TRUSTSTORE, arg);</span>
+<span class="nc" id="L2966">        return this;</span>
+    }
+
+    /**
+     * Get the path to file containing truststore password if the client truststore is password protected. Default is
+     * null.
+     *
+     * @return
+     */
+    public String getTLSTrustStorePasswordPath() {
+<span class="nc" id="L2976">        return getString(TLS_TRUSTSTORE_PASSWORD_PATH, null);</span>
+    }
+
+    /**
+     * Set the path to file containing truststore password, if the client truststore is password protected.
+     *
+     * @return
+     */
+    public ServerConfiguration setTLSTrustStorePasswordPath(String arg) {
+<span class="nc" id="L2985">        setProperty(TLS_TRUSTSTORE_PASSWORD_PATH, arg);</span>
+<span class="nc" id="L2986">        return this;</span>
+    }
+
+    /**
+     * Get the path to file containing TLS Certificate.
+     *
+     * @return
+     */
+    public String getTLSCertificatePath() {
+<span class="nc" id="L2995">        return getString(TLS_CERTIFICATE_PATH, null);</span>
+    }
+
+    /**
+     * Set the path to file containing TLS Certificate.
+     *
+     * @return
+     */
+    public ServerConfiguration setTLSCertificatePath(String arg) {
+<span class="nc" id="L3004">        setProperty(TLS_CERTIFICATE_PATH, arg);</span>
+<span class="nc" id="L3005">        return this;</span>
+    }
+
+
+    /**
+     * Whether to enable recording task execution stats.
+     *
+     * @return flag to enable/disable recording task execution stats.
+     */
+    public boolean getEnableTaskExecutionStats() {
+<span class="nc" id="L3015">        return getBoolean(ENABLE_TASK_EXECUTION_STATS, false);</span>
+    }
+
+    /**
+     * Enable/Disable recording task execution stats.
+     *
+     * @param enabled
+     *          flag to enable/disable recording task execution stats.
+     * @return client configuration.
+     */
+    public ServerConfiguration setEnableTaskExecutionStats(boolean enabled) {
+<span class="nc" id="L3026">        setProperty(ENABLE_TASK_EXECUTION_STATS, enabled);</span>
+<span class="nc" id="L3027">        return this;</span>
+    }
+
+    /**
+     * Gets the minimum safe Usable size to be available in index directory for Bookie to create Index File while
+     * replaying journal at the time of Bookie Start in Readonly Mode (in bytes).
+     *
+     * @return minimum safe usable size to be available in index directory for bookie to create index files.
+     * @see #setMinUsableSizeForIndexFileCreation(long)
+     */
+    public long getMinUsableSizeForIndexFileCreation() {
+<span class="fc" id="L3038">        return this.getLong(MIN_USABLESIZE_FOR_INDEXFILE_CREATION, 100 * 1024 * 1024L);</span>
+    }
+
+    /**
+     * Sets the minimum safe Usable size to be available in index directory for Bookie to create Index File while
+     * replaying journal at the time of Bookie Start in Readonly Mode (in bytes).
+     *
+     * &lt;p&gt;This parameter allows creating index files when there are enough disk spaces, even when the bookie
+     * is running at readonly mode because of the disk usage is exceeding {@link #getDiskUsageThreshold()}. Because
+     * compaction, journal replays can still write index files to disks when a bookie is readonly.
+     *
+     * @param minUsableSizeForIndexFileCreation min usable size for index file creation
+     * @return server configuration
+     */
+    public ServerConfiguration setMinUsableSizeForIndexFileCreation(long minUsableSizeForIndexFileCreation) {
+<span class="nc" id="L3053">        this.setProperty(MIN_USABLESIZE_FOR_INDEXFILE_CREATION, minUsableSizeForIndexFileCreation);</span>
+<span class="nc" id="L3054">        return this;</span>
+    }
+
+    /**
+     * Gets the minimum safe usable size to be available in ledger directory for Bookie to create entry log files.
+     *
+     * @return minimum safe usable size to be available in ledger directory for entry log file creation.
+     * @see #setMinUsableSizeForEntryLogCreation(long)
+     */
+    public long getMinUsableSizeForEntryLogCreation() {
+<span class="fc" id="L3064">        return this.getLong(MIN_USABLESIZE_FOR_ENTRYLOG_CREATION, (long) 1.2 * getEntryLogSizeLimit());</span>
+    }
+
+    /**
+     * Sets the minimum safe usable size to be available in ledger directory for Bookie to create entry log files.
+     *
+     * &lt;p&gt;This parameter allows creating entry log files when there are enough disk spaces, even when the bookie
+     * is running at readonly mode because of the disk usage is exceeding {@link #getDiskUsageThreshold()}. Because
+     * compaction, journal replays can still write data to disks when a bookie is readonly.
+     *
+     * @param minUsableSizeForEntryLogCreation minimum safe usable size to be available in ledger directory
+     * @return server configuration
+     */
+    public ServerConfiguration setMinUsableSizeForEntryLogCreation(long minUsableSizeForEntryLogCreation) {
+<span class="nc" id="L3078">        this.setProperty(MIN_USABLESIZE_FOR_ENTRYLOG_CREATION, minUsableSizeForEntryLogCreation);</span>
+<span class="nc" id="L3079">        return this;</span>
+    }
+
+    /**
+     * Gets the minimum safe usable size to be available in ledger directory for Bookie to accept high priority writes.
+     *
+     * &lt;p&gt;If not set, it is the value of {@link #getMinUsableSizeForEntryLogCreation()}.
+     *
+     * @return the minimum safe usable size per ledger directory for bookie to accept high priority writes.
+     */
+    public long getMinUsableSizeForHighPriorityWrites() {
+<span class="fc" id="L3090">        return this.getLong(MIN_USABLESIZE_FOR_HIGH_PRIORITY_WRITES, getMinUsableSizeForEntryLogCreation());</span>
+    }
+
+    /**
+     * Sets the minimum safe usable size to be available in ledger directory for Bookie to accept high priority writes.
+     *
+     * @param minUsableSizeForHighPriorityWrites minimum safe usable size per ledger directory for Bookie to accept
+     *                                           high priority writes
+     * @return server configuration.
+     */
+    public ServerConfiguration setMinUsableSizeForHighPriorityWrites(long minUsableSizeForHighPriorityWrites) {
+<span class="nc" id="L3101">        this.setProperty(MIN_USABLESIZE_FOR_HIGH_PRIORITY_WRITES, minUsableSizeForHighPriorityWrites);</span>
+<span class="nc" id="L3102">        return this;</span>
+    }
+
+    /**
+     * returns whether it is allowed to have multiple ledger/index/journal
+     * Directories in the same filesystem diskpartition.
+     *
+     * @return
+     */
+    public boolean isAllowMultipleDirsUnderSameDiskPartition() {
+<span class="nc" id="L3112">        return this.getBoolean(ALLOW_MULTIPLEDIRS_UNDER_SAME_DISKPARTITION, true);</span>
+    }
+
+    /**
+     * Configure the Bookie to allow/disallow multiple ledger/index/journal
+     * directories in the same filesystem diskpartition.
+     *
+     * @param allow
+     *
+     * @return server configuration object.
+     */
+    public ServerConfiguration setAllowMultipleDirsUnderSameDiskPartition(boolean allow) {
+<span class="nc" id="L3124">        this.setProperty(ALLOW_MULTIPLEDIRS_UNDER_SAME_DISKPARTITION, allow);</span>
+<span class="nc" id="L3125">        return this;</span>
+    }
+
+    /**
+     * Get whether to start the http server or not.
+     *
+     * @return true - if http server should start
+     */
+    public boolean isHttpServerEnabled() {
+<span class="nc" id="L3134">        return getBoolean(HTTP_SERVER_ENABLED, false);</span>
+    }
+
+    /**
+     * Set whether to start the http server or not.
+     *
+     * @param enabled
+     *            - true if we should start http server
+     * @return ServerConfiguration
+     */
+    public ServerConfiguration setHttpServerEnabled(boolean enabled) {
+<span class="nc" id="L3145">        setProperty(HTTP_SERVER_ENABLED, enabled);</span>
+<span class="nc" id="L3146">        return this;</span>
+    }
+
+    /**
+     * Get the http server port.
+     *
+     * @return http server port
+     */
+    public int getHttpServerPort() {
+<span class="nc" id="L3155">        return getInt(HTTP_SERVER_PORT, 8080);</span>
+    }
+
+    /**
+     * Set Http server port listening on.
+     *
+     * @param port
+     *          Port to listen on
+     * @return server configuration
+     */
+    public ServerConfiguration setHttpServerPort(int port) {
+<span class="nc" id="L3166">        setProperty(HTTP_SERVER_PORT, port);</span>
+<span class="nc" id="L3167">        return this;</span>
+    }
+
+    /**
+     * Get the extra list of server lifecycle components to enable on a bookie server.
+     *
+     * @return the extra list of server lifecycle components to enable on a bookie server.
+     */
+    public String[] getExtraServerComponents() {
+<span class="nc" id="L3176">        String extraServerComponentsStr = getString(EXTRA_SERVER_COMPONENTS);</span>
+<span class="nc bnc" id="L3177" title="All 2 branches missed.">        if (Strings.isNullOrEmpty(extraServerComponentsStr)) {</span>
+<span class="nc" id="L3178">            return null;</span>
+        }
+<span class="nc" id="L3180">        return this.getStringArray(EXTRA_SERVER_COMPONENTS);</span>
+    }
+
+    /**
+     * Set the extra list of server lifecycle components to enable on a bookie server.
+     *
+     * @param componentClasses
+     *          the list of server lifecycle components to enable on a bookie server.
+     * @return server configuration.
+     */
+    public ServerConfiguration setExtraServerComponents(String[] componentClasses) {
+<span class="nc" id="L3191">        this.setProperty(EXTRA_SERVER_COMPONENTS, componentClasses);</span>
+<span class="nc" id="L3192">        return this;</span>
+    }
+
+    /**
+     * Return the flag whether to ignore startup failures on loading server components specified at
+     * {@link #getExtraServerComponents()}.
+     *
+     * @return the flag whether to ignore startup failures on loading server components specified at
+     * {@link #getExtraServerComponents()}. The default value is &lt;tt&gt;false&lt;/tt&gt;.
+     */
+    public boolean getIgnoreExtraServerComponentsStartupFailures() {
+<span class="nc" id="L3203">        return getBoolean(IGNORE_EXTRA_SERVER_COMPONENTS_STARTUP_FAILURES, false);</span>
+    }
+
+    /**
+     * Set the flag whether to ignore startup failures on loading server components specified at
+     * {@link #getExtraServerComponents()}.
+     *
+     * @param enabled flag to enable/disable ignoring startup failures on loading server components.
+     * @return server configuration.
+     */
+    public ServerConfiguration setIgnoreExtraServerComponentsStartupFailures(boolean enabled) {
+<span class="nc" id="L3214">        setProperty(IGNORE_EXTRA_SERVER_COMPONENTS_STARTUP_FAILURES, enabled);</span>
+<span class="nc" id="L3215">        return this;</span>
+    }
+
+    /**
+     * Get server netty channel write buffer low water mark.
+     *
+     * @return netty channel write buffer low water mark.
+     */
+    public int getServerWriteBufferLowWaterMark() {
+<span class="nc" id="L3224">        return getInt(SERVER_WRITEBUFFER_LOW_WATER_MARK, 384 * 1024);</span>
+    }
+
+    /**
+     * Set server netty channel write buffer low water mark.
+     *
+     * @param waterMark
+     *          netty channel write buffer low water mark.
+     * @return client configuration.
+     */
+    public ServerConfiguration setServerWriteBufferLowWaterMark(int waterMark) {
+<span class="nc" id="L3235">        setProperty(SERVER_WRITEBUFFER_LOW_WATER_MARK, waterMark);</span>
+<span class="nc" id="L3236">        return this;</span>
+    }
+
+    /**
+     * Get server netty channel write buffer high water mark.
+     *
+     * @return netty channel write buffer high water mark.
+     */
+    public int getServerWriteBufferHighWaterMark() {
+<span class="nc" id="L3245">        return getInt(SERVER_WRITEBUFFER_HIGH_WATER_MARK, 512 * 1024);</span>
+    }
+
+    /**
+     * Set server netty channel write buffer high water mark.
+     *
+     * @param waterMark
+     *          netty channel write buffer high water mark.
+     * @return client configuration.
+     */
+    public ServerConfiguration setServerWriteBufferHighWaterMark(int waterMark) {
+<span class="nc" id="L3256">        setProperty(SERVER_WRITEBUFFER_HIGH_WATER_MARK, waterMark);</span>
+<span class="nc" id="L3257">        return this;</span>
+    }
+    /**
+     * Set registration manager class.
+     *
+     * @param regManagerClass
+     *            ManagerClass
+     * @deprecated since 4.7.0, in favor of using {@link #setMetadataServiceUri(String)}
+     */
+    @Deprecated
+    public void setRegistrationManagerClass(
+            Class&lt;? extends RegistrationManager&gt; regManagerClass) {
+<span class="nc" id="L3269">        setProperty(REGISTRATION_MANAGER_CLASS, regManagerClass);</span>
+<span class="nc" id="L3270">    }</span>
+
+    /**
+     * Get Registration Manager Class.
+     *
+     * @return registration manager class.
+     * @deprecated since 4.7.0, in favor of using {@link #getMetadataServiceUri()}
+     */
+    @Deprecated
+    public Class&lt;? extends RegistrationManager&gt; getRegistrationManagerClass()
+            throws ConfigurationException {
+<span class="nc" id="L3281">        return ReflectionUtils.getClass(this, REGISTRATION_MANAGER_CLASS,</span>
+                ZKRegistrationManager.class, RegistrationManager.class,
+                DEFAULT_LOADER);
+    }
+
+    @Override
+    protected ServerConfiguration getThis() {
+<span class="fc" id="L3288">        return this;</span>
+    }
+
+    /*
+     * specifies if entryLog per ledger is enabled. If it is enabled, then there
+     * would be a active entrylog for each ledger
+     */
+    public boolean isEntryLogPerLedgerEnabled() {
+<span class="fc" id="L3296">        return this.getBoolean(ENTRY_LOG_PER_LEDGER_ENABLED, false);</span>
+    }
+
+    /*
+     * enables/disables entrylog per ledger feature.
+     *
+     */
+    public ServerConfiguration setEntryLogPerLedgerEnabled(boolean entryLogPerLedgerEnabled) {
+<span class="nc" id="L3304">        this.setProperty(ENTRY_LOG_PER_LEDGER_ENABLED, Boolean.toString(entryLogPerLedgerEnabled));</span>
+<span class="nc" id="L3305">        return this;</span>
+    }
+
+    /*
+     * In the case of multipleentrylogs, multiple threads can be used to flush the memtable.
+     *
+     * Gets the number of threads used to flush entrymemtable
+     */
+    public int getNumOfMemtableFlushThreads() {
+<span class="nc" id="L3314">        return this.getInt(NUMBER_OF_MEMTABLE_FLUSH_THREADS, 8);</span>
+    }
+
+    /*
+     * Sets the number of threads used to flush entrymemtable, in the case of multiple entrylogs
+     *
+     */
+    public ServerConfiguration setNumOfMemtableFlushThreads(int numOfMemtableFlushThreads) {
+<span class="nc" id="L3322">        this.setProperty(NUMBER_OF_MEMTABLE_FLUSH_THREADS, Integer.toString(numOfMemtableFlushThreads));</span>
+<span class="nc" id="L3323">        return this;</span>
+    }
+
+    /*
+     * in entryLogPerLedger feature, this specifies the time, once this duration
+     * has elapsed after the entry's last access, that entry should be
+     * automatically removed from the cache
+     */
+    public int getEntrylogMapAccessExpiryTimeInSeconds() {
+<span class="nc" id="L3332">        return this.getInt(ENTRYLOGMAP_ACCESS_EXPIRYTIME_INSECONDS, 5 * 60);</span>
+    }
+
+    /*
+     * sets the time duration for entrylogMapAccessExpiryTimeInSeconds, which will be used for cache eviction
+     * policy, in entrylogperledger feature.
+     */
+    public ServerConfiguration setEntrylogMapAccessExpiryTimeInSeconds(int entrylogMapAccessExpiryTimeInSeconds) {
+<span class="nc" id="L3340">        this.setProperty(ENTRYLOGMAP_ACCESS_EXPIRYTIME_INSECONDS,</span>
+<span class="nc" id="L3341">                Integer.toString(entrylogMapAccessExpiryTimeInSeconds));</span>
+<span class="nc" id="L3342">        return this;</span>
+    }
+
+    /*
+     * get the maximum number of entrylogs that can be active at a given point
+     * in time.
+     */
+    public int getMaximumNumberOfActiveEntryLogs() {
+<span class="nc" id="L3350">        return this.getInt(MAXIMUM_NUMBER_OF_ACTIVE_ENTRYLOGS, 500);</span>
+    }
+
+    /*
+     * sets the maximum number of entrylogs that can be active at a given point
+     * in time.
+     */
+    public ServerConfiguration setMaximumNumberOfActiveEntryLogs(int maximumNumberOfActiveEntryLogs) {
+<span class="nc" id="L3358">        this.setProperty(MAXIMUM_NUMBER_OF_ACTIVE_ENTRYLOGS,</span>
+<span class="nc" id="L3359">                Integer.toString(maximumNumberOfActiveEntryLogs));</span>
+<span class="nc" id="L3360">        return this;</span>
+    }
+
+    /*
+     * in EntryLogManagerForEntryLogPerLedger, this config value specifies the
+     * metrics cache size limits in multiples of entrylogMap cache size limits.
+     */
+    public int getEntryLogPerLedgerCounterLimitsMultFactor() {
+<span class="nc" id="L3368">        return this.getInt(ENTRY_LOG_PER_LEDGER_COUNTER_LIMITS_MULT_FACTOR, 10);</span>
+    }
+
+    /*
+     * in EntryLogManagerForEntryLogPerLedger, this config value specifies the
+     * metrics cache size limits in multiples of entrylogMap cache size limits.
+     */
+    public ServerConfiguration setEntryLogPerLedgerCounterLimitsMultFactor(
+            int entryLogPerLedgerCounterLimitsMultFactor) {
+<span class="nc" id="L3377">        this.setProperty(ENTRY_LOG_PER_LEDGER_COUNTER_LIMITS_MULT_FACTOR,</span>
+<span class="nc" id="L3378">                Integer.toString(entryLogPerLedgerCounterLimitsMultFactor));</span>
+<span class="nc" id="L3379">        return this;</span>
+    }
+
+    /**
+     * True if a local consistency check should be performed on startup.
+     */
+    public boolean isLocalConsistencyCheckOnStartup() {
+<span class="nc" id="L3386">        return this.getBoolean(LOCAL_CONSISTENCY_CHECK_ON_STARTUP, false);</span>
+    }
+
+    /**
+     * Get the authorized roles.
+     *
+     * @return String array of configured auth roles.
+     */
+    public String[] getAuthorizedRoles() {
+<span class="nc" id="L3395">        return getStringArray(AUTHORIZED_ROLES);</span>
+    }
+
+    /**
+     * Set authorized roles.
+     *
+     * @return Configuration Object with roles set
+     */
+    public ServerConfiguration setAuthorizedRoles(String roles) {
+<span class="nc" id="L3404">        this.setProperty(AUTHORIZED_ROLES, roles);</span>
+<span class="nc" id="L3405">        return this;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

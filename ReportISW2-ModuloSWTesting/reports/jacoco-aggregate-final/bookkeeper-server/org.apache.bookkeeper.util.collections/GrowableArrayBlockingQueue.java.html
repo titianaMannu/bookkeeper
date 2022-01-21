@@ -1,0 +1,360 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>GrowableArrayBlockingQueue.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.util.collections</a> &gt; <span class="el_source">GrowableArrayBlockingQueue.java</span></div><h1>GrowableArrayBlockingQueue.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.util.collections;
+
+import java.util.AbstractQueue;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.NoSuchElementException;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
+
+import org.apache.bookkeeper.util.MathUtils;
+
+
+/**
+ * This implements a {@link BlockingQueue} backed by an array with no fixed capacity.
+ *
+ * &lt;p&gt;When the capacity is reached, data will be moved to a bigger array.
+ *
+ */
+public class GrowableArrayBlockingQueue&lt;T&gt; extends AbstractQueue&lt;T&gt; implements BlockingQueue&lt;T&gt; {
+
+<span class="nc" id="L44">    private final ReentrantLock headLock = new ReentrantLock();</span>
+<span class="nc" id="L45">    private final PaddedInt headIndex = new PaddedInt();</span>
+<span class="nc" id="L46">    private final PaddedInt tailIndex = new PaddedInt();</span>
+<span class="nc" id="L47">    private final ReentrantLock tailLock = new ReentrantLock();</span>
+<span class="nc" id="L48">    private final Condition isNotEmpty = headLock.newCondition();</span>
+
+    private T[] data;
+    @SuppressWarnings(&quot;rawtypes&quot;)
+<span class="nc" id="L52">    private static final AtomicIntegerFieldUpdater&lt;GrowableArrayBlockingQueue&gt; SIZE_UPDATER =</span>
+<span class="nc" id="L53">            AtomicIntegerFieldUpdater.newUpdater(GrowableArrayBlockingQueue.class, &quot;size&quot;);</span>
+<span class="nc" id="L54">    @SuppressWarnings(&quot;unused&quot;)</span>
+    private volatile int size = 0;
+
+    public GrowableArrayBlockingQueue() {
+<span class="nc" id="L58">        this(64);</span>
+<span class="nc" id="L59">    }</span>
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+<span class="nc" id="L62">    public GrowableArrayBlockingQueue(int initialCapacity) {</span>
+<span class="nc" id="L63">        headIndex.value = 0;</span>
+<span class="nc" id="L64">        tailIndex.value = 0;</span>
+
+<span class="nc" id="L66">        int capacity = MathUtils.findNextPositivePowerOfTwo(initialCapacity);</span>
+<span class="nc" id="L67">        data = (T[]) new Object[capacity];</span>
+<span class="nc" id="L68">    }</span>
+
+    @Override
+    public T remove() {
+<span class="nc" id="L72">        T item = poll();</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        if (item == null) {</span>
+<span class="nc" id="L74">            throw new NoSuchElementException();</span>
+        }
+
+<span class="nc" id="L77">        return item;</span>
+    }
+
+    @Override
+    public T poll() {
+<span class="nc" id="L82">        headLock.lock();</span>
+        try {
+<span class="nc bnc" id="L84" title="All 2 branches missed.">            if (SIZE_UPDATER.get(this) &gt; 0) {</span>
+<span class="nc" id="L85">                T item = data[headIndex.value];</span>
+<span class="nc" id="L86">                headIndex.value = (headIndex.value + 1) &amp; (data.length - 1);</span>
+<span class="nc" id="L87">                SIZE_UPDATER.decrementAndGet(this);</span>
+<span class="nc" id="L88">                return item;</span>
+            } else {
+<span class="nc" id="L90">                return null;</span>
+            }
+        } finally {
+<span class="nc" id="L93">            headLock.unlock();</span>
+        }
+    }
+
+    @Override
+    public T element() {
+<span class="nc" id="L99">        T item = peek();</span>
+<span class="nc bnc" id="L100" title="All 2 branches missed.">        if (item == null) {</span>
+<span class="nc" id="L101">            throw new NoSuchElementException();</span>
+        }
+
+<span class="nc" id="L104">        return item;</span>
+    }
+
+    @Override
+    public T peek() {
+<span class="nc" id="L109">        headLock.lock();</span>
+        try {
+<span class="nc bnc" id="L111" title="All 2 branches missed.">            if (SIZE_UPDATER.get(this) &gt; 0) {</span>
+<span class="nc" id="L112">                return data[headIndex.value];</span>
+            } else {
+<span class="nc" id="L114">                return null;</span>
+            }
+        } finally {
+<span class="nc" id="L117">            headLock.unlock();</span>
+        }
+    }
+
+    @Override
+    public boolean offer(T e) {
+        // Queue is unbounded and it will never reject new items
+<span class="nc" id="L124">        put(e);</span>
+<span class="nc" id="L125">        return true;</span>
+    }
+
+    @Override
+    public void put(T e) {
+<span class="nc" id="L130">        tailLock.lock();</span>
+
+<span class="nc" id="L132">        boolean wasEmpty = false;</span>
+
+        try {
+<span class="nc bnc" id="L135" title="All 2 branches missed.">            if (SIZE_UPDATER.get(this) == data.length) {</span>
+<span class="nc" id="L136">                expandArray();</span>
+            }
+
+<span class="nc" id="L139">            data[tailIndex.value] = e;</span>
+<span class="nc" id="L140">            tailIndex.value = (tailIndex.value + 1) &amp; (data.length - 1);</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">            if (SIZE_UPDATER.getAndIncrement(this) == 0) {</span>
+<span class="nc" id="L142">                wasEmpty = true;</span>
+            }
+        } finally {
+<span class="nc" id="L145">            tailLock.unlock();</span>
+        }
+
+<span class="nc bnc" id="L148" title="All 2 branches missed.">        if (wasEmpty) {</span>
+<span class="nc" id="L149">            headLock.lock();</span>
+            try {
+<span class="nc" id="L151">                isNotEmpty.signal();</span>
+            } finally {
+<span class="nc" id="L153">                headLock.unlock();</span>
+            }
+        }
+<span class="nc" id="L156">    }</span>
+
+    @Override
+    public boolean add(T e) {
+<span class="nc" id="L160">        put(e);</span>
+<span class="nc" id="L161">        return true;</span>
+    }
+
+    @Override
+    public boolean offer(T e, long timeout, TimeUnit unit) {
+        // Queue is unbounded and it will never reject new items
+<span class="nc" id="L167">        put(e);</span>
+<span class="nc" id="L168">        return true;</span>
+    }
+
+    @Override
+    public T take() throws InterruptedException {
+<span class="nc" id="L173">        headLock.lockInterruptibly();</span>
+
+        try {
+<span class="nc bnc" id="L176" title="All 2 branches missed.">            while (SIZE_UPDATER.get(this) == 0) {</span>
+<span class="nc" id="L177">                isNotEmpty.await();</span>
+            }
+
+<span class="nc" id="L180">            T item = data[headIndex.value];</span>
+<span class="nc" id="L181">            data[headIndex.value] = null;</span>
+<span class="nc" id="L182">            headIndex.value = (headIndex.value + 1) &amp; (data.length - 1);</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">            if (SIZE_UPDATER.decrementAndGet(this) &gt; 0) {</span>
+                // There are still entries to consume
+<span class="nc" id="L185">                isNotEmpty.signal();</span>
+            }
+<span class="nc" id="L187">            return item;</span>
+        } finally {
+<span class="nc" id="L189">            headLock.unlock();</span>
+        }
+    }
+
+    @Override
+    public T poll(long timeout, TimeUnit unit) throws InterruptedException {
+<span class="nc" id="L195">        headLock.lockInterruptibly();</span>
+
+        try {
+<span class="nc" id="L198">            long timeoutNanos = unit.toNanos(timeout);</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">            while (SIZE_UPDATER.get(this) == 0) {</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">                if (timeoutNanos &lt;= 0) {</span>
+<span class="nc" id="L201">                    return null;</span>
+                }
+
+<span class="nc" id="L204">                timeoutNanos = isNotEmpty.awaitNanos(timeoutNanos);</span>
+            }
+
+<span class="nc" id="L207">            T item = data[headIndex.value];</span>
+<span class="nc" id="L208">            data[headIndex.value] = null;</span>
+<span class="nc" id="L209">            headIndex.value = (headIndex.value + 1) &amp; (data.length - 1);</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">            if (SIZE_UPDATER.decrementAndGet(this) &gt; 0) {</span>
+                // There are still entries to consume
+<span class="nc" id="L212">                isNotEmpty.signal();</span>
+            }
+<span class="nc" id="L214">            return item;</span>
+        } finally {
+<span class="nc" id="L216">            headLock.unlock();</span>
+        }
+    }
+
+    @Override
+    public int remainingCapacity() {
+<span class="nc" id="L222">        return Integer.MAX_VALUE;</span>
+    }
+
+    @Override
+    public int drainTo(Collection&lt;? super T&gt; c) {
+<span class="nc" id="L227">        return drainTo(c, Integer.MAX_VALUE);</span>
+    }
+
+    @Override
+    public int drainTo(Collection&lt;? super T&gt; c, int maxElements) {
+<span class="nc" id="L232">        headLock.lock();</span>
+
+        try {
+<span class="nc" id="L235">            int drainedItems = 0;</span>
+<span class="nc" id="L236">            int size = SIZE_UPDATER.get(this);</span>
+
+<span class="nc bnc" id="L238" title="All 4 branches missed.">            while (size &gt; 0 &amp;&amp; drainedItems &lt; maxElements) {</span>
+<span class="nc" id="L239">                T item = data[headIndex.value];</span>
+<span class="nc" id="L240">                data[headIndex.value] = null;</span>
+<span class="nc" id="L241">                c.add(item);</span>
+
+<span class="nc" id="L243">                headIndex.value = (headIndex.value + 1) &amp; (data.length - 1);</span>
+<span class="nc" id="L244">                --size;</span>
+<span class="nc" id="L245">                ++drainedItems;</span>
+<span class="nc" id="L246">            }</span>
+
+<span class="nc bnc" id="L248" title="All 2 branches missed.">            if (SIZE_UPDATER.addAndGet(this, -drainedItems) &gt; 0) {</span>
+                // There are still entries to consume
+<span class="nc" id="L250">                isNotEmpty.signal();</span>
+            }
+
+<span class="nc" id="L253">            return drainedItems;</span>
+        } finally {
+<span class="nc" id="L255">            headLock.unlock();</span>
+        }
+    }
+
+    @Override
+    public void clear() {
+<span class="nc" id="L261">        headLock.lock();</span>
+
+        try {
+<span class="nc" id="L264">            int size = SIZE_UPDATER.get(this);</span>
+
+<span class="nc bnc" id="L266" title="All 2 branches missed.">            for (int i = 0; i &lt; size; i++) {</span>
+<span class="nc" id="L267">                data[headIndex.value] = null;</span>
+<span class="nc" id="L268">                headIndex.value = (headIndex.value + 1) &amp; (data.length - 1);</span>
+            }
+
+<span class="nc bnc" id="L271" title="All 2 branches missed.">            if (SIZE_UPDATER.addAndGet(this, -size) &gt; 0) {</span>
+                // There are still entries to consume
+<span class="nc" id="L273">                isNotEmpty.signal();</span>
+            }
+        } finally {
+<span class="nc" id="L276">            headLock.unlock();</span>
+        }
+<span class="nc" id="L278">    }</span>
+
+    @Override
+    public int size() {
+<span class="nc" id="L282">        return SIZE_UPDATER.get(this);</span>
+    }
+
+    @Override
+    public Iterator&lt;T&gt; iterator() {
+<span class="nc" id="L287">        throw new UnsupportedOperationException();</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L292">        StringBuilder sb = new StringBuilder();</span>
+
+<span class="nc" id="L294">        tailLock.lock();</span>
+<span class="nc" id="L295">        headLock.lock();</span>
+
+        try {
+<span class="nc" id="L298">            int headIndex = this.headIndex.value;</span>
+<span class="nc" id="L299">            int size = SIZE_UPDATER.get(this);</span>
+
+<span class="nc" id="L301">            sb.append('[');</span>
+
+<span class="nc bnc" id="L303" title="All 2 branches missed.">            for (int i = 0; i &lt; size; i++) {</span>
+<span class="nc" id="L304">                T item = data[headIndex];</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">                if (i &gt; 0) {</span>
+<span class="nc" id="L306">                    sb.append(&quot;, &quot;);</span>
+                }
+
+<span class="nc" id="L309">                sb.append(item);</span>
+
+<span class="nc" id="L311">                headIndex = (headIndex + 1) &amp; (data.length - 1);</span>
+            }
+
+<span class="nc" id="L314">            sb.append(']');</span>
+        } finally {
+<span class="nc" id="L316">            headLock.unlock();</span>
+<span class="nc" id="L317">            tailLock.unlock();</span>
+        }
+<span class="nc" id="L319">        return sb.toString();</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private void expandArray() {
+        // We already hold the tailLock
+<span class="nc" id="L325">        headLock.lock();</span>
+
+        try {
+<span class="nc" id="L328">            int size = SIZE_UPDATER.get(this);</span>
+<span class="nc" id="L329">            int newCapacity = data.length * 2;</span>
+<span class="nc" id="L330">            T[] newData = (T[]) new Object[newCapacity];</span>
+
+<span class="nc" id="L332">            int oldHeadIndex = headIndex.value;</span>
+<span class="nc" id="L333">            int newTailIndex = 0;</span>
+
+<span class="nc bnc" id="L335" title="All 2 branches missed.">            for (int i = 0; i &lt; size; i++) {</span>
+<span class="nc" id="L336">                newData[newTailIndex++] = data[oldHeadIndex];</span>
+<span class="nc" id="L337">                oldHeadIndex = (oldHeadIndex + 1) &amp; (data.length - 1);</span>
+            }
+
+<span class="nc" id="L340">            data = newData;</span>
+<span class="nc" id="L341">            headIndex.value = 0;</span>
+<span class="nc" id="L342">            tailIndex.value = size;</span>
+        } finally {
+<span class="nc" id="L344">            headLock.unlock();</span>
+        }
+<span class="nc" id="L346">    }</span>
+
+<span class="nc" id="L348">    static final class PaddedInt {</span>
+        private int value;
+
+        // Padding to avoid false sharing
+<span class="nc" id="L352">        public volatile int pi1 = 1;</span>
+<span class="nc" id="L353">        public volatile long p1 = 1L, p2 = 2L, p3 = 3L, p4 = 4L, p5 = 5L, p6 = 6L;</span>
+
+        public long exposeToAvoidOptimization() {
+<span class="nc" id="L356">            return pi1 + p1 + p2 + p3 + p4 + p5 + p6;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

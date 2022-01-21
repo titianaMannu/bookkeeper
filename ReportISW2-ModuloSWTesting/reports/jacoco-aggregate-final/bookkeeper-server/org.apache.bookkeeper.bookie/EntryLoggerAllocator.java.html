@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>EntryLoggerAllocator.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">EntryLoggerAllocator.java</span></div><h1>EntryLoggerAllocator.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.bookkeeper.bookie.TransactionalEntryLogCompactor.COMPACTING_SUFFIX;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.Unpooled;
+
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.RandomAccessFile;
+import java.nio.channels.FileChannel;
+import java.util.List;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.bookie.EntryLogger.BufferedLogChannel;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+
+/**
+ * An allocator pre-allocates entry log files.
+ */
+<span class="fc" id="L53">@Slf4j</span>
+class EntryLoggerAllocator {
+
+    private long preallocatedLogId;
+<span class="fc" id="L57">    Future&lt;BufferedLogChannel&gt; preallocation = null;</span>
+    ExecutorService allocatorExecutor;
+    private final ServerConfiguration conf;
+    private final LedgerDirsManager ledgerDirsManager;
+<span class="fc" id="L61">    private final Object createEntryLogLock = new Object();</span>
+<span class="fc" id="L62">    private final Object createCompactionLogLock = new Object();</span>
+    private final EntryLogger.RecentEntryLogsStatus recentlyCreatedEntryLogsStatus;
+    private final boolean entryLogPreAllocationEnabled;
+    private final ByteBufAllocator byteBufAllocator;
+<span class="fc" id="L66">    final ByteBuf logfileHeader = Unpooled.buffer(EntryLogger.LOGFILE_HEADER_SIZE);</span>
+
+    EntryLoggerAllocator(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
+            EntryLogger.RecentEntryLogsStatus recentlyCreatedEntryLogsStatus, long logId,
+<span class="fc" id="L70">            ByteBufAllocator byteBufAllocator) {</span>
+<span class="fc" id="L71">        this.conf = conf;</span>
+<span class="fc" id="L72">        this.byteBufAllocator = byteBufAllocator;</span>
+<span class="fc" id="L73">        this.ledgerDirsManager = ledgerDirsManager;</span>
+<span class="fc" id="L74">        this.preallocatedLogId = logId;</span>
+<span class="fc" id="L75">        this.recentlyCreatedEntryLogsStatus = recentlyCreatedEntryLogsStatus;</span>
+<span class="fc" id="L76">        this.entryLogPreAllocationEnabled = conf.isEntryLogFilePreAllocationEnabled();</span>
+<span class="fc" id="L77">        this.allocatorExecutor = Executors.newSingleThreadExecutor();</span>
+
+        // Initialize the entry log header buffer. This cannot be a static object
+        // since in our unit tests, we run multiple Bookies and thus EntryLoggers
+        // within the same JVM. All of these Bookie instances access this header
+        // so there can be race conditions when entry logs are rolled over and
+        // this header buffer is cleared before writing it into the new logChannel.
+<span class="fc" id="L84">        logfileHeader.writeBytes(&quot;BKLO&quot;.getBytes(UTF_8));</span>
+<span class="fc" id="L85">        logfileHeader.writeInt(EntryLogger.HEADER_CURRENT_VERSION);</span>
+<span class="fc" id="L86">        logfileHeader.writerIndex(EntryLogger.LOGFILE_HEADER_SIZE);</span>
+
+<span class="fc" id="L88">    }</span>
+
+    synchronized long getPreallocatedLogId() {
+<span class="nc" id="L91">        return preallocatedLogId;</span>
+    }
+
+    BufferedLogChannel createNewLog(File dirForNextEntryLog) throws IOException {
+<span class="fc" id="L95">        synchronized (createEntryLogLock) {</span>
+            BufferedLogChannel bc;
+<span class="pc bpc" id="L97" title="1 of 2 branches missed.">            if (!entryLogPreAllocationEnabled){</span>
+                // create a new log directly
+<span class="nc" id="L99">                bc = allocateNewLog(dirForNextEntryLog);</span>
+<span class="nc" id="L100">                return bc;</span>
+            } else {
+                // allocate directly to response request
+<span class="pc bpc" id="L103" title="1 of 2 branches missed.">                if (null == preallocation){</span>
+<span class="fc" id="L104">                    bc = allocateNewLog(dirForNextEntryLog);</span>
+                } else {
+                    // has a preallocated entry log
+                    try {
+<span class="nc" id="L108">                        bc = preallocation.get();</span>
+<span class="nc" id="L109">                    } catch (ExecutionException ee) {</span>
+<span class="nc bnc" id="L110" title="All 2 branches missed.">                        if (ee.getCause() instanceof IOException) {</span>
+<span class="nc" id="L111">                            throw (IOException) (ee.getCause());</span>
+                        } else {
+<span class="nc" id="L113">                            throw new IOException(&quot;Error to execute entry log allocation.&quot;, ee);</span>
+                        }
+<span class="nc" id="L115">                    } catch (CancellationException ce) {</span>
+<span class="nc" id="L116">                        throw new IOException(&quot;Task to allocate a new entry log is cancelled.&quot;, ce);</span>
+<span class="nc" id="L117">                    } catch (InterruptedException ie) {</span>
+<span class="nc" id="L118">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L119">                        throw new IOException(&quot;Intrrupted when waiting a new entry log to be allocated.&quot;, ie);</span>
+<span class="nc" id="L120">                    }</span>
+                }
+                // preallocate a new log in background upon every call
+<span class="fc" id="L123">                preallocation = allocatorExecutor.submit(() -&gt; allocateNewLog(dirForNextEntryLog));</span>
+<span class="fc" id="L124">                return bc;</span>
+            }
+        }
+    }
+
+    BufferedLogChannel createNewLogForCompaction(File dirForNextEntryLog) throws IOException {
+<span class="nc" id="L130">        synchronized (createCompactionLogLock) {</span>
+<span class="nc" id="L131">            return allocateNewLog(dirForNextEntryLog, COMPACTING_SUFFIX);</span>
+        }
+    }
+
+    private synchronized BufferedLogChannel allocateNewLog(File dirForNextEntryLog) throws IOException {
+<span class="fc" id="L136">        return allocateNewLog(dirForNextEntryLog, &quot;.log&quot;);</span>
+    }
+
+    /**
+     * Allocate a new log file.
+     */
+    private synchronized BufferedLogChannel allocateNewLog(File dirForNextEntryLog, String suffix) throws IOException {
+<span class="fc" id="L143">        List&lt;File&gt; ledgersDirs = ledgerDirsManager.getAllLedgerDirs();</span>
+        String logFileName;
+        // It would better not to overwrite existing entry log files
+<span class="fc" id="L146">        File testLogFile = null;</span>
+        do {
+<span class="pc bpc" id="L148" title="1 of 2 branches missed.">            if (preallocatedLogId &gt;= Integer.MAX_VALUE) {</span>
+<span class="nc" id="L149">                preallocatedLogId = 0;</span>
+            } else {
+<span class="fc" id="L151">                ++preallocatedLogId;</span>
+            }
+<span class="fc" id="L153">            logFileName = Long.toHexString(preallocatedLogId) + suffix;</span>
+<span class="fc bfc" id="L154" title="All 2 branches covered.">            for (File dir : ledgersDirs) {</span>
+<span class="fc" id="L155">                testLogFile = new File(dir, logFileName);</span>
+<span class="pc bpc" id="L156" title="1 of 2 branches missed.">                if (testLogFile.exists()) {</span>
+<span class="nc" id="L157">                    log.warn(&quot;Found existed entry log &quot; + testLogFile</span>
+                           + &quot; when trying to create it as a new log.&quot;);
+<span class="nc" id="L159">                    testLogFile = null;</span>
+<span class="nc" id="L160">                    break;</span>
+                }
+<span class="fc" id="L162">            }</span>
+<span class="pc bpc" id="L163" title="1 of 2 branches missed.">        } while (testLogFile == null);</span>
+
+<span class="fc" id="L165">        File newLogFile = new File(dirForNextEntryLog, logFileName);</span>
+<span class="fc" id="L166">        FileChannel channel = new RandomAccessFile(newLogFile, &quot;rw&quot;).getChannel();</span>
+
+<span class="fc" id="L168">        BufferedLogChannel logChannel = new BufferedLogChannel(byteBufAllocator, channel, conf.getWriteBufferBytes(),</span>
+<span class="fc" id="L169">                conf.getReadBufferBytes(), preallocatedLogId, newLogFile, conf.getFlushIntervalInBytes());</span>
+<span class="fc" id="L170">        logfileHeader.readerIndex(0);</span>
+<span class="fc" id="L171">        logChannel.write(logfileHeader);</span>
+
+<span class="fc bfc" id="L173" title="All 2 branches covered.">        for (File f : ledgersDirs) {</span>
+<span class="fc" id="L174">            setLastLogId(f, preallocatedLogId);</span>
+<span class="fc" id="L175">        }</span>
+
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">        if (suffix.equals(EntryLogger.LOG_FILE_SUFFIX)) {</span>
+<span class="fc" id="L178">            recentlyCreatedEntryLogsStatus.createdEntryLog(preallocatedLogId);</span>
+        }
+
+<span class="fc" id="L181">        log.info(&quot;Created new entry log file {} for logId {}.&quot;, newLogFile, preallocatedLogId);</span>
+<span class="fc" id="L182">        return logChannel;</span>
+    }
+
+    /**
+     * writes the given id to the &quot;lastId&quot; file in the given directory.
+     */
+    private void setLastLogId(File dir, long logId) throws IOException {
+        FileOutputStream fos;
+<span class="fc" id="L190">        fos = new FileOutputStream(new File(dir, &quot;lastId&quot;));</span>
+<span class="fc" id="L191">        BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(fos, UTF_8));</span>
+        try {
+<span class="fc" id="L193">            bw.write(Long.toHexString(logId) + &quot;\n&quot;);</span>
+<span class="fc" id="L194">            bw.flush();</span>
+<span class="nc" id="L195">        } catch (IOException e) {</span>
+<span class="nc" id="L196">            log.warn(&quot;Failed write lastId file&quot;);</span>
+        } finally {
+            try {
+<span class="fc" id="L199">                bw.close();</span>
+<span class="nc" id="L200">            } catch (IOException e) {</span>
+<span class="nc" id="L201">                log.error(&quot;Could not close lastId file in {}&quot;, dir.getPath());</span>
+<span class="fc" id="L202">            }</span>
+        }
+<span class="fc" id="L204">    }</span>
+
+    /**
+     * Stop the allocator.
+     */
+    void stop() {
+        // wait until the preallocation finished.
+<span class="fc" id="L211">        allocatorExecutor.shutdown();</span>
+        try {
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">            if (!allocatorExecutor.awaitTermination(5, TimeUnit.SECONDS)) {</span>
+<span class="nc" id="L214">                log.warn(&quot;Timedout while awaiting for allocatorExecutor's termination, so force shuttingdown&quot;);</span>
+            }
+<span class="nc" id="L216">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L217">            log.warn(&quot;Got InterruptedException while awaiting termination of allocatorExecutor, so force shuttingdown&quot;);</span>
+<span class="nc" id="L218">            Thread.currentThread().interrupt();</span>
+<span class="fc" id="L219">        }</span>
+<span class="fc" id="L220">        allocatorExecutor.shutdownNow();</span>
+
+<span class="fc" id="L222">        log.info(&quot;Stopped entry logger preallocator.&quot;);</span>
+<span class="fc" id="L223">    }</span>
+
+    /**
+     * get the preallocation for tests.
+     */
+    Future&lt;BufferedLogChannel&gt; getPreallocationFuture(){
+<span class="nc" id="L229">        return preallocation;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

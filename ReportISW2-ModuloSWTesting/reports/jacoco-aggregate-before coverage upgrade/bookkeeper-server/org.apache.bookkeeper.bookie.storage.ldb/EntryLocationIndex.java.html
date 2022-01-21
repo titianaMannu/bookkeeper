@@ -1,0 +1,274 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>EntryLocationIndex.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie.storage.ldb</a> &gt; <span class="el_source">EntryLocationIndex.java</span></div><h1>EntryLocationIndex.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie.storage.ldb;
+
+import com.google.common.collect.Iterables;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.nio.file.FileSystems;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.bookkeeper.bookie.Bookie;
+import org.apache.bookkeeper.bookie.EntryLocation;
+import org.apache.bookkeeper.bookie.storage.ldb.KeyValueStorage.Batch;
+import org.apache.bookkeeper.bookie.storage.ldb.KeyValueStorageFactory.DbConfigType;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.util.collections.ConcurrentLongHashSet;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Maintains an index of the entry locations in the EntryLogger.
+ *
+ * &lt;p&gt;For each ledger multiple entries are stored in the same &quot;record&quot;, represented
+ * by the {@link LedgerIndexPage} class.
+ */
+public class EntryLocationIndex implements Closeable {
+
+    private final KeyValueStorage locationsDb;
+<span class="fc" id="L51">    private final ConcurrentLongHashSet deletedLedgers = new ConcurrentLongHashSet();</span>
+
+    private final EntryLocationIndexStats stats;
+
+    public EntryLocationIndex(ServerConfiguration conf, KeyValueStorageFactory storageFactory, String basePath,
+<span class="fc" id="L56">            StatsLogger stats) throws IOException {</span>
+<span class="fc" id="L57">        String locationsDbPath = FileSystems.getDefault().getPath(basePath, &quot;locations&quot;).toFile().toString();</span>
+<span class="fc" id="L58">        locationsDb = storageFactory.newKeyValueStorage(locationsDbPath, DbConfigType.Huge, conf);</span>
+
+<span class="fc" id="L60">        this.stats = new EntryLocationIndexStats(</span>
+            stats,
+            () -&gt; {
+                try {
+<span class="nc" id="L64">                    return locationsDb.count();</span>
+<span class="nc" id="L65">                } catch (IOException e) {</span>
+<span class="nc" id="L66">                    return -1L;</span>
+                }
+            });
+<span class="fc" id="L69">    }</span>
+
+    @Override
+    public void close() throws IOException {
+<span class="fc" id="L73">        locationsDb.close();</span>
+<span class="fc" id="L74">    }</span>
+
+    public long getLocation(long ledgerId, long entryId) throws IOException {
+<span class="fc" id="L77">        LongPairWrapper key = LongPairWrapper.get(ledgerId, entryId);</span>
+<span class="fc" id="L78">        LongWrapper value = LongWrapper.get();</span>
+
+        try {
+<span class="pc bpc" id="L81" title="1 of 2 branches missed.">            if (locationsDb.get(key.array, value.array) &lt; 0) {</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">                if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L83">                    log.debug(&quot;Entry not found {}@{} in db index&quot;, ledgerId, entryId);</span>
+                }
+<span class="nc" id="L85">                return 0;</span>
+            }
+
+<span class="fc" id="L88">            return value.getValue();</span>
+        } finally {
+<span class="fc" id="L90">            key.recycle();</span>
+<span class="fc" id="L91">            value.recycle();</span>
+        }
+    }
+
+    public long getLastEntryInLedger(long ledgerId) throws IOException {
+<span class="nc bnc" id="L96" title="All 2 branches missed.">        if (deletedLedgers.contains(ledgerId)) {</span>
+            // Ledger already deleted
+<span class="nc" id="L98">            return -1;</span>
+        }
+
+<span class="nc" id="L101">        return getLastEntryInLedgerInternal(ledgerId);</span>
+    }
+
+    private long getLastEntryInLedgerInternal(long ledgerId) throws IOException {
+<span class="nc" id="L105">        LongPairWrapper maxEntryId = LongPairWrapper.get(ledgerId, Long.MAX_VALUE);</span>
+
+        // Search the last entry in storage
+<span class="nc" id="L108">        Entry&lt;byte[], byte[]&gt; entry = locationsDb.getFloor(maxEntryId.array);</span>
+<span class="nc" id="L109">        maxEntryId.recycle();</span>
+
+<span class="nc bnc" id="L111" title="All 2 branches missed.">        if (entry == null) {</span>
+<span class="nc" id="L112">            throw new Bookie.NoEntryException(ledgerId, -1);</span>
+        } else {
+<span class="nc" id="L114">            long foundLedgerId = ArrayUtil.getLong(entry.getKey(), 0);</span>
+<span class="nc" id="L115">            long lastEntryId = ArrayUtil.getLong(entry.getKey(), 8);</span>
+
+<span class="nc bnc" id="L117" title="All 2 branches missed.">            if (foundLedgerId == ledgerId) {</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">                if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L119">                    log.debug(&quot;Found last page in storage db for ledger {} - last entry: {}&quot;, ledgerId, lastEntryId);</span>
+                }
+<span class="nc" id="L121">                return lastEntryId;</span>
+            } else {
+<span class="nc" id="L123">                throw new Bookie.NoEntryException(ledgerId, -1);</span>
+            }
+        }
+    }
+
+    public void addLocation(long ledgerId, long entryId, long location) throws IOException {
+<span class="nc" id="L129">        Batch batch = locationsDb.newBatch();</span>
+<span class="nc" id="L130">        addLocation(batch, ledgerId, entryId, location);</span>
+<span class="nc" id="L131">        batch.flush();</span>
+<span class="nc" id="L132">        batch.close();</span>
+<span class="nc" id="L133">    }</span>
+
+    public Batch newBatch() {
+<span class="fc" id="L136">        return locationsDb.newBatch();</span>
+    }
+
+    public void addLocation(Batch batch, long ledgerId, long entryId, long location) throws IOException {
+<span class="fc" id="L140">        LongPairWrapper key = LongPairWrapper.get(ledgerId, entryId);</span>
+<span class="fc" id="L141">        LongWrapper value = LongWrapper.get(location);</span>
+
+<span class="pc bpc" id="L143" title="1 of 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L144">            log.debug(&quot;Add location - ledger: {} -- entry: {} -- location: {}&quot;, ledgerId, entryId, location);</span>
+        }
+
+        try {
+<span class="fc" id="L148">            batch.put(key.array, value.array);</span>
+        } finally {
+<span class="fc" id="L150">            key.recycle();</span>
+<span class="fc" id="L151">            value.recycle();</span>
+        }
+<span class="fc" id="L153">    }</span>
+
+    public void updateLocations(Iterable&lt;EntryLocation&gt; newLocations) throws IOException {
+<span class="pc bpc" id="L156" title="1 of 2 branches missed.">        if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L157">            log.debug(&quot;Update locations -- {}&quot;, Iterables.size(newLocations));</span>
+        }
+
+<span class="fc" id="L160">        Batch batch = newBatch();</span>
+        // Update all the ledger index pages with the new locations
+<span class="fc bfc" id="L162" title="All 2 branches covered.">        for (EntryLocation e : newLocations) {</span>
+<span class="pc bpc" id="L163" title="1 of 2 branches missed.">            if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L164">                log.debug(&quot;Update location - ledger: {} -- entry: {}&quot;, e.ledger, e.entry);</span>
+            }
+
+<span class="fc" id="L167">            addLocation(batch, e.ledger, e.entry, e.location);</span>
+<span class="fc" id="L168">        }</span>
+
+<span class="fc" id="L170">        batch.flush();</span>
+<span class="fc" id="L171">        batch.close();</span>
+<span class="fc" id="L172">    }</span>
+
+    public void delete(long ledgerId) throws IOException {
+        // We need to find all the LedgerIndexPage records belonging to one specific
+        // ledgers
+<span class="nc" id="L177">        deletedLedgers.add(ledgerId);</span>
+<span class="nc" id="L178">    }</span>
+
+    private static final int DELETE_ENTRIES_BATCH_SIZE = 100000;
+
+    public void removeOffsetFromDeletedLedgers() throws IOException {
+<span class="fc" id="L183">        LongPairWrapper firstKeyWrapper = LongPairWrapper.get(-1, -1);</span>
+<span class="fc" id="L184">        LongPairWrapper lastKeyWrapper = LongPairWrapper.get(-1, -1);</span>
+<span class="fc" id="L185">        LongPairWrapper keyToDelete = LongPairWrapper.get(-1, -1);</span>
+
+<span class="fc" id="L187">        Set&lt;Long&gt; ledgersToDelete = deletedLedgers.items();</span>
+
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">        if (ledgersToDelete.isEmpty()) {</span>
+<span class="fc" id="L190">            return;</span>
+        }
+
+<span class="nc" id="L193">        log.info(&quot;Deleting indexes for ledgers: {}&quot;, ledgersToDelete);</span>
+<span class="nc" id="L194">        long startTime = System.nanoTime();</span>
+<span class="nc" id="L195">        long deletedEntries = 0;</span>
+<span class="nc" id="L196">        long deletedEntriesInBatch = 0;</span>
+
+<span class="nc" id="L198">        Batch batch = locationsDb.newBatch();</span>
+
+        try {
+<span class="nc bnc" id="L201" title="All 2 branches missed.">            for (long ledgerId : ledgersToDelete) {</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">                if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L203">                    log.debug(&quot;Deleting indexes from ledger {}&quot;, ledgerId);</span>
+                }
+
+<span class="nc" id="L206">                firstKeyWrapper.set(ledgerId, 0);</span>
+<span class="nc" id="L207">                lastKeyWrapper.set(ledgerId, Long.MAX_VALUE);</span>
+
+<span class="nc" id="L209">                Entry&lt;byte[], byte[]&gt; firstKeyRes = locationsDb.getCeil(firstKeyWrapper.array);</span>
+<span class="nc bnc" id="L210" title="All 4 branches missed.">                if (firstKeyRes == null || ArrayUtil.getLong(firstKeyRes.getKey(), 0) != ledgerId) {</span>
+                    // No entries found for ledger
+<span class="nc bnc" id="L212" title="All 2 branches missed.">                    if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L213">                        log.debug(&quot;No entries found for ledger {}&quot;, ledgerId);</span>
+                    }
+                    continue;
+                }
+
+<span class="nc" id="L218">                long firstEntryId = ArrayUtil.getLong(firstKeyRes.getKey(), 8);</span>
+                long lastEntryId;
+                try {
+<span class="nc" id="L221">                    lastEntryId = getLastEntryInLedgerInternal(ledgerId);</span>
+<span class="nc" id="L222">                } catch (Bookie.NoEntryException nee) {</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">                    if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L224">                        log.debug(&quot;No last entry id found for ledger {}&quot;, ledgerId);</span>
+                    }
+<span class="nc" id="L226">                    continue;</span>
+<span class="nc" id="L227">                }</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">                if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L229">                    log.debug(&quot;Deleting index for ledger {} entries ({} -&gt; {})&quot;,</span>
+<span class="nc" id="L230">                            ledgerId, firstEntryId, lastEntryId);</span>
+                }
+
+                // Iterate over all the keys and remove each of them
+<span class="nc bnc" id="L234" title="All 2 branches missed.">                for (long entryId = firstEntryId; entryId &lt;= lastEntryId; entryId++) {</span>
+<span class="nc" id="L235">                    keyToDelete.set(ledgerId, entryId);</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">                    if (log.isDebugEnabled()) {</span>
+<span class="nc" id="L237">                        log.debug(&quot;Deleting index for ({}, {})&quot;, keyToDelete.getFirst(), keyToDelete.getSecond());</span>
+                    }
+<span class="nc" id="L239">                    batch.remove(keyToDelete.array);</span>
+<span class="nc" id="L240">                    ++deletedEntriesInBatch;</span>
+<span class="nc" id="L241">                    ++deletedEntries;</span>
+                }
+
+<span class="nc bnc" id="L244" title="All 2 branches missed.">                if (deletedEntriesInBatch &gt; DELETE_ENTRIES_BATCH_SIZE) {</span>
+<span class="nc" id="L245">                    batch.flush();</span>
+<span class="nc" id="L246">                    batch.clear();</span>
+<span class="nc" id="L247">                    deletedEntriesInBatch = 0;</span>
+                }
+<span class="nc" id="L249">            }</span>
+        } finally {
+            try {
+<span class="nc" id="L252">                batch.flush();</span>
+<span class="nc" id="L253">                batch.clear();</span>
+            } finally {
+
+<span class="nc" id="L256">                firstKeyWrapper.recycle();</span>
+<span class="nc" id="L257">                lastKeyWrapper.recycle();</span>
+<span class="nc" id="L258">                keyToDelete.recycle();</span>
+<span class="nc" id="L259">                batch.close();</span>
+            }
+        }
+
+<span class="nc" id="L263">        log.info(&quot;Deleted indexes for {} entries from {} ledgers in {} seconds&quot;, deletedEntries, ledgersToDelete.size(),</span>
+<span class="nc" id="L264">                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime) / 1000.0);</span>
+
+        // Removed from pending set
+<span class="nc bnc" id="L267" title="All 2 branches missed.">        for (long ledgerId : ledgersToDelete) {</span>
+<span class="nc" id="L268">            deletedLedgers.remove(ledgerId);</span>
+<span class="nc" id="L269">        }</span>
+<span class="nc" id="L270">    }</span>
+
+<span class="fc" id="L272">    private static final Logger log = LoggerFactory.getLogger(EntryLocationIndex.class);</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

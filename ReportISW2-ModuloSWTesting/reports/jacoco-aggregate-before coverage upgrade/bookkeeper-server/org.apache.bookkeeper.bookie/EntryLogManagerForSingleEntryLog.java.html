@@ -1,0 +1,267 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>EntryLogManagerForSingleEntryLog.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">EntryLogManagerForSingleEntryLog.java</span></div><h1>EntryLogManagerForSingleEntryLog.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import static org.apache.bookkeeper.bookie.EntryLogger.INVALID_LID;
+import static org.apache.bookkeeper.bookie.EntryLogger.UNASSIGNED_LEDGERID;
+
+import io.netty.buffer.ByteBuf;
+import java.io.File;
+import java.io.IOException;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.bookie.EntryLogger.BufferedLogChannel;
+import org.apache.bookkeeper.bookie.LedgerDirsManager.LedgerDirsListener;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.util.IOUtils;
+
+<span class="fc" id="L41">@Slf4j</span>
+class EntryLogManagerForSingleEntryLog extends EntryLogManagerBase {
+
+    private volatile BufferedLogChannel activeLogChannel;
+<span class="fc" id="L45">    private long logIdBeforeFlush = INVALID_LID;</span>
+<span class="fc" id="L46">    private final AtomicBoolean shouldCreateNewEntryLog = new AtomicBoolean(false);</span>
+    private EntryLogger.RecentEntryLogsStatus recentlyCreatedEntryLogsStatus;
+
+    EntryLogManagerForSingleEntryLog(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
+            EntryLoggerAllocator entryLoggerAllocator, List&lt;EntryLogger.EntryLogListener&gt; listeners,
+            EntryLogger.RecentEntryLogsStatus recentlyCreatedEntryLogsStatus) {
+<span class="fc" id="L52">        super(conf, ledgerDirsManager, entryLoggerAllocator, listeners);</span>
+<span class="fc" id="L53">        this.rotatedLogChannels = new LinkedList&lt;BufferedLogChannel&gt;();</span>
+<span class="fc" id="L54">        this.recentlyCreatedEntryLogsStatus = recentlyCreatedEntryLogsStatus;</span>
+        // Register listener for disk full notifications.
+<span class="fc" id="L56">        ledgerDirsManager.addLedgerDirsListener(getLedgerDirsListener());</span>
+<span class="fc" id="L57">    }</span>
+
+    private LedgerDirsListener getLedgerDirsListener() {
+<span class="fc" id="L60">        return new LedgerDirsListener() {</span>
+            @Override
+            public void diskFull(File disk) {
+                // If the current entry log disk is full, then create new
+                // entry log.
+<span class="nc" id="L65">                BufferedLogChannel currentActiveLogChannel = activeLogChannel;</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">                if (currentActiveLogChannel != null</span>
+<span class="nc bnc" id="L67" title="All 2 branches missed.">                        &amp;&amp; currentActiveLogChannel.getLogFile().getParentFile().equals(disk)) {</span>
+<span class="nc" id="L68">                    shouldCreateNewEntryLog.set(true);</span>
+                }
+<span class="nc" id="L70">            }</span>
+
+            @Override
+            public void diskAlmostFull(File disk) {
+                // If the current entry log disk is almost full, then create new entry
+                // log.
+<span class="nc" id="L76">                BufferedLogChannel currentActiveLogChannel = activeLogChannel;</span>
+<span class="nc bnc" id="L77" title="All 2 branches missed.">                if (currentActiveLogChannel != null</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">                        &amp;&amp; currentActiveLogChannel.getLogFile().getParentFile().equals(disk)) {</span>
+<span class="nc" id="L79">                    shouldCreateNewEntryLog.set(true);</span>
+                }
+<span class="nc" id="L81">            }</span>
+        };
+    }
+
+    @Override
+    public synchronized long addEntry(long ledger, ByteBuf entry, boolean rollLog) throws IOException {
+<span class="fc" id="L87">        return super.addEntry(ledger, entry, rollLog);</span>
+    }
+
+    @Override
+    synchronized BufferedLogChannel getCurrentLogForLedgerForAddEntry(long ledgerId, int entrySize,
+            boolean rollLog) throws IOException {
+<span class="fc bfc" id="L93" title="All 2 branches covered.">        if (null == activeLogChannel) {</span>
+            // log channel can be null because the file is deferred to be created
+<span class="fc" id="L95">            createNewLog(UNASSIGNED_LEDGERID, &quot;because current active log channel has not initialized yet&quot;);</span>
+        }
+
+<span class="fc bfc" id="L98" title="All 2 branches covered.">        boolean reachEntryLogLimit = rollLog ? reachEntryLogLimit(activeLogChannel, entrySize)</span>
+<span class="fc" id="L99">                : readEntryLogHardLimit(activeLogChannel, entrySize);</span>
+        // Create new log if logSizeLimit reached or current disk is full
+<span class="fc" id="L101">        boolean createNewLog = shouldCreateNewEntryLog.get();</span>
+<span class="pc bpc" id="L102" title="2 of 4 branches missed.">        if (createNewLog || reachEntryLogLimit) {</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">            if (activeLogChannel != null) {</span>
+<span class="nc" id="L104">                activeLogChannel.flushAndForceWriteIfRegularFlush(false);</span>
+            }
+<span class="nc" id="L106">            createNewLog(UNASSIGNED_LEDGERID,</span>
+                &quot;: createNewLog = &quot; + createNewLog + &quot;, reachEntryLogLimit = &quot; + reachEntryLogLimit);
+            // Reset the flag
+<span class="nc bnc" id="L109" title="All 2 branches missed.">            if (createNewLog) {</span>
+<span class="nc" id="L110">                shouldCreateNewEntryLog.set(false);</span>
+            }
+        }
+<span class="fc" id="L113">        return activeLogChannel;</span>
+    }
+
+    @Override
+    synchronized void createNewLog(long ledgerId) throws IOException {
+<span class="nc" id="L118">        super.createNewLog(ledgerId);</span>
+<span class="nc" id="L119">    }</span>
+
+    @Override
+    public synchronized void setCurrentLogForLedgerAndAddToRotate(long ledgerId, BufferedLogChannel logChannel) {
+<span class="fc" id="L123">        BufferedLogChannel hasToRotateLogChannel = activeLogChannel;</span>
+<span class="fc" id="L124">        activeLogChannel = logChannel;</span>
+<span class="pc bpc" id="L125" title="1 of 2 branches missed.">        if (hasToRotateLogChannel != null) {</span>
+<span class="nc" id="L126">            rotatedLogChannels.add(hasToRotateLogChannel);</span>
+        }
+<span class="fc" id="L128">    }</span>
+
+    @Override
+    public BufferedLogChannel getCurrentLogForLedger(long ledgerId) {
+<span class="fc" id="L132">        return activeLogChannel;</span>
+    }
+
+    @Override
+    public BufferedLogChannel getCurrentLogIfPresent(long entryLogId) {
+<span class="fc" id="L137">        BufferedLogChannel activeLogChannelTemp = activeLogChannel;</span>
+<span class="pc bpc" id="L138" title="2 of 4 branches missed.">        if ((activeLogChannelTemp != null) &amp;&amp; (activeLogChannelTemp.getLogId() == entryLogId)) {</span>
+<span class="fc" id="L139">            return activeLogChannelTemp;</span>
+        }
+<span class="nc" id="L141">        return null;</span>
+    }
+
+    @Override
+    public File getDirForNextEntryLog(List&lt;File&gt; writableLedgerDirs) {
+<span class="fc" id="L146">        Collections.shuffle(writableLedgerDirs);</span>
+<span class="fc" id="L147">        return writableLedgerDirs.get(0);</span>
+    }
+
+    @Override
+    public void checkpoint() throws IOException {
+<span class="nc" id="L152">        flushRotatedLogs();</span>
+<span class="nc" id="L153">    }</span>
+
+    public long getCurrentLogId() {
+<span class="nc" id="L156">        BufferedLogChannel currentActiveLogChannel = activeLogChannel;</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        if (currentActiveLogChannel != null) {</span>
+<span class="nc" id="L158">            return currentActiveLogChannel.getLogId();</span>
+        } else {
+<span class="nc" id="L160">            return EntryLogger.UNINITIALIZED_LOG_ID;</span>
+        }
+    }
+
+    @Override
+    public void flushCurrentLogs() throws IOException {
+<span class="fc" id="L166">        BufferedLogChannel currentActiveLogChannel = activeLogChannel;</span>
+<span class="fc bfc" id="L167" title="All 2 branches covered.">        if (currentActiveLogChannel != null) {</span>
+            /**
+             * flushCurrentLogs method is called during checkpoint, so
+             * metadata of the file also should be force written.
+             */
+<span class="fc" id="L172">            flushLogChannel(currentActiveLogChannel, true);</span>
+        }
+<span class="fc" id="L174">    }</span>
+
+    @Override
+    void flushRotatedLogs() throws IOException {
+<span class="fc" id="L178">        List&lt;BufferedLogChannel&gt; channels = null;</span>
+<span class="fc" id="L179">        synchronized (this) {</span>
+<span class="fc" id="L180">            channels = rotatedLogChannels;</span>
+<span class="fc" id="L181">            rotatedLogChannels = new LinkedList&lt;BufferedLogChannel&gt;();</span>
+<span class="fc" id="L182">        }</span>
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">        if (null == channels) {</span>
+<span class="nc" id="L184">            return;</span>
+        }
+<span class="fc" id="L186">        Iterator&lt;BufferedLogChannel&gt; chIter = channels.iterator();</span>
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">        while (chIter.hasNext()) {</span>
+<span class="nc" id="L188">            BufferedLogChannel channel = chIter.next();</span>
+            try {
+<span class="nc" id="L190">                channel.flushAndForceWrite(true);</span>
+<span class="nc" id="L191">            } catch (IOException ioe) {</span>
+                // rescue from flush exception, add unflushed channels back
+<span class="nc" id="L193">                synchronized (this) {</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">                    if (null == rotatedLogChannels) {</span>
+<span class="nc" id="L195">                        rotatedLogChannels = channels;</span>
+                    } else {
+<span class="nc" id="L197">                        rotatedLogChannels.addAll(0, channels);</span>
+                    }
+<span class="nc" id="L199">                }</span>
+<span class="nc" id="L200">                throw ioe;</span>
+<span class="nc" id="L201">            }</span>
+            // remove the channel from the list after it is successfully flushed
+<span class="nc" id="L203">            chIter.remove();</span>
+            // since this channel is only used for writing, after flushing the channel,
+            // we had to close the underlying file channel. Otherwise, we might end up
+            // leaking fds which cause the disk spaces could not be reclaimed.
+<span class="nc" id="L207">            channel.close();</span>
+<span class="nc" id="L208">            recentlyCreatedEntryLogsStatus.flushRotatedEntryLog(channel.getLogId());</span>
+<span class="nc" id="L209">            log.info(&quot;Synced entry logger {} to disk.&quot;, channel.getLogId());</span>
+<span class="nc" id="L210">        }</span>
+<span class="fc" id="L211">    }</span>
+
+    @Override
+    public void close() throws IOException {
+<span class="fc bfc" id="L215" title="All 2 branches covered.">        if (activeLogChannel != null) {</span>
+<span class="fc" id="L216">            activeLogChannel.close();</span>
+        }
+<span class="fc" id="L218">    }</span>
+
+    @Override
+    public void forceClose() {
+<span class="fc" id="L222">        IOUtils.close(log, activeLogChannel);</span>
+<span class="fc" id="L223">    }</span>
+
+    @Override
+    public void prepareEntryMemTableFlush() {
+<span class="nc" id="L227">        logIdBeforeFlush = getCurrentLogId();</span>
+<span class="nc" id="L228">    }</span>
+
+    @Override
+    public boolean commitEntryMemTableFlush() throws IOException {
+<span class="nc" id="L232">        long logIdAfterFlush = getCurrentLogId();</span>
+        /*
+         * in any case that an entry log reaches the limit, we roll the log
+         * and start checkpointing. if a memory table is flushed spanning
+         * over two entry log files, we also roll log. this is for
+         * performance consideration: since we don't wanna checkpoint a new
+         * log file that ledger storage is writing to.
+         */
+<span class="nc bnc" id="L240" title="All 4 branches missed.">        if (reachEntryLogLimit(activeLogChannel, 0L) || logIdAfterFlush != logIdBeforeFlush) {</span>
+<span class="nc" id="L241">            log.info(&quot;Rolling entry logger since it reached size limitation&quot;);</span>
+<span class="nc" id="L242">            createNewLog(UNASSIGNED_LEDGERID,</span>
+                &quot;due to reaching log limit after flushing memtable : logIdBeforeFlush = &quot;
+                    + logIdBeforeFlush + &quot;, logIdAfterFlush = &quot; + logIdAfterFlush);
+<span class="nc" id="L245">            return true;</span>
+        }
+<span class="nc" id="L247">        return false;</span>
+    }
+
+    @Override
+    public void prepareSortedLedgerStorageCheckpoint(long numBytesFlushed) throws IOException{
+<span class="nc bnc" id="L252" title="All 2 branches missed.">        if (numBytesFlushed &gt; 0) {</span>
+            // if bytes are added between previous flush and this checkpoint,
+            // it means bytes might live at current active entry log, we need
+            // roll current entry log and then issue checkpoint to underlying
+            // interleaved ledger storage.
+<span class="nc" id="L257">            createNewLog(UNASSIGNED_LEDGERID,</span>
+                &quot;due to preparing checkpoint : numBytesFlushed = &quot; + numBytesFlushed);
+        }
+<span class="nc" id="L260">    }</span>
+
+    @Override
+    public EntryLogger.BufferedLogChannel createNewLogForCompaction() throws IOException {
+<span class="nc" id="L264">        return entryLoggerAllocator.createNewLogForCompaction(selectDirForNextEntryLog());</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

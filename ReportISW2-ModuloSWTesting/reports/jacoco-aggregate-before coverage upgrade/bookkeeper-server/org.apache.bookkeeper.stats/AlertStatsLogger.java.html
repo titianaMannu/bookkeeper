@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>AlertStatsLogger.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.stats</a> &gt; <span class="el_source">AlertStatsLogger.java</span></div><h1>AlertStatsLogger.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with this
+ * work for additional information regarding copyright ownership. The ASF
+ * licenses this file to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS, WITHOUT
+ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and limitations under
+ * the License.
+ */
+package org.apache.bookkeeper.stats;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * This class is used to raise alert when we detect an event that should never happen in production.
+ */
+public class AlertStatsLogger {
+<span class="nc" id="L26">    private static final Logger logger = LoggerFactory.getLogger(AlertStatsLogger.class);</span>
+
+    public final String alertStatName;
+
+    private final StatsLogger globalStatsLogger;
+    private final StatsLogger scopedStatsLogger;
+    private final String scope;
+<span class="nc" id="L33">    private Counter globalCounter = null;</span>
+<span class="nc" id="L34">    private Counter scopedCounter = null;</span>
+
+<span class="nc" id="L36">    public AlertStatsLogger(StatsLogger globalStatsLogger, String scope, String alertStatName) {</span>
+<span class="nc" id="L37">        this.globalStatsLogger = globalStatsLogger;</span>
+<span class="nc" id="L38">        this.scope = scope;</span>
+<span class="nc" id="L39">        this.scopedStatsLogger = globalStatsLogger.scope(scope);</span>
+<span class="nc" id="L40">        this.alertStatName = alertStatName;</span>
+<span class="nc" id="L41">    }</span>
+
+<span class="nc" id="L43">    public AlertStatsLogger(StatsLogger globalStatsLogger, String alertStatName) {</span>
+<span class="nc" id="L44">        this.globalStatsLogger = globalStatsLogger;</span>
+<span class="nc" id="L45">        this.scope = null;</span>
+<span class="nc" id="L46">        this.scopedStatsLogger = null;</span>
+<span class="nc" id="L47">        this.alertStatName = alertStatName;</span>
+<span class="nc" id="L48">    }</span>
+
+    private String format(String msg) {
+<span class="nc bnc" id="L51" title="All 4 branches missed.">        return msg.startsWith(&quot;ALERT!: &quot;) ? msg :</span>
+                (&quot;ALERT!: &quot; + (scope != null ? &quot;(&quot; + scope + &quot;):&quot; : &quot;&quot;) + msg);
+    }
+
+    private void initializeCountersIfNeeded() {
+<span class="nc bnc" id="L56" title="All 2 branches missed.">        if (null != globalCounter) {</span>
+<span class="nc" id="L57">            return;</span>
+        }
+
+<span class="nc" id="L60">        globalCounter = globalStatsLogger.getCounter(alertStatName);</span>
+
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        if (null != scopedStatsLogger) {</span>
+<span class="nc" id="L63">            scopedCounter = scopedStatsLogger.getCounter(alertStatName);</span>
+        }
+<span class="nc" id="L65">    }</span>
+
+    /**
+     * Report an alertable condition&quot;. Prefixes &quot;ALERT!: &quot; if not already prefixed.
+     */
+    public void raise(String msg, Object... args) {
+<span class="nc" id="L71">        initializeCountersIfNeeded();</span>
+<span class="nc" id="L72">        globalCounter.inc();</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">        if (null != scopedCounter) {</span>
+<span class="nc" id="L74">            scopedCounter.inc();</span>
+        }
+<span class="nc" id="L76">        logger.error(format(msg), args);</span>
+<span class="nc" id="L77">        logger.error(&quot;fake exception to generate stack trace&quot;, new Exception());</span>
+<span class="nc" id="L78">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

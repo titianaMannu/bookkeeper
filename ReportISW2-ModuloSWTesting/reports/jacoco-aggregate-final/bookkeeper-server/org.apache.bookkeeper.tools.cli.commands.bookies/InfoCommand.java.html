@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>InfoCommand.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.tools.cli.commands.bookies</a> &gt; <span class="el_source">InfoCommand.java</span></div><h1>InfoCommand.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.tools.cli.commands.bookies;
+
+import java.io.IOException;
+import java.math.RoundingMode;
+import java.text.DecimalFormat;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BookKeeper;
+import org.apache.bookkeeper.client.BookieInfoReader.BookieInfo;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.tools.cli.helpers.BookieCommand;
+import org.apache.bookkeeper.tools.cli.helpers.CommandHelpers;
+import org.apache.bookkeeper.tools.framework.CliFlags;
+import org.apache.bookkeeper.tools.framework.CliSpec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+
+/**
+ * A bookie command to retrieve bookie info.
+ */
+public class InfoCommand extends BookieCommand&lt;CliFlags&gt; {
+
+    private static final String NAME = &quot;info&quot;;
+    private static final String DESC = &quot;Retrieve bookie info such as free and total disk space.&quot;;
+<span class="nc" id="L48">    private static final Logger LOG = LoggerFactory.getLogger(InfoCommand.class);</span>
+
+    public InfoCommand() {
+<span class="nc" id="L51">        super(CliSpec.newBuilder()</span>
+<span class="nc" id="L52">            .withName(NAME)</span>
+<span class="nc" id="L53">            .withFlags(new CliFlags())</span>
+<span class="nc" id="L54">            .withDescription(DESC)</span>
+<span class="nc" id="L55">            .build());</span>
+<span class="nc" id="L56">    }</span>
+
+    String getReadable(long val) {
+<span class="nc" id="L59">        String[] unit = {&quot;&quot;, &quot;KB&quot;, &quot;MB&quot;, &quot;GB&quot;, &quot;TB&quot;};</span>
+<span class="nc" id="L60">        int cnt = 0;</span>
+<span class="nc" id="L61">        double d = val;</span>
+<span class="nc bnc" id="L62" title="All 4 branches missed.">        while (d &gt;= 1000 &amp;&amp; cnt &lt; unit.length - 1) {</span>
+<span class="nc" id="L63">            d = d / 1000;</span>
+<span class="nc" id="L64">            cnt++;</span>
+        }
+<span class="nc" id="L66">        DecimalFormat df = new DecimalFormat(&quot;#.###&quot;);</span>
+<span class="nc" id="L67">        df.setRoundingMode(RoundingMode.DOWN);</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">        return cnt &gt; 0 ? &quot;(&quot; + df.format(d) + unit[cnt] + &quot;)&quot; : unit[cnt];</span>
+    }
+
+
+    @Override
+    public boolean apply(ServerConfiguration conf, CliFlags cmdFlags) {
+
+<span class="nc" id="L75">        ClientConfiguration clientConf = new ClientConfiguration(conf);</span>
+<span class="nc" id="L76">        clientConf.setDiskWeightBasedPlacementEnabled(true);</span>
+<span class="nc" id="L77">        try (BookKeeper bk = new BookKeeper(clientConf)) {</span>
+<span class="nc" id="L78">            Map&lt;BookieId, BookieInfo&gt; map = bk.getBookieInfo();</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">            if (map.size() == 0) {</span>
+<span class="nc" id="L80">                LOG.info(&quot;Failed to retrieve bookie information from any of the bookies&quot;);</span>
+<span class="nc" id="L81">                bk.close();</span>
+<span class="nc" id="L82">                return true;</span>
+            }
+
+<span class="nc" id="L85">            LOG.info(&quot;Free disk space info:&quot;);</span>
+<span class="nc" id="L86">            long totalFree = 0, total = 0;</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">            for (Map.Entry&lt;BookieId, BookieInfo&gt; e : map.entrySet()) {</span>
+<span class="nc" id="L88">                BookieInfo bInfo = e.getValue();</span>
+<span class="nc" id="L89">                BookieId bookieId = e.getKey();</span>
+<span class="nc" id="L90">                LOG.info(CommandHelpers.getBookieSocketAddrStringRepresentation(bookieId,</span>
+<span class="nc" id="L91">                        bk.getBookieAddressResolver())</span>
+<span class="nc" id="L92">                    + &quot;:\tFree: &quot; + bInfo.getFreeDiskSpace() + getReadable(bInfo.getFreeDiskSpace())</span>
+<span class="nc" id="L93">                    + &quot;\tTotal: &quot; + bInfo.getTotalDiskSpace() + getReadable(bInfo.getTotalDiskSpace()));</span>
+<span class="nc" id="L94">            }</span>
+
+            // group by hostname
+<span class="nc" id="L97">            Map&lt;String, BookieInfo&gt; dedupedMap = map.entrySet()</span>
+<span class="nc" id="L98">                .stream()</span>
+<span class="nc" id="L99">                .collect(Collectors.toMap(</span>
+<span class="nc" id="L100">                    entry -&gt; entry.getKey().toString(),</span>
+<span class="nc" id="L101">                    entry -&gt; entry.getValue(),</span>
+<span class="nc" id="L102">                    (key1, key2) -&gt; key2</span>
+                ));
+<span class="nc bnc" id="L104" title="All 2 branches missed.">            for (BookieInfo bookieInfo : dedupedMap.values()) {</span>
+<span class="nc" id="L105">                totalFree += bookieInfo.getFreeDiskSpace();</span>
+<span class="nc" id="L106">                total += bookieInfo.getTotalDiskSpace();</span>
+<span class="nc" id="L107">            }</span>
+
+<span class="nc" id="L109">            LOG.info(&quot;Total free disk space in the cluster:\t&quot; + totalFree + getReadable(totalFree));</span>
+<span class="nc" id="L110">            LOG.info(&quot;Total disk capacity in the cluster:\t&quot; + total + getReadable(total));</span>
+<span class="nc" id="L111">            bk.close();</span>
+
+<span class="nc" id="L113">            return true;</span>
+<span class="nc" id="L114">        } catch (IOException | InterruptedException | BKException e) {</span>
+<span class="nc" id="L115">            e.printStackTrace();</span>
+        }
+<span class="nc" id="L117">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

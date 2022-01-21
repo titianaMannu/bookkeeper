@@ -26,10 +26,9 @@ public class KeyValueStorageRockDBTest {
         return Arrays.asList(new Object[][]{
                 //{dbConfigType, keyToCheck, startKey, endKey, bufferSize}
                 {KeyValueStorageFactory.DbConfigType.Small, 0, 1, 2, SMALL_SIZE},
-                {KeyValueStorageFactory.DbConfigType.Huge, 1, 1, 2, HUGE_SIZE},
+                {KeyValueStorageFactory.DbConfigType.Huge, 1, 1, 1, HUGE_SIZE},
                 {KeyValueStorageFactory.DbConfigType.Small, 2, 1, 2, SMALL_SIZE},
                 {KeyValueStorageFactory.DbConfigType.Small, 3, 1, 2, HUGE_SIZE},
-                {KeyValueStorageFactory.DbConfigType.Small, 1, 1, 1, SMALL_SIZE},
         });
     }
 

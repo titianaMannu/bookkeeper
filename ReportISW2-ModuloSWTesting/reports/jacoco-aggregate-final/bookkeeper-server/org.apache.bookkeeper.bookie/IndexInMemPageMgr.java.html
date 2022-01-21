@@ -1,0 +1,677 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>IndexInMemPageMgr.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">IndexInMemPageMgr.java</span></div><h1>IndexInMemPageMgr.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie;
+
+import static java.lang.Long.max;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.LEDGER_CACHE_HIT;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.LEDGER_CACHE_MISS;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.LEDGER_CACHE_READ_PAGE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.NUM_INDEX_PAGES;
+
+import com.google.common.base.Stopwatch;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.bookkeeper.bookie.stats.IndexInMemPageMgrStats;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.stats.Counter;
+import org.apache.bookkeeper.stats.Gauge;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.util.DirectMemoryUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+<span class="nc bnc" id="L54" title="All 2 branches missed.">class IndexInMemPageMgr {</span>
+<span class="nc" id="L55">    private static final Logger LOG = LoggerFactory.getLogger(IndexInMemPageMgr.class);</span>
+<span class="nc" id="L56">    private static final ConcurrentHashMap&lt;Long, LedgerEntryPage&gt; EMPTY_PAGE_MAP =</span>
+            new ConcurrentHashMap&lt;Long, LedgerEntryPage&gt;();
+
+    private static class InMemPageCollection implements LEPStateChangeCallback {
+
+        final ConcurrentMap&lt;Long, ConcurrentMap&lt;Long, LedgerEntryPage&gt;&gt; pages;
+        final Map&lt;EntryKey, LedgerEntryPage&gt; lruCleanPageMap;
+        final ConcurrentLinkedQueue&lt;LedgerEntryPage&gt; listOfFreePages;
+
+        // Stats
+        private final IndexInMemPageMgrStats inMemPageMgrStats;
+
+<span class="nc" id="L68">        public InMemPageCollection(StatsLogger statsLogger) {</span>
+<span class="nc" id="L69">            pages = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="nc" id="L70">            lruCleanPageMap =</span>
+<span class="nc" id="L71">                    Collections.synchronizedMap(new LinkedHashMap&lt;EntryKey, LedgerEntryPage&gt;(16, 0.75f, true));</span>
+<span class="nc" id="L72">            listOfFreePages = new ConcurrentLinkedQueue&lt;LedgerEntryPage&gt;();</span>
+<span class="nc" id="L73">            inMemPageMgrStats = new IndexInMemPageMgrStats(statsLogger);</span>
+<span class="nc" id="L74">        }</span>
+
+        /**
+         * Retrieve the LedgerEntryPage corresponding to the ledger and firstEntry.
+         *
+         * @param ledgerId Ledger id
+         * @param firstEntry Id of the first entry in the page
+         * @returns LedgerEntryPage if present
+         */
+        private LedgerEntryPage getPage(long ledgerId, long firstEntry) {
+<span class="nc" id="L84">            ConcurrentMap&lt;Long, LedgerEntryPage&gt; map = pages.get(ledgerId);</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">            if (null != map) {</span>
+<span class="nc" id="L86">                return map.get(firstEntry);</span>
+            }
+<span class="nc" id="L88">            return null;</span>
+        }
+
+        /**
+         * Add a LedgerEntryPage to the page map.
+         *
+         * @param lep Ledger Entry Page object
+         */
+        private LedgerEntryPage putPage(LedgerEntryPage lep) {
+            // Do a get here to avoid too many new ConcurrentHashMaps() as putIntoTable is called frequently.
+<span class="nc" id="L98">            ConcurrentMap&lt;Long, LedgerEntryPage&gt; map = pages.get(lep.getLedger());</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">            if (null == map) {</span>
+<span class="nc" id="L100">                ConcurrentMap&lt;Long, LedgerEntryPage&gt; mapToPut = new ConcurrentHashMap&lt;Long, LedgerEntryPage&gt;();</span>
+<span class="nc" id="L101">                map = pages.putIfAbsent(lep.getLedger(), mapToPut);</span>
+<span class="nc bnc" id="L102" title="All 2 branches missed.">                if (null == map) {</span>
+<span class="nc" id="L103">                    map = mapToPut;</span>
+                }
+            }
+<span class="nc" id="L106">            LedgerEntryPage oldPage = map.putIfAbsent(lep.getFirstEntry(), lep);</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">            if (null == oldPage) {</span>
+<span class="nc" id="L108">                oldPage = lep;</span>
+                // Also include this in the clean page map if it qualifies.
+                // Note: This is done for symmetry and correctness, however it should never
+                // get exercised since we shouldn't attempt a put without the page being in use
+<span class="nc" id="L112">                addToCleanPagesList(lep);</span>
+            }
+<span class="nc" id="L114">            return oldPage;</span>
+        }
+
+        /**
+         * Traverse the pages for a given ledger in memory and find the highest entry amongst these pages.
+         *
+         * @param ledgerId Ledger id
+         * @returns last entry in the in memory pages
+         */
+        private long getLastEntryInMem(long ledgerId) {
+<span class="nc" id="L124">            long lastEntry = 0;</span>
+            // Find the last entry in the cache
+<span class="nc" id="L126">            ConcurrentMap&lt;Long, LedgerEntryPage&gt; map = pages.get(ledgerId);</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">            if (map != null) {</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">                for (LedgerEntryPage lep: map.values()) {</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">                    if (lep.getMaxPossibleEntry() &lt; lastEntry) {</span>
+<span class="nc" id="L130">                        continue;</span>
+                    }
+<span class="nc" id="L132">                    lep.usePage();</span>
+<span class="nc" id="L133">                    long highest = lep.getLastEntry();</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">                    if (highest &gt; lastEntry) {</span>
+<span class="nc" id="L135">                        lastEntry = highest;</span>
+                    }
+<span class="nc" id="L137">                    lep.releasePage();</span>
+<span class="nc" id="L138">                }</span>
+            }
+<span class="nc" id="L140">            return lastEntry;</span>
+        }
+
+        /**
+         * Removes ledger entry pages for a given ledger.
+         *
+         * @param ledgerId Ledger id
+         * @returns number of pages removed
+         */
+        private void removeEntriesForALedger(long ledgerId) {
+            // remove pages first to avoid page flushed when deleting file info
+<span class="nc" id="L151">            ConcurrentMap&lt;Long, LedgerEntryPage&gt; lPages = pages.remove(ledgerId);</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">            if (null != lPages) {</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">                for (Map.Entry&lt;Long, LedgerEntryPage&gt; pageEntry: lPages.entrySet()) {</span>
+<span class="nc" id="L154">                    LedgerEntryPage lep = pageEntry.getValue();</span>
+<span class="nc" id="L155">                    lep.usePage();</span>
+<span class="nc" id="L156">                    lep.markDeleted();</span>
+<span class="nc" id="L157">                    lep.releasePage();</span>
+<span class="nc" id="L158">                }</span>
+            }
+<span class="nc" id="L160">        }</span>
+
+        /**
+         * Gets the list of pages in memory that have been changed and hence need to
+         * be written as a part of the flush operation that is being issued.
+         *
+         * @param ledgerId Ledger id
+         * @returns last entry in the in memory pages.
+         */
+        private LinkedList&lt;Long&gt; getFirstEntryListToBeFlushed(long ledgerId) {
+<span class="nc" id="L170">            ConcurrentMap&lt;Long, LedgerEntryPage&gt; pageMap = pages.get(ledgerId);</span>
+<span class="nc bnc" id="L171" title="All 4 branches missed.">            if (pageMap == null || pageMap.isEmpty()) {</span>
+<span class="nc" id="L172">                return null;</span>
+            }
+
+<span class="nc" id="L175">            LinkedList&lt;Long&gt; firstEntryList = new LinkedList&lt;Long&gt;();</span>
+<span class="nc bnc" id="L176" title="All 2 branches missed.">            for (ConcurrentMap.Entry&lt;Long, LedgerEntryPage&gt; entry: pageMap.entrySet()) {</span>
+<span class="nc" id="L177">                LedgerEntryPage lep = entry.getValue();</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">                if (lep.isClean()) {</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">                    if (!lep.inUse()) {</span>
+<span class="nc" id="L180">                        addToCleanPagesList(lep);</span>
+                    }
+<span class="nc bnc" id="L182" title="All 2 branches missed.">                    if (LOG.isTraceEnabled()) {</span>
+<span class="nc" id="L183">                        LOG.trace(&quot;Page is clean &quot; + lep);</span>
+                    }
+                } else {
+<span class="nc" id="L186">                    firstEntryList.add(lep.getFirstEntry());</span>
+                }
+<span class="nc" id="L188">            }</span>
+<span class="nc" id="L189">            return firstEntryList;</span>
+        }
+
+        /**
+         * Add the LedgerEntryPage to the clean page LRU map.
+         *
+         * @param lep Ledger Entry Page object
+         */
+        private void addToCleanPagesList(LedgerEntryPage lep) {
+<span class="nc" id="L198">            synchronized (lruCleanPageMap) {</span>
+<span class="nc bnc" id="L199" title="All 4 branches missed.">                if (lep.isClean() &amp;&amp; !lep.inUse()) {</span>
+<span class="nc" id="L200">                    lruCleanPageMap.put(lep.getEntryKey(), lep);</span>
+                }
+<span class="nc" id="L202">            }</span>
+<span class="nc" id="L203">        }</span>
+
+        /**
+         * Remove the LedgerEntryPage from the clean page LRU map.
+         *
+         * @param lep Ledger Entry Page object
+         */
+        private void removeFromCleanPageList(LedgerEntryPage lep) {
+<span class="nc" id="L211">            synchronized (lruCleanPageMap) {</span>
+<span class="nc bnc" id="L212" title="All 4 branches missed.">                if (!lep.isClean() || lep.inUse()) {</span>
+<span class="nc" id="L213">                    lruCleanPageMap.remove(lep.getEntryKey());</span>
+                }
+<span class="nc" id="L215">            }</span>
+<span class="nc" id="L216">        }</span>
+
+        /**
+         * Get the set of active ledgers.
+         *
+         */
+        Set&lt;Long&gt; getActiveLedgers() {
+<span class="nc" id="L223">            return pages.keySet();</span>
+        }
+
+        /**
+         * Get a clean page and provision it for the specified ledger and firstEntry within the ledger.
+         *
+         * @param ledgerId Ledger id
+         * @param firstEntry Id of the first entry in the page
+         * @returns LedgerEntryPage if present
+         */
+        LedgerEntryPage grabCleanPage(long ledgerId, long firstEntry) {
+<span class="nc" id="L234">            LedgerEntryPage lep = listOfFreePages.poll();</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">            if (null != lep) {</span>
+<span class="nc" id="L236">                lep.resetPage();</span>
+<span class="nc" id="L237">                lep.setLedgerAndFirstEntry(ledgerId, firstEntry);</span>
+<span class="nc" id="L238">                lep.usePage();</span>
+<span class="nc" id="L239">                return lep;</span>
+            }
+<span class="nc bnc" id="L241" title="All 2 branches missed.">            while (lruCleanPageMap.size() &gt; 0) {</span>
+<span class="nc" id="L242">                lep = null;</span>
+<span class="nc" id="L243">                synchronized (lruCleanPageMap) {</span>
+<span class="nc" id="L244">                    Iterator&lt;Map.Entry&lt;EntryKey, LedgerEntryPage&gt;&gt; iterator = lruCleanPageMap.entrySet().iterator();</span>
+
+<span class="nc" id="L246">                    Map.Entry&lt;EntryKey, LedgerEntryPage&gt; entry = null;</span>
+<span class="nc bnc" id="L247" title="All 2 branches missed.">                    while (iterator.hasNext()) {</span>
+<span class="nc" id="L248">                        entry = iterator.next();</span>
+<span class="nc" id="L249">                        iterator.remove();</span>
+<span class="nc bnc" id="L250" title="All 4 branches missed.">                        if (entry.getValue().isClean() &amp;&amp; !entry.getValue().inUse()) {</span>
+<span class="nc" id="L251">                            lep = entry.getValue();</span>
+<span class="nc" id="L252">                            break;</span>
+                        }
+                    }
+
+<span class="nc bnc" id="L256" title="All 2 branches missed.">                    if (null == lep) {</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L258">                            LOG.debug(&quot;Did not find eligible page in the first pass&quot;);</span>
+                        }
+<span class="nc" id="L260">                        return null;</span>
+                    }
+<span class="nc" id="L262">                }</span>
+
+                // We found a candidate page, lets see if we can reclaim it before its re-used
+<span class="nc" id="L265">                ConcurrentMap&lt;Long, LedgerEntryPage&gt; pageMap = pages.get(lep.getLedger());</span>
+                // Remove from map only if nothing has changed since we checked this lep.
+                // Its possible for the ledger to have been deleted or the page to have already
+                // been reclaimed. The page map is the definitive source of information, if anything
+                // has changed we should leave this page along and continue iterating to find
+                // another suitable page.
+<span class="nc bnc" id="L271" title="All 4 branches missed.">                if ((null != pageMap) &amp;&amp; (pageMap.remove(lep.getFirstEntry(), lep))) {</span>
+<span class="nc bnc" id="L272" title="All 2 branches missed.">                    if (!lep.isClean()) {</span>
+                        // Someone wrote to this page while we were reclaiming it.
+<span class="nc" id="L274">                        pageMap.put(lep.getFirstEntry(), lep);</span>
+<span class="nc" id="L275">                        lep = null;</span>
+                    } else {
+                        // Do some bookkeeping on the page table
+<span class="nc" id="L278">                        pages.remove(lep.getLedger(), EMPTY_PAGE_MAP);</span>
+                        // We can now safely reset this lep and return it.
+<span class="nc" id="L280">                        lep.usePage();</span>
+<span class="nc" id="L281">                        lep.zeroPage();</span>
+<span class="nc" id="L282">                        lep.setLedgerAndFirstEntry(ledgerId, firstEntry);</span>
+<span class="nc" id="L283">                        return lep;</span>
+                    }
+                } else {
+<span class="nc" id="L286">                    lep = null;</span>
+                }
+<span class="nc" id="L288">            }</span>
+<span class="nc" id="L289">            return lep;</span>
+        }
+
+        public void addToListOfFreePages(LedgerEntryPage lep) {
+<span class="nc bnc" id="L293" title="All 4 branches missed.">            if ((null == lep) || lep.inUse()) {</span>
+<span class="nc" id="L294">                inMemPageMgrStats.getIllegalStateResetCounter().inc();</span>
+            }
+<span class="nc bnc" id="L296" title="All 2 branches missed.">            if (null != lep) {</span>
+<span class="nc" id="L297">                listOfFreePages.add(lep);</span>
+            }
+<span class="nc" id="L299">        }</span>
+
+        @Override
+        public void onSetInUse(LedgerEntryPage lep) {
+<span class="nc" id="L303">            removeFromCleanPageList(lep);</span>
+<span class="nc" id="L304">        }</span>
+
+        @Override
+        public void onResetInUse(LedgerEntryPage lep) {
+<span class="nc bnc" id="L308" title="All 2 branches missed.">            if (!lep.isDeleted()) {</span>
+<span class="nc" id="L309">                addToCleanPagesList(lep);</span>
+            } else {
+<span class="nc" id="L311">                addToListOfFreePages(lep);</span>
+            }
+<span class="nc" id="L313">        }</span>
+
+        @Override
+        public void onSetClean(LedgerEntryPage lep) {
+<span class="nc" id="L317">            addToCleanPagesList(lep);</span>
+<span class="nc" id="L318">        }</span>
+
+        @Override
+        public void onSetDirty(LedgerEntryPage lep) {
+<span class="nc" id="L322">            removeFromCleanPageList(lep);</span>
+<span class="nc" id="L323">        }</span>
+    }
+
+    final int pageSize;
+    final int entriesPerPage;
+    final int pageLimit;
+    final InMemPageCollection pageMapAndList;
+
+    // The number of pages that have actually been used
+<span class="nc" id="L332">    private final AtomicInteger pageCount = new AtomicInteger(0);</span>
+
+    // The persistence manager that this page manager uses to
+    // flush and read pages
+    private final IndexPersistenceMgr indexPersistenceManager;
+
+    // Stats
+    private final Counter ledgerCacheHitCounter;
+    private final Counter ledgerCacheMissCounter;
+    private final OpStatsLogger ledgerCacheReadPageStats;
+
+    public IndexInMemPageMgr(int pageSize,
+                             int entriesPerPage,
+                             ServerConfiguration conf,
+                             IndexPersistenceMgr indexPersistenceManager,
+<span class="nc" id="L347">                             StatsLogger statsLogger) {</span>
+<span class="nc" id="L348">        this.pageSize = pageSize;</span>
+<span class="nc" id="L349">        this.entriesPerPage = entriesPerPage;</span>
+<span class="nc" id="L350">        this.indexPersistenceManager = indexPersistenceManager;</span>
+<span class="nc" id="L351">        this.pageMapAndList = new InMemPageCollection(statsLogger);</span>
+
+<span class="nc" id="L353">        long maxDirectMemory = DirectMemoryUtils.maxDirectMemory();</span>
+
+<span class="nc bnc" id="L355" title="All 2 branches missed.">        if (conf.getPageLimit() &lt;= 0) {</span>
+            // By default, allocate a third of the direct memory to the page cache
+<span class="nc" id="L357">            this.pageLimit = (int) ((maxDirectMemory / 3) / this.pageSize);</span>
+        } else {
+<span class="nc" id="L359">            this.pageLimit = conf.getPageLimit();</span>
+        }
+<span class="nc" id="L361">        LOG.info(&quot;maxDirectMemory = {}, pageSize = {}, pageLimit = {}&quot;,</span>
+<span class="nc" id="L362">                maxDirectMemory, pageSize, pageLimit);</span>
+        // Expose Stats
+<span class="nc" id="L364">        this.ledgerCacheHitCounter = statsLogger.getCounter(LEDGER_CACHE_HIT);</span>
+<span class="nc" id="L365">        this.ledgerCacheMissCounter = statsLogger.getCounter(LEDGER_CACHE_MISS);</span>
+<span class="nc" id="L366">        this.ledgerCacheReadPageStats = statsLogger.getOpStatsLogger(LEDGER_CACHE_READ_PAGE);</span>
+        // Export sampled stats for index pages, ledgers.
+<span class="nc" id="L368">        statsLogger.registerGauge(</span>
+                NUM_INDEX_PAGES,
+<span class="nc" id="L370">                new Gauge&lt;Integer&gt;() {</span>
+                    @Override
+                    public Integer getDefaultValue() {
+<span class="nc" id="L373">                        return 0;</span>
+                    }
+                    @Override
+                    public Integer getSample() {
+<span class="nc" id="L377">                        return getNumUsedPages();</span>
+                    }
+                }
+        );
+<span class="nc" id="L381">    }</span>
+
+    /**
+     * @return page size used in ledger cache
+     */
+    public int getPageSize() {
+<span class="nc" id="L387">        return pageSize;</span>
+    }
+
+    /**
+     * @return number of page used in ledger cache
+     */
+    private int getNumUsedPages() {
+<span class="nc" id="L394">        return pageCount.get();</span>
+    }
+
+        /**
+     * Get the ledger entry page for a given &lt;i&gt;pageEntry&lt;/i&gt;.
+     *
+     * @param ledger
+     *          ledger id
+     * @param pageEntry
+     *          first entry id of a given page
+     * @return ledger entry page
+     * @throws IOException
+     */
+    LedgerEntryPage getLedgerEntryPage(long ledger,
+                                              long pageEntry) throws IOException {
+<span class="nc" id="L409">        LedgerEntryPage lep = getLedgerEntryPageFromCache(ledger, pageEntry, false);</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">        if (lep == null) {</span>
+<span class="nc" id="L411">            ledgerCacheMissCounter.inc();</span>
+<span class="nc" id="L412">            lep = grabLedgerEntryPage(ledger, pageEntry);</span>
+        } else {
+<span class="nc" id="L414">            ledgerCacheHitCounter.inc();</span>
+        }
+<span class="nc" id="L416">        return lep;</span>
+    }
+
+    LedgerEntryPage getLedgerEntryPageFromCache(long ledger,
+                                                       long firstEntry,
+                                                       boolean onlyDirty) {
+<span class="nc" id="L422">        LedgerEntryPage lep = pageMapAndList.getPage(ledger, firstEntry);</span>
+<span class="nc bnc" id="L423" title="All 6 branches missed.">        if (onlyDirty &amp;&amp; null != lep &amp;&amp; lep.isClean()) {</span>
+<span class="nc" id="L424">            return null;</span>
+        }
+<span class="nc bnc" id="L426" title="All 2 branches missed.">        if (null != lep) {</span>
+<span class="nc" id="L427">            lep.usePage();</span>
+        }
+<span class="nc" id="L429">        return lep;</span>
+    }
+
+    /**
+     * Grab ledger entry page whose first entry is &lt;code&gt;pageEntry&lt;/code&gt;.
+     * If the page doesn't existed before, we allocate a memory page.
+     * Otherwise, we grab a clean page and read it from disk.
+     *
+     * @param ledger Ledger Id
+     * @param pageEntry Start entry of this entry page.
+     */
+    private LedgerEntryPage grabLedgerEntryPage(long ledger, long pageEntry) throws IOException {
+<span class="nc" id="L441">        LedgerEntryPage lep = grabCleanPage(ledger, pageEntry);</span>
+        try {
+            // should get the up to date page from the persistence manager
+            // before we put it into table otherwise we would put
+            // an empty page in it
+<span class="nc" id="L446">            Stopwatch readPageStopwatch = Stopwatch.createStarted();</span>
+<span class="nc" id="L447">            boolean isNewPage = indexPersistenceManager.updatePage(lep);</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">            if (!isNewPage) {</span>
+<span class="nc" id="L449">                ledgerCacheReadPageStats.registerSuccessfulEvent(</span>
+<span class="nc" id="L450">                        readPageStopwatch.elapsed(TimeUnit.MICROSECONDS),</span>
+                        TimeUnit.MICROSECONDS);
+            }
+<span class="nc" id="L453">        } catch (IOException ie) {</span>
+            // if we grab a clean page, but failed to update the page
+            // we should put this page in the free page list so that it
+            // can be reassigned to the next grabPage request
+<span class="nc" id="L457">            lep.releasePageNoCallback();</span>
+<span class="nc" id="L458">            pageMapAndList.addToListOfFreePages(lep);</span>
+<span class="nc" id="L459">            throw ie;</span>
+<span class="nc" id="L460">        }</span>
+        LedgerEntryPage oldLep;
+<span class="nc bnc" id="L462" title="All 2 branches missed.">        if (lep != (oldLep = pageMapAndList.putPage(lep))) {</span>
+            // if we grab a clean page, but failed to put it in the cache
+            // we should put this page in the free page list so that it
+            // can be reassigned to the next grabPage request
+<span class="nc" id="L466">            lep.releasePageNoCallback();</span>
+<span class="nc" id="L467">            pageMapAndList.addToListOfFreePages(lep);</span>
+            // Increment the use count of the old lep because this is unexpected
+<span class="nc" id="L469">            oldLep.usePage();</span>
+<span class="nc" id="L470">            lep = oldLep;</span>
+        }
+<span class="nc" id="L472">        return lep;</span>
+    }
+
+    void removePagesForLedger(long ledgerId) {
+<span class="nc" id="L476">        pageMapAndList.removeEntriesForALedger(ledgerId);</span>
+<span class="nc" id="L477">    }</span>
+
+    long getLastEntryInMem(long ledgerId) {
+<span class="nc" id="L480">        return pageMapAndList.getLastEntryInMem(ledgerId);</span>
+    }
+
+    private LedgerEntryPage grabCleanPage(long ledger, long entry) throws IOException {
+<span class="nc bnc" id="L484" title="All 2 branches missed.">        if (entry % entriesPerPage != 0) {</span>
+<span class="nc" id="L485">            throw new IllegalArgumentException(entry + &quot; is not a multiple of &quot; + entriesPerPage);</span>
+        }
+
+        while (true) {
+<span class="nc" id="L489">            boolean canAllocate = false;</span>
+<span class="nc bnc" id="L490" title="All 2 branches missed.">            if (pageCount.incrementAndGet() &lt;= pageLimit) {</span>
+<span class="nc" id="L491">                canAllocate = true;</span>
+            } else {
+<span class="nc" id="L493">                pageCount.decrementAndGet();</span>
+            }
+
+<span class="nc bnc" id="L496" title="All 2 branches missed.">            if (canAllocate) {</span>
+<span class="nc" id="L497">                LedgerEntryPage lep = new LedgerEntryPage(pageSize, entriesPerPage, pageMapAndList);</span>
+<span class="nc" id="L498">                lep.setLedgerAndFirstEntry(ledger, entry);</span>
+<span class="nc" id="L499">                lep.usePage();</span>
+<span class="nc" id="L500">                return lep;</span>
+            }
+
+<span class="nc" id="L503">            LedgerEntryPage lep = pageMapAndList.grabCleanPage(ledger, entry);</span>
+<span class="nc bnc" id="L504" title="All 2 branches missed.">            if (null != lep) {</span>
+<span class="nc" id="L505">                return lep;</span>
+            }
+<span class="nc" id="L507">            LOG.info(&quot;Could not grab a clean page for ledger {}, entry {}, force flushing dirty ledgers.&quot;,</span>
+<span class="nc" id="L508">                    ledger, entry);</span>
+<span class="nc" id="L509">            flushOneOrMoreLedgers(false);</span>
+<span class="nc" id="L510">        }</span>
+    }
+
+    void flushOneOrMoreLedgers(boolean doAll) throws IOException {
+<span class="nc" id="L514">        List&lt;Long&gt; ledgersToFlush = new ArrayList&lt;&gt;(pageMapAndList.getActiveLedgers());</span>
+<span class="nc bnc" id="L515" title="All 2 branches missed.">        for (Long potentiallyDirtyLedger : ledgersToFlush) {</span>
+            try {
+<span class="nc" id="L517">                flushSpecificLedger(potentiallyDirtyLedger);</span>
+<span class="nc" id="L518">            } catch (Bookie.NoLedgerException e) {</span>
+<span class="nc" id="L519">                continue;</span>
+<span class="nc" id="L520">            }</span>
+<span class="nc bnc" id="L521" title="All 2 branches missed.">            if (!doAll) {</span>
+<span class="nc" id="L522">                break;</span>
+            }
+<span class="nc" id="L524">        }</span>
+<span class="nc" id="L525">    }</span>
+
+    /**
+     * Flush a specified ledger.
+     *
+     * @param ledger Ledger Id
+     * @throws IOException
+     */
+    private void flushSpecificLedger(long ledger) throws IOException {
+<span class="nc" id="L534">        LinkedList&lt;Long&gt; firstEntryList = pageMapAndList.getFirstEntryListToBeFlushed(ledger);</span>
+
+        // flush ledger index file header if necessary
+<span class="nc" id="L537">        indexPersistenceManager.flushLedgerHeader(ledger);</span>
+
+<span class="nc bnc" id="L539" title="All 4 branches missed.">        if (null == firstEntryList || firstEntryList.size() == 0) {</span>
+<span class="nc bnc" id="L540" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L541">                LOG.debug(&quot;Nothing to flush for ledger {}.&quot;, ledger);</span>
+            }
+            // nothing to do
+<span class="nc" id="L544">            return;</span>
+        }
+
+        // Now flush all the pages of a ledger
+<span class="nc" id="L548">        List&lt;LedgerEntryPage&gt; entries = new ArrayList&lt;LedgerEntryPage&gt;(firstEntryList.size());</span>
+        try {
+<span class="nc bnc" id="L550" title="All 2 branches missed.">            for (Long firstEntry: firstEntryList) {</span>
+<span class="nc" id="L551">                LedgerEntryPage lep = getLedgerEntryPageFromCache(ledger, firstEntry, true);</span>
+<span class="nc bnc" id="L552" title="All 2 branches missed.">                if (lep != null) {</span>
+<span class="nc" id="L553">                    entries.add(lep);</span>
+                }
+<span class="nc" id="L555">            }</span>
+<span class="nc" id="L556">            indexPersistenceManager.flushLedgerEntries(ledger, entries);</span>
+        } finally {
+<span class="nc bnc" id="L558" title="All 2 branches missed.">            for (LedgerEntryPage lep: entries) {</span>
+<span class="nc" id="L559">                lep.releasePage();</span>
+<span class="nc" id="L560">            }</span>
+        }
+<span class="nc" id="L562">    }</span>
+
+    void putEntryOffset(long ledger, long entry, long offset) throws IOException {
+<span class="nc" id="L565">        int offsetInPage = (int) (entry % entriesPerPage);</span>
+        // find the id of the first entry of the page that has the entry
+        // we are looking for
+<span class="nc" id="L568">        long pageEntry = entry - offsetInPage;</span>
+<span class="nc" id="L569">        LedgerEntryPage lep = null;</span>
+        try {
+<span class="nc" id="L571">            lep = getLedgerEntryPage(ledger, pageEntry);</span>
+<span class="nc bnc" id="L572" title="All 4 branches missed.">            assert lep != null;</span>
+<span class="nc" id="L573">            lep.setOffset(offset, offsetInPage * LedgerEntryPage.getIndexEntrySize());</span>
+<span class="nc" id="L574">        } catch (FileInfo.FileInfoDeletedException e) {</span>
+<span class="nc" id="L575">            throw new Bookie.NoLedgerException(ledger);</span>
+        } finally {
+<span class="nc bnc" id="L577" title="All 2 branches missed.">            if (null != lep) {</span>
+<span class="nc" id="L578">                lep.releasePage();</span>
+            }
+        }
+<span class="nc" id="L581">    }</span>
+
+    long getEntryOffset(long ledger, long entry) throws IOException {
+<span class="nc" id="L584">        int offsetInPage = (int) (entry % entriesPerPage);</span>
+        // find the id of the first entry of the page that has the entry
+        // we are looking for
+<span class="nc" id="L587">        long pageEntry = entry - offsetInPage;</span>
+<span class="nc" id="L588">        LedgerEntryPage lep = null;</span>
+        try {
+<span class="nc" id="L590">            lep = getLedgerEntryPage(ledger, pageEntry);</span>
+<span class="nc" id="L591">            return lep.getOffset(offsetInPage  * LedgerEntryPage.getIndexEntrySize());</span>
+        } finally {
+<span class="nc bnc" id="L593" title="All 2 branches missed.">            if (lep != null) {</span>
+<span class="nc" id="L594">                lep.releasePage();</span>
+            }
+        }
+    }
+
+    /**
+     * Represents a page of the index.
+     */
+    private class PageEntriesImpl implements LedgerCache.PageEntries {
+        final long ledgerId;
+        final long initEntry;
+
+<span class="nc" id="L606">        PageEntriesImpl(long ledgerId, long initEntry) {</span>
+<span class="nc" id="L607">            this.ledgerId = ledgerId;</span>
+<span class="nc" id="L608">            this.initEntry = initEntry;</span>
+<span class="nc" id="L609">        }</span>
+
+        @Override
+        public LedgerEntryPage getLEP() throws IOException {
+<span class="nc" id="L613">            return getLedgerEntryPage(ledgerId, initEntry);</span>
+        }
+
+        @Override
+        public long getFirstEntry() {
+<span class="nc" id="L618">            return initEntry;</span>
+        }
+
+        @Override
+        public long getLastEntry() {
+<span class="nc" id="L623">            return initEntry + entriesPerPage;</span>
+        }
+    }
+
+    /**
+     * Iterable over index pages -- returns PageEntries rather than individual
+     * entries because getEntries() above needs to be able to throw an IOException.
+     */
+    private class PageEntriesIterableImpl implements LedgerCache.PageEntriesIterable {
+        final long ledgerId;
+        final FileInfoBackingCache.CachedFileInfo fi;
+        final long totalEntries;
+
+<span class="nc" id="L636">        long curEntry = 0;</span>
+
+<span class="nc" id="L638">        PageEntriesIterableImpl(long ledgerId) throws IOException {</span>
+<span class="nc" id="L639">            this.ledgerId = ledgerId;</span>
+<span class="nc" id="L640">            this.fi = indexPersistenceManager.getFileInfo(ledgerId, null);</span>
+<span class="nc" id="L641">            this.totalEntries = max(entriesPerPage * (fi.size() / pageSize), getLastEntryInMem(ledgerId));</span>
+<span class="nc" id="L642">        }</span>
+
+        @Override
+        public Iterator&lt;LedgerCache.PageEntries&gt; iterator() {
+<span class="nc" id="L646">            return new Iterator&lt;LedgerCache.PageEntries&gt;() {</span>
+                @Override
+                public boolean hasNext() {
+<span class="nc bnc" id="L649" title="All 2 branches missed.">                    return curEntry &lt; totalEntries;</span>
+                }
+
+                @Override
+                public LedgerCache.PageEntries next() {
+<span class="nc" id="L654">                    LedgerCache.PageEntries next = new PageEntriesImpl(ledgerId, curEntry);</span>
+<span class="nc" id="L655">                    curEntry += entriesPerPage;</span>
+<span class="nc" id="L656">                    return next;</span>
+                }
+            };
+        }
+
+        @Override
+        public void close() {
+<span class="nc" id="L663">            fi.release();</span>
+<span class="nc" id="L664">        }</span>
+    }
+
+    /**
+     * Return iterator over pages for mapping entries to entry loggers.
+     * @param ledgerId
+     * @return Iterator over pages
+     * @throws IOException
+     */
+    public LedgerCache.PageEntriesIterable listEntries(long ledgerId) throws IOException {
+<span class="nc" id="L674">        return new PageEntriesIterableImpl(ledgerId);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

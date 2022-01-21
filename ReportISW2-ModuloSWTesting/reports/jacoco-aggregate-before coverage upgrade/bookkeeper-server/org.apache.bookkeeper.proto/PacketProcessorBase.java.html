@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>PacketProcessorBase.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto</a> &gt; <span class="el_source">PacketProcessorBase.java</span></div><h1>PacketProcessorBase.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.proto;
+
+import io.netty.channel.Channel;
+
+import java.util.concurrent.TimeUnit;
+
+import org.apache.bookkeeper.proto.BookieProtocol.Request;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.util.MathUtils;
+import org.apache.bookkeeper.util.SafeRunnable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A base class for bookeeper packet processors.
+ */
+<span class="nc" id="L34">abstract class PacketProcessorBase&lt;T extends Request&gt; extends SafeRunnable {</span>
+<span class="nc" id="L35">    private static final Logger logger = LoggerFactory.getLogger(PacketProcessorBase.class);</span>
+    T request;
+    Channel channel;
+    BookieRequestProcessor requestProcessor;
+    long enqueueNanos;
+
+    protected void init(T request, Channel channel, BookieRequestProcessor requestProcessor) {
+<span class="nc" id="L42">        this.request = request;</span>
+<span class="nc" id="L43">        this.channel = channel;</span>
+<span class="nc" id="L44">        this.requestProcessor = requestProcessor;</span>
+<span class="nc" id="L45">        this.enqueueNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L46">    }</span>
+
+    protected void reset() {
+<span class="nc" id="L49">        request = null;</span>
+<span class="nc" id="L50">        channel = null;</span>
+<span class="nc" id="L51">        requestProcessor = null;</span>
+<span class="nc" id="L52">        enqueueNanos = -1;</span>
+<span class="nc" id="L53">    }</span>
+
+    protected boolean isVersionCompatible() {
+<span class="nc" id="L56">        byte version = request.getProtocolVersion();</span>
+<span class="nc bnc" id="L57" title="All 4 branches missed.">        if (version &lt; BookieProtocol.LOWEST_COMPAT_PROTOCOL_VERSION</span>
+                || version &gt; BookieProtocol.CURRENT_PROTOCOL_VERSION) {
+<span class="nc" id="L59">            logger.error(&quot;Invalid protocol version, expected something between &quot;</span>
+                    + BookieProtocol.LOWEST_COMPAT_PROTOCOL_VERSION
+                    + &quot; &amp; &quot; + BookieProtocol.CURRENT_PROTOCOL_VERSION
+<span class="nc" id="L62">                    + &quot;. got &quot; + request.getProtocolVersion());</span>
+<span class="nc" id="L63">            return false;</span>
+        }
+<span class="nc" id="L65">        return true;</span>
+    }
+
+    protected void sendResponse(int rc, Object response, OpStatsLogger statsLogger) {
+<span class="nc" id="L69">        channel.writeAndFlush(response, channel.voidPromise());</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">        if (BookieProtocol.EOK == rc) {</span>
+<span class="nc" id="L71">            statsLogger.registerSuccessfulEvent(MathUtils.elapsedNanos(enqueueNanos), TimeUnit.NANOSECONDS);</span>
+        } else {
+<span class="nc" id="L73">            statsLogger.registerFailedEvent(MathUtils.elapsedNanos(enqueueNanos), TimeUnit.NANOSECONDS);</span>
+        }
+<span class="nc" id="L75">    }</span>
+
+    @Override
+    public void safeRun() {
+<span class="nc bnc" id="L79" title="All 2 branches missed.">        if (!isVersionCompatible()) {</span>
+<span class="nc" id="L80">            sendResponse(BookieProtocol.EBADVERSION,</span>
+<span class="nc" id="L81">                         ResponseBuilder.buildErrorResponse(BookieProtocol.EBADVERSION, request),</span>
+<span class="nc" id="L82">                         requestProcessor.getRequestStats().getReadRequestStats());</span>
+<span class="nc" id="L83">            return;</span>
+        }
+<span class="nc" id="L85">        processPacket();</span>
+<span class="nc" id="L86">    }</span>
+
+    protected abstract void processPacket();
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

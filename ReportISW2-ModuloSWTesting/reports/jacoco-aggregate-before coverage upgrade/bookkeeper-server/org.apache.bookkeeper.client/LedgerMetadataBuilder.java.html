@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>LedgerMetadataBuilder.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">LedgerMetadataBuilder.java</span></div><h1>LedgerMetadataBuilder.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.client;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+import static org.apache.bookkeeper.meta.LedgerMetadataSerDe.CURRENT_METADATA_FORMAT_VERSION;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
+
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.TreeMap;
+
+import org.apache.bookkeeper.client.api.DigestType;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.client.api.LedgerMetadata.State;
+import org.apache.bookkeeper.common.annotation.InterfaceAudience.LimitedPrivate;
+import org.apache.bookkeeper.common.annotation.InterfaceStability.Unstable;
+import org.apache.bookkeeper.net.BookieId;
+
+/**
+ * Builder for building LedgerMetadata objects.
+ */
+@LimitedPrivate
+@Unstable
+@VisibleForTesting
+<span class="nc" id="L47">public class LedgerMetadataBuilder {</span>
+<span class="nc" id="L48">    private long ledgerId = -1L;</span>
+<span class="nc" id="L49">    private int metadataFormatVersion = CURRENT_METADATA_FORMAT_VERSION;</span>
+<span class="nc" id="L50">    private int ensembleSize = 3;</span>
+<span class="nc" id="L51">    private int writeQuorumSize = 3;</span>
+<span class="nc" id="L52">    private int ackQuorumSize = 2;</span>
+
+<span class="nc" id="L54">    private State state = State.OPEN;</span>
+<span class="nc" id="L55">    private Optional&lt;Long&gt; lastEntryId = Optional.empty();</span>
+<span class="nc" id="L56">    private Optional&lt;Long&gt; length = Optional.empty();</span>
+
+<span class="nc" id="L58">    private TreeMap&lt;Long, List&lt;BookieId&gt;&gt; ensembles = new TreeMap&lt;&gt;();</span>
+
+<span class="nc" id="L60">    private Optional&lt;DigestType&gt; digestType = Optional.empty();</span>
+<span class="nc" id="L61">    private Optional&lt;byte[]&gt; password = Optional.empty();</span>
+
+<span class="nc" id="L63">    private long ctime = -1;</span>
+<span class="nc" id="L64">    private boolean storeCtime = false;</span>
+<span class="nc" id="L65">    private Map&lt;String, byte[]&gt; customMetadata = Collections.emptyMap();</span>
+
+    private static final long BLANK_CTOKEN = 0;
+<span class="nc" id="L68">    private long cToken = BLANK_CTOKEN;</span>
+
+    public static LedgerMetadataBuilder create() {
+<span class="nc" id="L71">        return new LedgerMetadataBuilder();</span>
+    }
+
+    public static LedgerMetadataBuilder from(LedgerMetadata other) {
+<span class="nc" id="L75">        LedgerMetadataBuilder builder = new LedgerMetadataBuilder();</span>
+<span class="nc" id="L76">        builder.ledgerId = other.getLedgerId();</span>
+<span class="nc" id="L77">        builder.metadataFormatVersion = other.getMetadataFormatVersion();</span>
+<span class="nc" id="L78">        builder.ensembleSize = other.getEnsembleSize();</span>
+<span class="nc" id="L79">        builder.writeQuorumSize = other.getWriteQuorumSize();</span>
+<span class="nc" id="L80">        builder.ackQuorumSize = other.getAckQuorumSize();</span>
+
+<span class="nc" id="L82">        builder.state = other.getState();</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">        if (builder.state == State.CLOSED) {</span>
+<span class="nc" id="L84">            builder.lastEntryId = Optional.of(other.getLastEntryId());</span>
+<span class="nc" id="L85">            builder.length = Optional.of(other.getLength());</span>
+        }
+
+<span class="nc" id="L88">        builder.ensembles.putAll(other.getAllEnsembles());</span>
+
+<span class="nc bnc" id="L90" title="All 2 branches missed.">        if (other.hasPassword()) {</span>
+<span class="nc" id="L91">            builder.password = Optional.of(other.getPassword());</span>
+<span class="nc" id="L92">            builder.digestType = Optional.of(other.getDigestType());</span>
+        }
+
+<span class="nc" id="L95">        builder.ctime = other.getCtime();</span>
+
+        /** Hack to get around fact that ctime was never versioned correctly */
+<span class="nc" id="L98">        builder.storeCtime = LedgerMetadataUtils.shouldStoreCtime(other);</span>
+
+<span class="nc" id="L100">        builder.customMetadata = ImmutableMap.copyOf(other.getCustomMetadata());</span>
+
+<span class="nc" id="L102">        return builder;</span>
+    }
+
+    public LedgerMetadataBuilder withId(long ledgerId) {
+<span class="nc" id="L106">        this.ledgerId = ledgerId;</span>
+<span class="nc" id="L107">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder withMetadataFormatVersion(int version) {
+<span class="nc" id="L111">        this.metadataFormatVersion = version;</span>
+<span class="nc" id="L112">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder withPassword(byte[] password) {
+<span class="nc" id="L116">        this.password = Optional.of(Arrays.copyOf(password, password.length));</span>
+<span class="nc" id="L117">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder withDigestType(DigestType digestType) {
+<span class="nc" id="L121">        this.digestType = Optional.of(digestType);</span>
+<span class="nc" id="L122">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder withEnsembleSize(int ensembleSize) {
+<span class="nc bnc" id="L126" title="All 2 branches missed.">        checkState(ensembles.size() == 0, &quot;Can only set ensemble size before adding ensembles to the builder&quot;);</span>
+<span class="nc" id="L127">        this.ensembleSize = ensembleSize;</span>
+<span class="nc" id="L128">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder withWriteQuorumSize(int writeQuorumSize) {
+<span class="nc" id="L132">        this.writeQuorumSize = writeQuorumSize;</span>
+<span class="nc" id="L133">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder withAckQuorumSize(int ackQuorumSize) {
+<span class="nc" id="L137">        this.ackQuorumSize = ackQuorumSize;</span>
+<span class="nc" id="L138">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder newEnsembleEntry(long firstEntry, List&lt;BookieId&gt; ensemble) {
+<span class="nc bnc" id="L142" title="All 2 branches missed.">        checkArgument(ensemble.size() == ensembleSize,</span>
+                      &quot;Size of passed in ensemble must match the ensembleSize of the builder&quot;);
+<span class="nc bnc" id="L144" title="All 4 branches missed.">        checkArgument(ensembles.isEmpty() || firstEntry &gt; ensembles.lastKey(),</span>
+                      &quot;New entry must have a first entry greater than any existing ensemble key&quot;);
+<span class="nc" id="L146">        ensembles.put(firstEntry, ensemble);</span>
+<span class="nc" id="L147">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder replaceEnsembleEntry(long firstEntry, List&lt;BookieId&gt; ensemble) {
+<span class="nc bnc" id="L151" title="All 2 branches missed.">        checkArgument(ensemble.size() == ensembleSize,</span>
+                      &quot;Size of passed in ensemble must match the ensembleSize of the builder&quot;);
+<span class="nc" id="L153">        checkArgument(ensembles.containsKey(firstEntry),</span>
+                      &quot;Ensemble must replace an existing ensemble in the ensemble map&quot;);
+<span class="nc" id="L155">        ensembles.put(firstEntry, ensemble);</span>
+<span class="nc" id="L156">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder withInRecoveryState() {
+<span class="nc" id="L160">        this.state = State.IN_RECOVERY;</span>
+<span class="nc" id="L161">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder withClosedState() {
+<span class="nc" id="L165">        this.state = State.CLOSED;</span>
+<span class="nc" id="L166">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder withLastEntryId(long lastEntryId) {
+<span class="nc" id="L170">        this.lastEntryId = Optional.of(lastEntryId);</span>
+<span class="nc" id="L171">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder withLength(long length) {
+<span class="nc" id="L175">        this.length = Optional.of(length);</span>
+<span class="nc" id="L176">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder withCustomMetadata(Map&lt;String, byte[]&gt; customMetadata) {
+<span class="nc" id="L180">        this.customMetadata = ImmutableMap.copyOf(customMetadata);</span>
+<span class="nc" id="L181">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder withCreationTime(long ctime) {
+<span class="nc" id="L185">        this.ctime = ctime;</span>
+<span class="nc" id="L186">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder storingCreationTime(boolean storing) {
+<span class="nc" id="L190">        this.storeCtime = storing;</span>
+<span class="nc" id="L191">        return this;</span>
+    }
+
+    public LedgerMetadataBuilder withCToken(long cToken) {
+<span class="nc" id="L195">        this.cToken = cToken;</span>
+<span class="nc" id="L196">        return this;</span>
+    }
+
+    public LedgerMetadata build() {
+<span class="nc bnc" id="L200" title="All 2 branches missed.">        checkArgument(ledgerId &gt;= 0, &quot;Ledger id must be set&quot;);</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">        checkArgument(ensembleSize &gt;= writeQuorumSize, &quot;Write quorum must be less or equal to ensemble size&quot;);</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">        checkArgument(writeQuorumSize &gt;= ackQuorumSize, &quot;Write quorum must be greater or equal to ack quorum&quot;);</span>
+
+<span class="nc" id="L204">        return new LedgerMetadataImpl(ledgerId, metadataFormatVersion,</span>
+                                      ensembleSize, writeQuorumSize, ackQuorumSize,
+                                      state, lastEntryId, length, ensembles,
+                                      digestType, password, ctime, storeCtime,
+                                      cToken,
+                                      customMetadata);
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

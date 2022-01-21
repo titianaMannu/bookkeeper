@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ScriptBasedMapping.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.net</a> &gt; <span class="el_source">ScriptBasedMapping.java</span></div><h1>ScriptBasedMapping.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.bookkeeper.net;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.StringTokenizer;
+
+import org.apache.bookkeeper.util.Shell.ShellCommandExecutor;
+import org.apache.commons.configuration.Configuration;
+import org.apache.commons.lang.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * This class implements the {@link DNSToSwitchMapping} interface using a
+ * script configured via the
+ * {@link CommonConfigurationKeys#NET_TOPOLOGY_SCRIPT_FILE_NAME_KEY} option.
+ * &lt;p/&gt;
+ * It contains a static class &lt;code&gt;RawScriptBasedMapping&lt;/code&gt; that performs
+ * the work: reading the configuration parameters, executing any defined
+ * script, handling errors and such like. The outer
+ * class extends {@link CachedDNSToSwitchMapping} to cache the delegated
+ * queries.
+ * &lt;p/&gt;
+ * This DNS mapper's {@link #isSingleSwitch()} predicate returns
+ * true if and only if a script is defined.
+ */
+public final class ScriptBasedMapping extends CachedDNSToSwitchMapping {
+
+    /**
+     * Minimum number of arguments: {@value}.
+     */
+    static final int MIN_ALLOWABLE_ARGS = 1;
+
+    /**
+     * Default number of arguments: {@value}.
+     */
+    static final int DEFAULT_ARG_COUNT = CommonConfigurationKeys.NET_TOPOLOGY_SCRIPT_NUMBER_ARGS_DEFAULT;
+
+    /**
+     * Key to the script filename {@value}.
+     */
+    static final String SCRIPT_FILENAME_KEY = CommonConfigurationKeys.NET_TOPOLOGY_SCRIPT_FILE_NAME_KEY;
+    /**
+     * Key to the argument count that the script supports
+     * {@value}.
+     */
+    static final String SCRIPT_ARG_COUNT_KEY = CommonConfigurationKeys.NET_TOPOLOGY_SCRIPT_NUMBER_ARGS_KEY;
+    /**
+     * Text used in the {@link #toString()} method if there is no string
+     * {@value}.
+     */
+    public static final String NO_SCRIPT = &quot;no script&quot;;
+
+    /**
+     * Create an instance with the default configuration.
+     *
+     * &lt;p&gt;Calling {@link #setConf(Configuration)} will trigger a
+     * re-evaluation of the configuration settings and so be used to
+     * set up the mapping script.
+     *
+     */
+    public ScriptBasedMapping() {
+<span class="nc" id="L82">        super(new RawScriptBasedMapping());</span>
+<span class="nc" id="L83">    }</span>
+
+    /**
+     * Create an instance from the given configuration.
+     * @param conf configuration
+     */
+    public ScriptBasedMapping(Configuration conf) {
+<span class="nc" id="L90">        this();</span>
+<span class="nc" id="L91">        setConf(conf);</span>
+<span class="nc" id="L92">    }</span>
+
+    /**
+     * Get the cached mapping and convert it to its real type.
+     * @return the inner raw script mapping.
+     */
+    private RawScriptBasedMapping getRawMapping() {
+<span class="nc" id="L99">        return (RawScriptBasedMapping) rawMapping;</span>
+    }
+
+    @Override
+    public Configuration getConf() {
+<span class="nc" id="L104">        return getRawMapping().getConf();</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L109">        return &quot;script-based mapping with &quot; + getRawMapping().toString();</span>
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * &lt;p&gt;This will get called in the superclass constructor, so a check is needed
+     * to ensure that the raw mapping is defined before trying to relaying a null
+     * configuration.
+     * @param conf
+     */
+    @Override
+    public void setConf(Configuration conf) {
+<span class="nc" id="L122">        super.setConf(conf);</span>
+<span class="nc" id="L123">        getRawMapping().setConf(conf);</span>
+<span class="nc" id="L124">    }</span>
+
+    /**
+     * This is the uncached script mapping that is fed into the cache managed
+     * by the superclass {@link CachedDNSToSwitchMapping}.
+     */
+    private static final class RawScriptBasedMapping extends AbstractDNSToSwitchMapping {
+        private String scriptName;
+        private int maxArgs; //max hostnames per call of the script
+<span class="nc" id="L133">        private static final Logger LOG = LoggerFactory.getLogger(RawScriptBasedMapping.class);</span>
+
+        /*
+         * extract 'scriptName' and 'maxArgs' parameters from the conf and throw
+         * RuntimeException if 'scriptName' is null. Also for sanity check
+         * purpose try executing the script with no arguments. Here it is
+         * expected that running script with no arguments would do sanity check
+         * of the script and the env, and return successfully if script and env.
+         * are valid. If sanity check of the script with no argument fails then
+         * throw RuntimeException.
+         *
+         */
+        @Override
+        protected void validateConf() {
+<span class="nc" id="L147">            Configuration conf = getConf();</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">            if (conf != null) {</span>
+<span class="nc" id="L149">                String scriptNameConfValue = conf.getString(SCRIPT_FILENAME_KEY);</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">                if (StringUtils.isNotBlank(scriptNameConfValue)) {</span>
+<span class="nc" id="L151">                    scriptName = scriptNameConfValue;</span>
+<span class="nc" id="L152">                    maxArgs = conf.getInt(SCRIPT_ARG_COUNT_KEY, DEFAULT_ARG_COUNT);</span>
+                } else {
+<span class="nc" id="L154">                    scriptName = null;</span>
+<span class="nc" id="L155">                    maxArgs = 0;</span>
+                }
+<span class="nc" id="L157">            } else {</span>
+<span class="nc" id="L158">                scriptName = null;</span>
+<span class="nc" id="L159">                maxArgs = 0;</span>
+            }
+
+<span class="nc bnc" id="L162" title="All 2 branches missed.">            if (null == scriptName) {</span>
+<span class="nc" id="L163">                throw new RuntimeException(&quot;No network topology script is found when using script&quot;</span>
+                        + &quot; based DNS resolver.&quot;);
+            } else {
+<span class="nc" id="L166">                File dir = null;</span>
+                String userDir;
+<span class="nc bnc" id="L168" title="All 2 branches missed.">                if ((userDir = System.getProperty(&quot;user.dir&quot;)) != null) {</span>
+<span class="nc" id="L169">                    dir = new File(userDir);</span>
+                }
+<span class="nc" id="L171">                String[] execString = { this.scriptName };</span>
+<span class="nc" id="L172">                ShellCommandExecutor s = new ShellCommandExecutor(execString, dir);</span>
+                try {
+<span class="nc" id="L174">                    s.execute();</span>
+<span class="nc" id="L175">                } catch (Exception e) {</span>
+<span class="nc" id="L176">                    LOG.error(&quot;Conf validation failed. Got exception for sanity check of script: &quot; + this.scriptName,</span>
+                            e);
+<span class="nc" id="L178">                    throw new RuntimeException(</span>
+                            &quot;Conf validation failed. Got exception for sanity check of script: &quot; + this.scriptName, e);
+<span class="nc" id="L180">                }</span>
+            }
+<span class="nc" id="L182">        }</span>
+
+        /**
+         * Constructor. The mapping is not ready to use until
+         * {@link #setConf(Configuration)} has been called
+         */
+<span class="nc" id="L188">        public RawScriptBasedMapping() {</span>
+<span class="nc" id="L189">        }</span>
+
+        @Override
+        public List&lt;String&gt; resolve(List&lt;String&gt; names) {
+<span class="nc" id="L193">            List&lt;String&gt; m = new ArrayList&lt;String&gt;(names.size());</span>
+
+<span class="nc bnc" id="L195" title="All 2 branches missed.">            if (names.isEmpty()) {</span>
+<span class="nc" id="L196">                return m;</span>
+            }
+
+<span class="nc bnc" id="L199" title="All 2 branches missed.">            if (scriptName == null) {</span>
+<span class="nc" id="L200">                return null;</span>
+            }
+
+<span class="nc" id="L203">            String output = runResolveCommand(names);</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">            if (output != null) {</span>
+<span class="nc" id="L205">                StringTokenizer allSwitchInfo = new StringTokenizer(output);</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                while (allSwitchInfo.hasMoreTokens()) {</span>
+<span class="nc" id="L207">                    String switchInfo = allSwitchInfo.nextToken();</span>
+<span class="nc" id="L208">                    m.add(switchInfo);</span>
+<span class="nc" id="L209">                }</span>
+
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                if (m.size() != names.size()) {</span>
+                    // invalid number of entries returned by the script
+<span class="nc" id="L213">                    LOG.error(&quot;Script &quot; + scriptName + &quot; returned &quot; + Integer.toString(m.size()) + &quot; values when &quot;</span>
+<span class="nc" id="L214">                            + Integer.toString(names.size()) + &quot; were expected.&quot;);</span>
+<span class="nc" id="L215">                    return null;</span>
+                }
+<span class="nc" id="L217">            } else {</span>
+                // an error occurred. return null to signify this.
+                // (exn was already logged in runResolveCommand)
+<span class="nc" id="L220">                return null;</span>
+            }
+
+<span class="nc" id="L223">            return m;</span>
+        }
+
+        /**
+         * Build and execute the resolution command. The command is
+         * executed in the directory specified by the system property
+         * &quot;user.dir&quot; if set; otherwise the current working directory is used
+         * @param args a list of arguments
+         * @return null if the number of arguments is out of range,
+         * or the output of the command.
+         */
+        private String runResolveCommand(List&lt;String&gt; args) {
+<span class="nc" id="L235">            int loopCount = 0;</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">            if (args.size() == 0) {</span>
+<span class="nc" id="L237">                return null;</span>
+            }
+<span class="nc" id="L239">            StringBuilder allOutput = new StringBuilder();</span>
+<span class="nc" id="L240">            int numProcessed = 0;</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">            if (maxArgs &lt; MIN_ALLOWABLE_ARGS) {</span>
+<span class="nc" id="L242">                LOG.warn(&quot;Invalid value &quot; + Integer.toString(maxArgs) + &quot; for &quot; + SCRIPT_ARG_COUNT_KEY</span>
+<span class="nc" id="L243">                        + &quot;; must be &gt;= &quot; + Integer.toString(MIN_ALLOWABLE_ARGS));</span>
+<span class="nc" id="L244">                return null;</span>
+            }
+
+<span class="nc bnc" id="L247" title="All 2 branches missed.">            while (numProcessed != args.size()) {</span>
+<span class="nc" id="L248">                int start = maxArgs * loopCount;</span>
+<span class="nc" id="L249">                List&lt;String&gt; cmdList = new ArrayList&lt;String&gt;();</span>
+<span class="nc" id="L250">                cmdList.add(scriptName);</span>
+<span class="nc" id="L251">                for (numProcessed = start;</span>
+<span class="nc bnc" id="L252" title="All 4 branches missed.">                     numProcessed &lt; (start + maxArgs) &amp;&amp; numProcessed &lt; args.size();</span>
+<span class="nc" id="L253">                     numProcessed++) {</span>
+<span class="nc" id="L254">                    cmdList.add(args.get(numProcessed));</span>
+                }
+<span class="nc" id="L256">                File dir = null;</span>
+                String userDir;
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                if ((userDir = System.getProperty(&quot;user.dir&quot;)) != null) {</span>
+<span class="nc" id="L259">                    dir = new File(userDir);</span>
+                }
+<span class="nc" id="L261">                ShellCommandExecutor s = new ShellCommandExecutor(cmdList.toArray(new String[cmdList.size()]), dir);</span>
+                try {
+<span class="nc" id="L263">                    s.execute();</span>
+<span class="nc" id="L264">                    allOutput.append(s.getOutput()).append(&quot; &quot;);</span>
+<span class="nc" id="L265">                } catch (Exception e) {</span>
+<span class="nc" id="L266">                    LOG.warn(&quot;Exception running: {} Exception message: {}&quot;, s, e.getMessage());</span>
+<span class="nc" id="L267">                    return null;</span>
+<span class="nc" id="L268">                }</span>
+<span class="nc" id="L269">                loopCount++;</span>
+<span class="nc" id="L270">            }</span>
+<span class="nc" id="L271">            return allOutput.toString();</span>
+        }
+
+        /**
+         * Declare that the mapper is single-switched if a script was not named
+         * in the configuration.
+         * @return true iff there is no script
+         */
+        @Override
+        public boolean isSingleSwitch() {
+<span class="nc bnc" id="L281" title="All 2 branches missed.">            return scriptName == null;</span>
+        }
+
+        @Override
+        public String toString() {
+<span class="nc bnc" id="L286" title="All 2 branches missed.">            return scriptName != null ? (&quot;script &quot; + scriptName) : NO_SCRIPT;</span>
+        }
+
+        @Override
+        public void reloadCachedMappings() {
+            // Nothing to do here, since RawScriptBasedMapping has no cache, and
+            // does not inherit from CachedDNSToSwitchMapping
+<span class="nc" id="L293">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

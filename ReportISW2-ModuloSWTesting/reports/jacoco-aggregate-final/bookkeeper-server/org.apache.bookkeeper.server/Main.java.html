@@ -1,0 +1,387 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>Main.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.server</a> &gt; <span class="el_source">Main.java</span></div><h1>Main.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.bookkeeper.server;
+
+import static org.apache.bookkeeper.replication.ReplicationStats.REPLICATION_SCOPE;
+import static org.apache.bookkeeper.server.component.ServerLifecycleComponent.loadServerComponents;
+
+import java.io.File;
+import java.net.MalformedURLException;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.bookie.ExitCode;
+import org.apache.bookkeeper.bookie.ScrubberStats;
+import org.apache.bookkeeper.common.component.ComponentInfoPublisher;
+import org.apache.bookkeeper.common.component.ComponentStarter;
+import org.apache.bookkeeper.common.component.LifecycleComponent;
+import org.apache.bookkeeper.common.component.LifecycleComponentStack;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.conf.UncheckedConfigurationException;
+import org.apache.bookkeeper.discover.BookieServiceInfo;
+import org.apache.bookkeeper.discover.BookieServiceInfo.Endpoint;
+import org.apache.bookkeeper.server.component.ServerLifecycleComponent;
+import org.apache.bookkeeper.server.conf.BookieConfiguration;
+import org.apache.bookkeeper.server.http.BKHttpServiceProvider;
+import org.apache.bookkeeper.server.service.AutoRecoveryService;
+import org.apache.bookkeeper.server.service.BookieService;
+import org.apache.bookkeeper.server.service.HttpService;
+import org.apache.bookkeeper.server.service.ScrubberService;
+import org.apache.bookkeeper.server.service.StatsProviderService;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.commons.cli.BasicParser;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.Option;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
+import org.apache.commons.configuration.ConfigurationException;
+import org.apache.commons.lang3.StringUtils;
+
+/**
+ * A bookie server is a server that run bookie and serving rpc requests.
+ *
+ * &lt;p&gt;It is a rewritten server using {@link org.apache.bookkeeper.common.component.LifecycleComponent},
+ * replacing the legacy server {@link org.apache.bookkeeper.proto.BookieServer}.
+ */
+<span class="nc" id="L66">@Slf4j</span>
+<span class="nc" id="L67">public class Main {</span>
+
+<span class="nc" id="L69">    static final Options BK_OPTS = new Options();</span>
+    static {
+<span class="nc" id="L71">        BK_OPTS.addOption(&quot;c&quot;, &quot;conf&quot;, true, &quot;Configuration for Bookie Server&quot;);</span>
+<span class="nc" id="L72">        BK_OPTS.addOption(&quot;withAutoRecovery&quot;, false,</span>
+                &quot;Start Autorecovery service Bookie server&quot;);
+<span class="nc" id="L74">        BK_OPTS.addOption(&quot;r&quot;, &quot;readOnly&quot;, false,</span>
+                &quot;Force Start a ReadOnly Bookie server&quot;);
+<span class="nc" id="L76">        BK_OPTS.addOption(&quot;z&quot;, &quot;zkserver&quot;, true, &quot;Zookeeper Server&quot;);</span>
+<span class="nc" id="L77">        BK_OPTS.addOption(&quot;m&quot;, &quot;zkledgerpath&quot;, true, &quot;Zookeeper ledgers root path&quot;);</span>
+<span class="nc" id="L78">        BK_OPTS.addOption(&quot;p&quot;, &quot;bookieport&quot;, true, &quot;bookie port exported&quot;);</span>
+<span class="nc" id="L79">        BK_OPTS.addOption(&quot;j&quot;, &quot;journal&quot;, true, &quot;bookie journal directory&quot;);</span>
+<span class="nc" id="L80">        Option indexDirs = new Option (&quot;i&quot;, &quot;indexdirs&quot;, true, &quot;bookie index directories&quot;);</span>
+<span class="nc" id="L81">        indexDirs.setArgs(10);</span>
+<span class="nc" id="L82">        BK_OPTS.addOption(indexDirs);</span>
+<span class="nc" id="L83">        Option ledgerDirs = new Option (&quot;l&quot;, &quot;ledgerdirs&quot;, true, &quot;bookie ledgers directories&quot;);</span>
+<span class="nc" id="L84">        ledgerDirs.setArgs(10);</span>
+<span class="nc" id="L85">        BK_OPTS.addOption(ledgerDirs);</span>
+<span class="nc" id="L86">        BK_OPTS.addOption(&quot;h&quot;, &quot;help&quot;, false, &quot;Print help message&quot;);</span>
+<span class="nc" id="L87">    }</span>
+
+    /**
+     * Print usage.
+     */
+    private static void printUsage() {
+<span class="nc" id="L93">        HelpFormatter hf = new HelpFormatter();</span>
+<span class="nc" id="L94">        String header = &quot;\n&quot;</span>
+            + &quot;BookieServer provide an interface to start a bookie with configuration file and/or arguments.&quot;
+            + &quot;The settings in configuration file will be overwrite by provided arguments.\n&quot;
+            + &quot;Options including:\n&quot;;
+<span class="nc" id="L98">        String footer = &quot;Here is an example:\n&quot;</span>
+            + &quot;\tBookieServer -c bookie.conf -z localhost:2181 -m /bookkeeper/ledgers &quot;
+            + &quot;-p 3181 -j /mnt/journal -i \&quot;/mnt/index1 /mnt/index2\&quot;&quot;
+            + &quot; -l \&quot;/mnt/ledger1 /mnt/ledger2 /mnt/ledger3\&quot;\n&quot;;
+<span class="nc" id="L102">        hf.printHelp(&quot;BookieServer [options]\n&quot;, header, BK_OPTS, footer, true);</span>
+<span class="nc" id="L103">    }</span>
+
+    private static void loadConfFile(ServerConfiguration conf, String confFile)
+        throws IllegalArgumentException {
+        try {
+<span class="nc" id="L108">            conf.loadConf(new File(confFile).toURI().toURL());</span>
+<span class="nc" id="L109">            conf.validate();</span>
+<span class="nc" id="L110">        } catch (MalformedURLException e) {</span>
+<span class="nc" id="L111">            log.error(&quot;Could not open configuration file: {}&quot;, confFile, e);</span>
+<span class="nc" id="L112">            throw new IllegalArgumentException();</span>
+<span class="nc" id="L113">        } catch (ConfigurationException e) {</span>
+<span class="nc" id="L114">            log.error(&quot;Malformed configuration file: {}&quot;, confFile, e);</span>
+<span class="nc" id="L115">            throw new IllegalArgumentException();</span>
+<span class="nc" id="L116">        }</span>
+<span class="nc" id="L117">        log.info(&quot;Using configuration file {}&quot;, confFile);</span>
+<span class="nc" id="L118">    }</span>
+
+    @SuppressWarnings(&quot;deprecation&quot;)
+    private static ServerConfiguration parseArgs(String[] args)
+        throws IllegalArgumentException {
+        try {
+<span class="nc" id="L124">            BasicParser parser = new BasicParser();</span>
+<span class="nc" id="L125">            CommandLine cmdLine = parser.parse(BK_OPTS, args);</span>
+
+<span class="nc bnc" id="L127" title="All 2 branches missed.">            if (cmdLine.hasOption('h')) {</span>
+<span class="nc" id="L128">                throw new IllegalArgumentException();</span>
+            }
+
+<span class="nc" id="L131">            ServerConfiguration conf = new ServerConfiguration();</span>
+
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            if (cmdLine.hasOption('c')) {</span>
+<span class="nc" id="L134">                String confFile = cmdLine.getOptionValue(&quot;c&quot;);</span>
+<span class="nc" id="L135">                loadConfFile(conf, confFile);</span>
+            }
+
+<span class="nc bnc" id="L138" title="All 2 branches missed.">            if (cmdLine.hasOption(&quot;withAutoRecovery&quot;)) {</span>
+<span class="nc" id="L139">                conf.setAutoRecoveryDaemonEnabled(true);</span>
+            }
+
+<span class="nc bnc" id="L142" title="All 2 branches missed.">            if (cmdLine.hasOption(&quot;r&quot;)) {</span>
+<span class="nc" id="L143">                conf.setForceReadOnlyBookie(true);</span>
+            }
+
+<span class="nc" id="L146">            boolean overwriteMetadataServiceUri = false;</span>
+<span class="nc" id="L147">            String sZkLedgersRootPath = &quot;/ledgers&quot;;</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">            if (cmdLine.hasOption('m')) {</span>
+<span class="nc" id="L149">                sZkLedgersRootPath = cmdLine.getOptionValue('m');</span>
+<span class="nc" id="L150">                log.info(&quot;Get cmdline zookeeper ledger path: {}&quot;, sZkLedgersRootPath);</span>
+<span class="nc" id="L151">                overwriteMetadataServiceUri = true;</span>
+            }
+
+
+<span class="nc" id="L155">            String sZK = conf.getZkServers();</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            if (cmdLine.hasOption('z')) {</span>
+<span class="nc" id="L157">                sZK = cmdLine.getOptionValue('z');</span>
+<span class="nc" id="L158">                log.info(&quot;Get cmdline zookeeper instance: {}&quot;, sZK);</span>
+<span class="nc" id="L159">                overwriteMetadataServiceUri = true;</span>
+            }
+
+            // command line arguments overwrite settings in configuration file
+<span class="nc bnc" id="L163" title="All 2 branches missed.">            if (overwriteMetadataServiceUri) {</span>
+<span class="nc" id="L164">                String metadataServiceUri = &quot;zk://&quot; + sZK + sZkLedgersRootPath;</span>
+<span class="nc" id="L165">                conf.setMetadataServiceUri(metadataServiceUri);</span>
+<span class="nc" id="L166">                log.info(&quot;Overwritten service uri to {}&quot;, metadataServiceUri);</span>
+            }
+
+<span class="nc bnc" id="L169" title="All 2 branches missed.">            if (cmdLine.hasOption('p')) {</span>
+<span class="nc" id="L170">                String sPort = cmdLine.getOptionValue('p');</span>
+<span class="nc" id="L171">                log.info(&quot;Get cmdline bookie port: {}&quot;, sPort);</span>
+<span class="nc" id="L172">                Integer iPort = Integer.parseInt(sPort);</span>
+<span class="nc" id="L173">                conf.setBookiePort(iPort.intValue());</span>
+            }
+
+<span class="nc bnc" id="L176" title="All 2 branches missed.">            if (cmdLine.hasOption('j')) {</span>
+<span class="nc" id="L177">                String sJournalDir = cmdLine.getOptionValue('j');</span>
+<span class="nc" id="L178">                log.info(&quot;Get cmdline journal dir: {}&quot;, sJournalDir);</span>
+<span class="nc" id="L179">                conf.setJournalDirName(sJournalDir);</span>
+            }
+
+<span class="nc bnc" id="L182" title="All 2 branches missed.">            if (cmdLine.hasOption('i')) {</span>
+<span class="nc" id="L183">                String[] sIndexDirs = cmdLine.getOptionValues('i');</span>
+<span class="nc" id="L184">                log.info(&quot;Get cmdline index dirs: &quot;);</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">                for (String index : sIndexDirs) {</span>
+<span class="nc" id="L186">                    log.info(&quot;indexDir : {}&quot;, index);</span>
+                }
+<span class="nc" id="L188">                conf.setIndexDirName(sIndexDirs);</span>
+            }
+
+<span class="nc bnc" id="L191" title="All 2 branches missed.">            if (cmdLine.hasOption('l')) {</span>
+<span class="nc" id="L192">                String[] sLedgerDirs = cmdLine.getOptionValues('l');</span>
+<span class="nc" id="L193">                log.info(&quot;Get cmdline ledger dirs: &quot;);</span>
+<span class="nc bnc" id="L194" title="All 2 branches missed.">                for (String ledger : sLedgerDirs) {</span>
+<span class="nc" id="L195">                    log.info(&quot;ledgerdir : {}&quot;, ledger);</span>
+                }
+<span class="nc" id="L197">                conf.setLedgerDirNames(sLedgerDirs);</span>
+            }
+
+<span class="nc" id="L200">            return conf;</span>
+<span class="nc" id="L201">        } catch (ParseException e) {</span>
+<span class="nc" id="L202">            log.error(&quot;Error parsing command line arguments : &quot;, e);</span>
+<span class="nc" id="L203">            throw new IllegalArgumentException(e);</span>
+        }
+    }
+
+    public static void main(String[] args) {
+<span class="nc" id="L208">        int retCode = doMain(args);</span>
+<span class="nc" id="L209">        Runtime.getRuntime().exit(retCode);</span>
+<span class="nc" id="L210">    }</span>
+
+    static int doMain(String[] args) {
+
+        ServerConfiguration conf;
+
+        // 0. parse command line
+        try {
+<span class="nc" id="L218">            conf = parseCommandLine(args);</span>
+<span class="nc" id="L219">        } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L220">            return ExitCode.INVALID_CONF;</span>
+<span class="nc" id="L221">        }</span>
+
+        // 1. building the component stack:
+        LifecycleComponent server;
+        try {
+<span class="nc" id="L226">            server = buildBookieServer(new BookieConfiguration(conf));</span>
+<span class="nc" id="L227">        } catch (Exception e) {</span>
+<span class="nc" id="L228">            log.error(&quot;Failed to build bookie server&quot;, e);</span>
+<span class="nc" id="L229">            return ExitCode.SERVER_EXCEPTION;</span>
+<span class="nc" id="L230">        }</span>
+
+        // 2. start the server
+        try {
+<span class="nc" id="L234">            ComponentStarter.startComponent(server).get();</span>
+<span class="nc" id="L235">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L236">            Thread.currentThread().interrupt();</span>
+            // the server is interrupted
+<span class="nc" id="L238">            log.info(&quot;Bookie server is interrupted. Exiting ...&quot;);</span>
+<span class="nc" id="L239">        } catch (ExecutionException ee) {</span>
+<span class="nc" id="L240">            log.error(&quot;Error in bookie shutdown&quot;, ee.getCause());</span>
+<span class="nc" id="L241">            return ExitCode.SERVER_EXCEPTION;</span>
+<span class="nc" id="L242">        }</span>
+<span class="nc" id="L243">        return ExitCode.OK;</span>
+    }
+
+    private static ServerConfiguration parseCommandLine(String[] args)
+            throws IllegalArgumentException, UncheckedConfigurationException {
+        ServerConfiguration conf;
+        try {
+<span class="nc" id="L250">            conf = parseArgs(args);</span>
+<span class="nc" id="L251">        } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L252">            log.error(&quot;Error parsing command line arguments : &quot;, iae);</span>
+<span class="nc" id="L253">            System.err.println(iae.getMessage());</span>
+<span class="nc" id="L254">            printUsage();</span>
+<span class="nc" id="L255">            throw iae;</span>
+<span class="nc" id="L256">        }</span>
+<span class="nc" id="L257">        String hello = String.format(</span>
+            &quot;Hello, I'm your bookie, bookieId is %1$s, listening on port %2$s. Metadata service uri is %3$s.&quot;
+                + &quot; Journals are in %4$s. Ledgers are stored in %5$s.&quot;,
+<span class="nc bnc" id="L260" title="All 2 branches missed.">            conf.getBookieId() != null ? conf.getBookieId() : &quot;&lt;not-set&gt;&quot;,</span>
+<span class="nc" id="L261">            conf.getBookiePort(),</span>
+<span class="nc" id="L262">            conf.getMetadataServiceUriUnchecked(),</span>
+<span class="nc" id="L263">            Arrays.asList(conf.getJournalDirNames()),</span>
+<span class="nc" id="L264">            Arrays.asList(conf.getLedgerDirNames()));</span>
+<span class="nc" id="L265">        log.info(hello);</span>
+
+<span class="nc" id="L267">        return conf;</span>
+    }
+
+    /**
+     * Build the bookie server.
+     *
+     * &lt;p&gt;The sequence of the components is:
+     *
+     * &lt;pre&gt;
+     * - stats provider
+     * - bookie server
+     * - autorecovery daemon
+     * - http service
+     * &lt;/pre&gt;
+     *
+     * @param conf bookie server configuration
+     * @return lifecycle stack
+     */
+    public static LifecycleComponentStack buildBookieServer(BookieConfiguration conf) throws Exception {
+
+<span class="nc" id="L287">        final ComponentInfoPublisher componentInfoPublisher = new ComponentInfoPublisher();</span>
+
+<span class="nc" id="L289">        final Supplier&lt;BookieServiceInfo&gt; bookieServiceInfoProvider =</span>
+<span class="nc" id="L290">                () -&gt; buildBookieServiceInfo(componentInfoPublisher);</span>
+        LifecycleComponentStack.Builder serverBuilder = LifecycleComponentStack
+<span class="nc" id="L292">                .newBuilder()</span>
+<span class="nc" id="L293">                .withComponentInfoPublisher(componentInfoPublisher)</span>
+<span class="nc" id="L294">                .withName(&quot;bookie-server&quot;);</span>
+
+        // 1. build stats provider
+<span class="nc" id="L297">        StatsProviderService statsProviderService =</span>
+            new StatsProviderService(conf);
+<span class="nc" id="L299">        StatsLogger rootStatsLogger = statsProviderService.getStatsProvider().getStatsLogger(&quot;&quot;);</span>
+<span class="nc" id="L300">        serverBuilder.addComponent(statsProviderService);</span>
+<span class="nc" id="L301">        log.info(&quot;Load lifecycle component : {}&quot;, StatsProviderService.class.getName());</span>
+
+        // 2. build bookie server
+<span class="nc" id="L304">        BookieService bookieService =</span>
+            new BookieService(conf, rootStatsLogger, bookieServiceInfoProvider);
+
+<span class="nc" id="L307">        serverBuilder.addComponent(bookieService);</span>
+<span class="nc" id="L308">        log.info(&quot;Load lifecycle component : {}&quot;, BookieService.class.getName());</span>
+
+<span class="nc bnc" id="L310" title="All 2 branches missed.">        if (conf.getServerConf().isLocalScrubEnabled()) {</span>
+<span class="nc" id="L311">            serverBuilder.addComponent(</span>
+                    new ScrubberService(
+<span class="nc" id="L313">                            rootStatsLogger.scope(ScrubberStats.SCOPE),</span>
+<span class="nc" id="L314">                    conf, bookieService.getServer().getBookie().getLedgerStorage()));</span>
+        }
+
+        // 3. build auto recovery
+<span class="nc bnc" id="L318" title="All 2 branches missed.">        if (conf.getServerConf().isAutoRecoveryDaemonEnabled()) {</span>
+<span class="nc" id="L319">            AutoRecoveryService autoRecoveryService =</span>
+<span class="nc" id="L320">                new AutoRecoveryService(conf, rootStatsLogger.scope(REPLICATION_SCOPE));</span>
+
+<span class="nc" id="L322">            serverBuilder.addComponent(autoRecoveryService);</span>
+<span class="nc" id="L323">            log.info(&quot;Load lifecycle component : {}&quot;, AutoRecoveryService.class.getName());</span>
+        }
+
+        // 4. build http service
+<span class="nc bnc" id="L327" title="All 2 branches missed.">        if (conf.getServerConf().isHttpServerEnabled()) {</span>
+<span class="nc" id="L328">            BKHttpServiceProvider provider = new BKHttpServiceProvider.Builder()</span>
+<span class="nc" id="L329">                .setBookieServer(bookieService.getServer())</span>
+<span class="nc" id="L330">                .setServerConfiguration(conf.getServerConf())</span>
+<span class="nc" id="L331">                .setStatsProvider(statsProviderService.getStatsProvider())</span>
+<span class="nc" id="L332">                .build();</span>
+<span class="nc" id="L333">            HttpService httpService =</span>
+                new HttpService(provider, conf, rootStatsLogger);
+<span class="nc" id="L335">            serverBuilder.addComponent(httpService);</span>
+<span class="nc" id="L336">            log.info(&quot;Load lifecycle component : {}&quot;, HttpService.class.getName());</span>
+        }
+
+        // 5. build extra services
+<span class="nc" id="L340">        String[] extraComponents = conf.getServerConf().getExtraServerComponents();</span>
+<span class="nc bnc" id="L341" title="All 2 branches missed.">        if (null != extraComponents) {</span>
+            try {
+<span class="nc" id="L343">                List&lt;ServerLifecycleComponent&gt; components = loadServerComponents(</span>
+                    extraComponents,
+                    conf,
+                    rootStatsLogger);
+<span class="nc bnc" id="L347" title="All 2 branches missed.">                for (ServerLifecycleComponent component : components) {</span>
+<span class="nc" id="L348">                    serverBuilder.addComponent(component);</span>
+<span class="nc" id="L349">                    log.info(&quot;Load lifecycle component : {}&quot;, component.getClass().getName());</span>
+<span class="nc" id="L350">                }</span>
+<span class="nc" id="L351">            } catch (Exception e) {</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">                if (conf.getServerConf().getIgnoreExtraServerComponentsStartupFailures()) {</span>
+<span class="nc" id="L353">                    log.info(&quot;Failed to load extra components '{}' - {}. Continuing without those components.&quot;,</span>
+<span class="nc" id="L354">                        StringUtils.join(extraComponents), e.getMessage());</span>
+                } else {
+<span class="nc" id="L356">                    throw e;</span>
+                }
+<span class="nc" id="L358">            }</span>
+        }
+
+<span class="nc" id="L361">        return serverBuilder.build();</span>
+    }
+
+    /**
+     * Create the {@link BookieServiceInfo} starting from the published endpoints.
+     *
+     * @see ComponentInfoPublisher
+     * @param componentInfoPublisher the endpoint publisher
+     * @return the created bookie service info
+     */
+    private static BookieServiceInfo buildBookieServiceInfo(ComponentInfoPublisher componentInfoPublisher) {
+<span class="nc" id="L372">        List&lt;Endpoint&gt; endpoints = componentInfoPublisher.getEndpoints().values()</span>
+<span class="nc" id="L373">                .stream().map(e -&gt; {</span>
+<span class="nc" id="L374">                    return new Endpoint(</span>
+<span class="nc" id="L375">                            e.getId(),</span>
+<span class="nc" id="L376">                            e.getPort(),</span>
+<span class="nc" id="L377">                            e.getHost(),</span>
+<span class="nc" id="L378">                            e.getProtocol(),</span>
+<span class="nc" id="L379">                            e.getAuth(),</span>
+<span class="nc" id="L380">                            e.getExtensions()</span>
+                    );
+<span class="nc" id="L382">                }).collect(Collectors.toList());</span>
+<span class="nc" id="L383">        return new BookieServiceInfo(componentInfoPublisher.getProperties(), endpoints);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

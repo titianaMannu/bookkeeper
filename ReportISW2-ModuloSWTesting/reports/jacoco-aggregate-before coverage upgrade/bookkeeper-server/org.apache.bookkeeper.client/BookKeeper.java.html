@@ -1,0 +1,1653 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>BookKeeper.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">BookKeeper.java</span></div><h1>BookKeeper.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.client;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.WATCHER_SCOPE;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.UnpooledByteBufAllocator;
+import io.netty.channel.EventLoopGroup;
+import io.netty.util.HashedWheelTimer;
+import io.netty.util.concurrent.DefaultThreadFactory;
+
+import java.io.IOException;
+import java.net.URI;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+import org.apache.bookkeeper.bookie.BookKeeperServerStats;
+import org.apache.bookkeeper.client.AsyncCallback.CreateCallback;
+import org.apache.bookkeeper.client.AsyncCallback.DeleteCallback;
+import org.apache.bookkeeper.client.AsyncCallback.IsClosedCallback;
+import org.apache.bookkeeper.client.AsyncCallback.OpenCallback;
+import org.apache.bookkeeper.client.BookieInfoReader.BookieInfo;
+import org.apache.bookkeeper.client.SyncCallbackUtils.SyncCreateAdvCallback;
+import org.apache.bookkeeper.client.SyncCallbackUtils.SyncCreateCallback;
+import org.apache.bookkeeper.client.SyncCallbackUtils.SyncDeleteCallback;
+import org.apache.bookkeeper.client.SyncCallbackUtils.SyncOpenCallback;
+import org.apache.bookkeeper.client.api.BookKeeperBuilder;
+import org.apache.bookkeeper.client.api.CreateBuilder;
+import org.apache.bookkeeper.client.api.DeleteBuilder;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.client.api.LedgersIterator;
+import org.apache.bookkeeper.client.api.ListLedgersResult;
+import org.apache.bookkeeper.client.api.ListLedgersResultBuilder;
+import org.apache.bookkeeper.client.api.OpenBuilder;
+import org.apache.bookkeeper.client.api.WriteFlag;
+import org.apache.bookkeeper.common.allocator.ByteBufAllocatorBuilder;
+import org.apache.bookkeeper.common.util.OrderedExecutor;
+import org.apache.bookkeeper.common.util.OrderedScheduler;
+import org.apache.bookkeeper.common.util.ReflectionUtils;
+import org.apache.bookkeeper.conf.AbstractConfiguration;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.feature.FeatureProvider;
+import org.apache.bookkeeper.feature.SettableFeatureProvider;
+import org.apache.bookkeeper.meta.CleanupLedgerManager;
+import org.apache.bookkeeper.meta.LedgerIdGenerator;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.meta.LedgerManager.LedgerRangeIterator;
+import org.apache.bookkeeper.meta.LedgerManagerFactory;
+import org.apache.bookkeeper.meta.MetadataClientDriver;
+import org.apache.bookkeeper.meta.MetadataDrivers;
+import org.apache.bookkeeper.meta.exceptions.MetadataException;
+import org.apache.bookkeeper.meta.zk.ZKMetadataClientDriver;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.net.DNSToSwitchMapping;
+import org.apache.bookkeeper.proto.BookieAddressResolver;
+import org.apache.bookkeeper.proto.BookieClient;
+import org.apache.bookkeeper.proto.BookieClientImpl;
+import org.apache.bookkeeper.proto.DataFormats;
+import org.apache.bookkeeper.stats.NullStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.util.EventLoopUtil;
+import org.apache.bookkeeper.util.SafeRunnable;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.apache.commons.configuration.ConfigurationException;
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.ZooKeeper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * BookKeeper client.
+ *
+ * &lt;p&gt;We assume there is one single writer to a ledger at any time.
+ *
+ * &lt;p&gt;There are four possible operations: start a new ledger, write to a ledger,
+ * read from a ledger and delete a ledger.
+ *
+ * &lt;p&gt;The exceptions resulting from synchronous calls and error code resulting from
+ * asynchronous calls can be found in the class {@link BKException}.
+ */
+public class BookKeeper implements org.apache.bookkeeper.client.api.BookKeeper {
+
+<span class="nc" id="L115">    private static final Logger LOG = LoggerFactory.getLogger(BookKeeper.class);</span>
+
+
+    final EventLoopGroup eventLoopGroup;
+    private final ByteBufAllocator allocator;
+
+    // The stats logger for this client.
+    private final StatsLogger statsLogger;
+    private final BookKeeperClientStats clientStats;
+    private final double bookieQuarantineRatio;
+
+    // whether the event loop group is one we created, or is owned by whoever
+    // instantiated us
+<span class="nc" id="L128">    boolean ownEventLoopGroup = false;</span>
+
+    final BookieClient bookieClient;
+    final BookieWatcherImpl bookieWatcher;
+
+    final OrderedExecutor mainWorkerPool;
+    final OrderedScheduler scheduler;
+    final HashedWheelTimer requestTimer;
+    final boolean ownTimer;
+    final FeatureProvider featureProvider;
+    final ScheduledExecutorService bookieInfoScheduler;
+
+    final MetadataClientDriver metadataDriver;
+    // Ledger manager responsible for how to store ledger meta data
+    final LedgerManagerFactory ledgerManagerFactory;
+    final LedgerManager ledgerManager;
+    final LedgerIdGenerator ledgerIdGenerator;
+
+    // Ensemble Placement Policy
+    final EnsemblePlacementPolicy placementPolicy;
+    BookieInfoReader bookieInfoReader;
+
+    final ClientConfiguration conf;
+    final ClientInternalConf internalConf;
+
+    // Close State
+<span class="nc" id="L154">    boolean closed = false;</span>
+<span class="nc" id="L155">    final ReentrantReadWriteLock closeLock = new ReentrantReadWriteLock();</span>
+
+    /**
+     * BookKeeper Client Builder to build client instances.
+     *
+     * @see BookKeeperBuilder
+     */
+    public static class Builder {
+        final ClientConfiguration conf;
+
+<span class="nc" id="L165">        ZooKeeper zk = null;</span>
+<span class="nc" id="L166">        EventLoopGroup eventLoopGroup = null;</span>
+<span class="nc" id="L167">        ByteBufAllocator allocator = null;</span>
+<span class="nc" id="L168">        StatsLogger statsLogger = NullStatsLogger.INSTANCE;</span>
+<span class="nc" id="L169">        DNSToSwitchMapping dnsResolver = null;</span>
+<span class="nc" id="L170">        HashedWheelTimer requestTimer = null;</span>
+<span class="nc" id="L171">        FeatureProvider featureProvider = null;</span>
+
+<span class="nc" id="L173">        Builder(ClientConfiguration conf) {</span>
+<span class="nc" id="L174">            this.conf = conf;</span>
+<span class="nc" id="L175">        }</span>
+
+        /**
+         * Configure the bookkeeper client with a provided {@link EventLoopGroup}.
+         *
+         * @param f an external {@link EventLoopGroup} to use by the bookkeeper client.
+         * @return client builder.
+         * @deprecated since 4.5, use {@link #eventLoopGroup(EventLoopGroup)}
+         * @see #eventLoopGroup(EventLoopGroup)
+         */
+        @Deprecated
+        public Builder setEventLoopGroup(EventLoopGroup f) {
+<span class="nc" id="L187">            eventLoopGroup = f;</span>
+<span class="nc" id="L188">            return this;</span>
+        }
+
+        /**
+         * Configure the bookkeeper client with a provided {@link ZooKeeper} client.
+         *
+         * @param zk an external {@link ZooKeeper} client to use by the bookkeeper client.
+         * @return client builder.
+         * @deprecated since 4.5, use {@link #zk(ZooKeeper)}
+         * @see #zk(ZooKeeper)
+         */
+        @Deprecated
+        public Builder setZookeeper(ZooKeeper zk) {
+<span class="nc" id="L201">            this.zk = zk;</span>
+<span class="nc" id="L202">            return this;</span>
+        }
+
+        /**
+         * Configure the bookkeeper client with a provided {@link StatsLogger}.
+         *
+         * @param statsLogger an {@link StatsLogger} to use by the bookkeeper client to collect stats generated
+         *                    by the client.
+         * @return client builder.
+         * @deprecated since 4.5, use {@link #statsLogger(StatsLogger)}
+         * @see #statsLogger(StatsLogger)
+         */
+        @Deprecated
+        public Builder setStatsLogger(StatsLogger statsLogger) {
+<span class="nc" id="L216">            this.statsLogger = statsLogger;</span>
+<span class="nc" id="L217">            return this;</span>
+        }
+
+        /**
+         * Configure the bookkeeper client with a provided {@link EventLoopGroup}.
+         *
+         * @param f an external {@link EventLoopGroup} to use by the bookkeeper client.
+         * @return client builder.
+         * @since 4.5
+         */
+        public Builder eventLoopGroup(EventLoopGroup f) {
+<span class="nc" id="L228">            eventLoopGroup = f;</span>
+<span class="nc" id="L229">            return this;</span>
+        }
+
+        /**
+         * Configure the bookkeeper client with a provided {@link ByteBufAllocator}.
+         *
+         * @param allocator an external {@link ByteBufAllocator} to use by the bookkeeper client.
+         * @return client builder.
+         * @since 4.9
+         */
+        public Builder allocator(ByteBufAllocator allocator) {
+<span class="nc" id="L240">            this.allocator = allocator;</span>
+<span class="nc" id="L241">            return this;</span>
+        }
+
+        /**
+         * Configure the bookkeeper client with a provided {@link ZooKeeper} client.
+         *
+         * @param zk an external {@link ZooKeeper} client to use by the bookkeeper client.
+         * @return client builder.
+         * @since 4.5
+         */
+        @Deprecated
+        public Builder zk(ZooKeeper zk) {
+<span class="nc" id="L253">            this.zk = zk;</span>
+<span class="nc" id="L254">            return this;</span>
+        }
+
+        /**
+         * Configure the bookkeeper client with a provided {@link StatsLogger}.
+         *
+         * @param statsLogger an {@link StatsLogger} to use by the bookkeeper client to collect stats generated
+         *                    by the client.
+         * @return client builder.
+         * @since 4.5
+         */
+        public Builder statsLogger(StatsLogger statsLogger) {
+<span class="nc" id="L266">            this.statsLogger = statsLogger;</span>
+<span class="nc" id="L267">            return this;</span>
+        }
+
+        /**
+         * Configure the bookkeeper client to use the provided dns resolver {@link DNSToSwitchMapping}.
+         *
+         * @param dnsResolver dns resolver for placement policy to use for resolving network locations.
+         * @return client builder
+         * @since 4.5
+         */
+        public Builder dnsResolver(DNSToSwitchMapping dnsResolver) {
+<span class="nc" id="L278">            this.dnsResolver = dnsResolver;</span>
+<span class="nc" id="L279">            return this;</span>
+        }
+
+        /**
+         * Configure the bookkeeper client to use a provided {@link HashedWheelTimer}.
+         *
+         * @param requestTimer request timer for client to manage timer related tasks.
+         * @return client builder
+         * @since 4.5
+         */
+        public Builder requestTimer(HashedWheelTimer requestTimer) {
+<span class="nc" id="L290">            this.requestTimer = requestTimer;</span>
+<span class="nc" id="L291">            return this;</span>
+        }
+
+        /**
+         * Feature Provider.
+         *
+         * @param featureProvider
+         * @return
+         */
+        public Builder featureProvider(FeatureProvider featureProvider) {
+<span class="nc" id="L301">            this.featureProvider = featureProvider;</span>
+<span class="nc" id="L302">            return this;</span>
+        }
+
+        public BookKeeper build() throws IOException, InterruptedException, BKException {
+<span class="nc" id="L306">            checkNotNull(statsLogger, &quot;No stats logger provided&quot;);</span>
+<span class="nc" id="L307">            return new BookKeeper(conf, zk, eventLoopGroup, allocator, statsLogger, dnsResolver, requestTimer,</span>
+                    featureProvider);
+        }
+    }
+
+    public static Builder forConfig(final ClientConfiguration conf) {
+<span class="nc" id="L313">        return new Builder(conf);</span>
+    }
+
+    /**
+     * Create a bookkeeper client. A zookeeper client and a client event loop group
+     * will be instantiated as part of this constructor.
+     *
+     * @param servers
+     *          A list of one of more servers on which zookeeper is running. The
+     *          client assumes that the running bookies have been registered with
+     *          zookeeper under the path
+     *          {@link AbstractConfiguration#getZkAvailableBookiesPath()}
+     * @throws IOException
+     * @throws InterruptedException
+     */
+    public BookKeeper(String servers) throws IOException, InterruptedException,
+        BKException {
+<span class="nc" id="L330">        this(new ClientConfiguration().setMetadataServiceUri(&quot;zk+null://&quot; + servers + &quot;/ledgers&quot;));</span>
+<span class="nc" id="L331">    }</span>
+
+    /**
+     * Create a bookkeeper client using a configuration object.
+     * A zookeeper client and a client event loop group will be
+     * instantiated as part of this constructor.
+     *
+     * @param conf
+     *          Client Configuration object
+     * @throws IOException
+     * @throws InterruptedException
+     */
+    public BookKeeper(final ClientConfiguration conf)
+            throws IOException, InterruptedException, BKException {
+<span class="nc" id="L345">        this(conf, null, null, null, NullStatsLogger.INSTANCE,</span>
+                null, null, null);
+<span class="nc" id="L347">    }</span>
+
+    private static ZooKeeper validateZooKeeper(ZooKeeper zk) throws NullPointerException, IOException {
+<span class="nc" id="L350">        checkNotNull(zk, &quot;No zookeeper instance provided&quot;);</span>
+<span class="nc bnc" id="L351" title="All 2 branches missed.">        if (!zk.getState().isConnected()) {</span>
+<span class="nc" id="L352">            LOG.error(&quot;Unconnected zookeeper handle passed to bookkeeper&quot;);</span>
+<span class="nc" id="L353">            throw new IOException(KeeperException.create(KeeperException.Code.CONNECTIONLOSS));</span>
+        }
+<span class="nc" id="L355">        return zk;</span>
+    }
+
+    private static EventLoopGroup validateEventLoopGroup(EventLoopGroup eventLoopGroup)
+            throws NullPointerException {
+<span class="nc" id="L360">        checkNotNull(eventLoopGroup, &quot;No Event Loop Group provided&quot;);</span>
+<span class="nc" id="L361">        return eventLoopGroup;</span>
+    }
+
+    /**
+     * Create a bookkeeper client but use the passed in zookeeper client instead
+     * of instantiating one.
+     *
+     * @param conf
+     *          Client Configuration object
+     *          {@link ClientConfiguration}
+     * @param zk
+     *          Zookeeper client instance connected to the zookeeper with which
+     *          the bookies have registered
+     * @throws IOException
+     * @throws InterruptedException
+     */
+    public BookKeeper(ClientConfiguration conf, ZooKeeper zk)
+            throws IOException, InterruptedException, BKException {
+<span class="nc" id="L379">        this(conf, validateZooKeeper(zk), null, null, NullStatsLogger.INSTANCE, null, null, null);</span>
+<span class="nc" id="L380">    }</span>
+
+    /**
+     * Create a bookkeeper client but use the passed in zookeeper client and
+     * client event loop group instead of instantiating those.
+     *
+     * @param conf
+     *          Client Configuration Object
+     *          {@link ClientConfiguration}
+     * @param zk
+     *          Zookeeper client instance connected to the zookeeper with which
+     *          the bookies have registered. The ZooKeeper client must be connected
+     *          before it is passed to BookKeeper. Otherwise a KeeperException is thrown.
+     * @param eventLoopGroup
+     *          An event loop group that will be used to create connections to the bookies
+     * @throws IOException
+     * @throws InterruptedException
+     * @throws BKException in the event of a bookkeeper connection error
+     */
+    public BookKeeper(ClientConfiguration conf, ZooKeeper zk, EventLoopGroup eventLoopGroup)
+            throws IOException, InterruptedException, BKException {
+<span class="nc" id="L401">        this(conf, validateZooKeeper(zk), validateEventLoopGroup(eventLoopGroup), null, NullStatsLogger.INSTANCE,</span>
+                null, null, null);
+<span class="nc" id="L403">    }</span>
+
+    /**
+     * Constructor for use with the builder. Other constructors also use it.
+     */
+    @SuppressWarnings(&quot;deprecation&quot;)
+    @VisibleForTesting
+    BookKeeper(ClientConfiguration conf,
+                       ZooKeeper zkc,
+                       EventLoopGroup eventLoopGroup,
+                       ByteBufAllocator byteBufAllocator,
+                       StatsLogger rootStatsLogger,
+                       DNSToSwitchMapping dnsResolver,
+                       HashedWheelTimer requestTimer,
+                       FeatureProvider featureProvider)
+<span class="nc" id="L418">            throws IOException, InterruptedException, BKException {</span>
+<span class="nc" id="L419">        this.conf = conf;</span>
+        // initialize feature provider
+<span class="nc bnc" id="L421" title="All 2 branches missed.">        if (null == featureProvider) {</span>
+<span class="nc" id="L422">            this.featureProvider = SettableFeatureProvider.DISABLE_ALL;</span>
+        } else {
+<span class="nc" id="L424">            this.featureProvider = featureProvider;</span>
+        }
+
+<span class="nc" id="L427">        this.internalConf = ClientInternalConf.fromConfigAndFeatureProvider(conf, this.featureProvider);</span>
+
+        // initialize resources
+<span class="nc" id="L430">        this.scheduler = OrderedScheduler.newSchedulerBuilder().numThreads(1).name(&quot;BookKeeperClientScheduler&quot;).build();</span>
+<span class="nc" id="L431">        this.mainWorkerPool = OrderedExecutor.newBuilder()</span>
+<span class="nc" id="L432">                .name(&quot;BookKeeperClientWorker&quot;)</span>
+<span class="nc" id="L433">                .numThreads(conf.getNumWorkerThreads())</span>
+<span class="nc" id="L434">                .statsLogger(rootStatsLogger)</span>
+<span class="nc" id="L435">                .traceTaskExecution(conf.getEnableTaskExecutionStats())</span>
+<span class="nc" id="L436">                .preserveMdcForTaskExecution(conf.getPreserveMdcForTaskExecution())</span>
+<span class="nc" id="L437">                .traceTaskWarnTimeMicroSec(conf.getTaskExecutionWarnTimeMicros())</span>
+<span class="nc" id="L438">                .enableBusyWait(conf.isBusyWaitEnabled())</span>
+<span class="nc" id="L439">                .build();</span>
+
+        // initialize stats logger
+<span class="nc" id="L442">        this.statsLogger = rootStatsLogger.scope(BookKeeperClientStats.CLIENT_SCOPE);</span>
+<span class="nc" id="L443">        this.clientStats = BookKeeperClientStats.newInstance(this.statsLogger);</span>
+
+        // initialize metadata driver
+        try {
+<span class="nc" id="L447">            String metadataServiceUriStr = conf.getMetadataServiceUri();</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">            if (null != metadataServiceUriStr) {</span>
+<span class="nc" id="L449">                this.metadataDriver = MetadataDrivers.getClientDriver(URI.create(metadataServiceUriStr));</span>
+            } else {
+<span class="nc" id="L451">                checkNotNull(zkc, &quot;No external zookeeper provided when no metadata service uri is found&quot;);</span>
+<span class="nc" id="L452">                this.metadataDriver = MetadataDrivers.getClientDriver(&quot;zk&quot;);</span>
+            }
+<span class="nc" id="L454">            this.metadataDriver.initialize(</span>
+                conf,
+                scheduler,
+                rootStatsLogger,
+<span class="nc" id="L458">                Optional.ofNullable(zkc));</span>
+<span class="nc" id="L459">        } catch (ConfigurationException ce) {</span>
+<span class="nc" id="L460">            LOG.error(&quot;Failed to initialize metadata client driver using invalid metadata service uri&quot;, ce);</span>
+<span class="nc" id="L461">            throw new IOException(&quot;Failed to initialize metadata client driver&quot;, ce);</span>
+<span class="nc" id="L462">        } catch (MetadataException me) {</span>
+<span class="nc" id="L463">            LOG.error(&quot;Encountered metadata exceptions on initializing metadata client driver&quot;, me);</span>
+<span class="nc" id="L464">            throw new IOException(&quot;Failed to initialize metadata client driver&quot;, me);</span>
+<span class="nc" id="L465">        }</span>
+
+        // initialize event loop group
+<span class="nc bnc" id="L468" title="All 2 branches missed.">        if (null == eventLoopGroup) {</span>
+<span class="nc" id="L469">            this.eventLoopGroup = EventLoopUtil.getClientEventLoopGroup(conf,</span>
+                    new DefaultThreadFactory(&quot;bookkeeper-io&quot;));
+<span class="nc" id="L471">            this.ownEventLoopGroup = true;</span>
+        } else {
+<span class="nc" id="L473">            this.eventLoopGroup = eventLoopGroup;</span>
+<span class="nc" id="L474">            this.ownEventLoopGroup = false;</span>
+        }
+
+<span class="nc bnc" id="L477" title="All 2 branches missed.">        if (byteBufAllocator != null) {</span>
+<span class="nc" id="L478">            this.allocator = byteBufAllocator;</span>
+        } else {
+<span class="nc" id="L480">            this.allocator = ByteBufAllocatorBuilder.create()</span>
+<span class="nc" id="L481">                    .poolingPolicy(conf.getAllocatorPoolingPolicy())</span>
+<span class="nc" id="L482">                    .poolingConcurrency(conf.getAllocatorPoolingConcurrency())</span>
+<span class="nc" id="L483">                    .outOfMemoryPolicy(conf.getAllocatorOutOfMemoryPolicy())</span>
+<span class="nc" id="L484">                    .leakDetectionPolicy(conf.getAllocatorLeakDetectionPolicy())</span>
+<span class="nc" id="L485">                    .build();</span>
+        }
+
+
+<span class="nc bnc" id="L489" title="All 2 branches missed.">        if (null == requestTimer) {</span>
+<span class="nc" id="L490">            this.requestTimer = new HashedWheelTimer(</span>
+<span class="nc" id="L491">                    new ThreadFactoryBuilder().setNameFormat(&quot;BookieClientTimer-%d&quot;).build(),</span>
+<span class="nc" id="L492">                    conf.getTimeoutTimerTickDurationMs(), TimeUnit.MILLISECONDS,</span>
+<span class="nc" id="L493">                    conf.getTimeoutTimerNumTicks());</span>
+<span class="nc" id="L494">            this.ownTimer = true;</span>
+        } else {
+<span class="nc" id="L496">            this.requestTimer = requestTimer;</span>
+<span class="nc" id="L497">            this.ownTimer = false;</span>
+        }
+
+<span class="nc" id="L500">        BookieAddressResolver bookieAddressResolver =</span>
+<span class="nc" id="L501">                new DefaultBookieAddressResolver(metadataDriver.getRegistrationClient());</span>
+<span class="nc bnc" id="L502" title="All 2 branches missed.">        if (dnsResolver != null) {</span>
+<span class="nc" id="L503">            dnsResolver.setBookieAddressResolver(bookieAddressResolver);</span>
+        }
+        // initialize the ensemble placement
+<span class="nc" id="L506">        this.placementPolicy = initializeEnsemblePlacementPolicy(conf,</span>
+                dnsResolver, this.requestTimer, this.featureProvider, this.statsLogger, bookieAddressResolver);
+
+<span class="nc" id="L509">        this.bookieWatcher = new BookieWatcherImpl(</span>
+<span class="nc" id="L510">                conf, this.placementPolicy, metadataDriver.getRegistrationClient(), bookieAddressResolver,</span>
+<span class="nc" id="L511">                this.statsLogger.scope(WATCHER_SCOPE));</span>
+
+        // initialize bookie client
+<span class="nc" id="L514">        this.bookieClient = new BookieClientImpl(conf, this.eventLoopGroup, this.allocator, this.mainWorkerPool,</span>
+<span class="nc" id="L515">                scheduler, rootStatsLogger, this.bookieWatcher.getBookieAddressResolver());</span>
+
+<span class="nc bnc" id="L517" title="All 2 branches missed.">        if (conf.getDiskWeightBasedPlacementEnabled()) {</span>
+<span class="nc" id="L518">            LOG.info(&quot;Weighted ledger placement enabled&quot;);</span>
+<span class="nc" id="L519">            ThreadFactoryBuilder tFBuilder = new ThreadFactoryBuilder()</span>
+<span class="nc" id="L520">                    .setNameFormat(&quot;BKClientMetaDataPollScheduler-%d&quot;);</span>
+<span class="nc" id="L521">            this.bookieInfoScheduler = Executors.newSingleThreadScheduledExecutor(tFBuilder.build());</span>
+<span class="nc" id="L522">            this.bookieInfoReader = new BookieInfoReader(this, conf, this.bookieInfoScheduler);</span>
+<span class="nc" id="L523">            this.bookieWatcher.initialBlockingBookieRead();</span>
+<span class="nc" id="L524">            this.bookieInfoReader.start();</span>
+<span class="nc" id="L525">        } else {</span>
+<span class="nc" id="L526">            LOG.info(&quot;Weighted ledger placement is not enabled&quot;);</span>
+<span class="nc" id="L527">            this.bookieInfoScheduler = null;</span>
+<span class="nc" id="L528">            this.bookieInfoReader = new BookieInfoReader(this, conf, null);</span>
+<span class="nc" id="L529">            this.bookieWatcher.initialBlockingBookieRead();</span>
+        }
+
+        // initialize ledger manager
+        try {
+<span class="nc" id="L534">            this.ledgerManagerFactory =</span>
+<span class="nc" id="L535">                this.metadataDriver.getLedgerManagerFactory();</span>
+<span class="nc" id="L536">        } catch (MetadataException e) {</span>
+<span class="nc" id="L537">            throw new IOException(&quot;Failed to initialize ledger manager factory&quot;, e);</span>
+<span class="nc" id="L538">        }</span>
+<span class="nc" id="L539">        this.ledgerManager = new CleanupLedgerManager(ledgerManagerFactory.newLedgerManager());</span>
+<span class="nc" id="L540">        this.ledgerIdGenerator = ledgerManagerFactory.newLedgerIdGenerator();</span>
+
+<span class="nc" id="L542">        this.bookieQuarantineRatio = conf.getBookieQuarantineRatio();</span>
+<span class="nc" id="L543">        scheduleBookieHealthCheckIfEnabled(conf);</span>
+<span class="nc" id="L544">    }</span>
+
+    /**
+     * Allow to extend BookKeeper for mocking in unit tests.
+     */
+    @VisibleForTesting
+<span class="nc" id="L550">    BookKeeper() {</span>
+<span class="nc" id="L551">        conf = new ClientConfiguration();</span>
+<span class="nc" id="L552">        internalConf = ClientInternalConf.fromConfig(conf);</span>
+<span class="nc" id="L553">        statsLogger = NullStatsLogger.INSTANCE;</span>
+<span class="nc" id="L554">        clientStats = BookKeeperClientStats.newInstance(statsLogger);</span>
+<span class="nc" id="L555">        scheduler = null;</span>
+<span class="nc" id="L556">        requestTimer = null;</span>
+<span class="nc" id="L557">        metadataDriver = null;</span>
+<span class="nc" id="L558">        placementPolicy = null;</span>
+<span class="nc" id="L559">        ownTimer = false;</span>
+<span class="nc" id="L560">        mainWorkerPool = null;</span>
+<span class="nc" id="L561">        ledgerManagerFactory = null;</span>
+<span class="nc" id="L562">        ledgerManager = null;</span>
+<span class="nc" id="L563">        ledgerIdGenerator = null;</span>
+<span class="nc" id="L564">        featureProvider = null;</span>
+<span class="nc" id="L565">        eventLoopGroup = null;</span>
+<span class="nc" id="L566">        bookieWatcher = null;</span>
+<span class="nc" id="L567">        bookieInfoScheduler = null;</span>
+<span class="nc" id="L568">        bookieClient = null;</span>
+<span class="nc" id="L569">        allocator = UnpooledByteBufAllocator.DEFAULT;</span>
+<span class="nc" id="L570">        bookieQuarantineRatio = 1.0;</span>
+<span class="nc" id="L571">    }</span>
+
+    private EnsemblePlacementPolicy initializeEnsemblePlacementPolicy(ClientConfiguration conf,
+                                                                      DNSToSwitchMapping dnsResolver,
+                                                                      HashedWheelTimer timer,
+                                                                      FeatureProvider featureProvider,
+                                                                      StatsLogger statsLogger,
+                                                                      BookieAddressResolver bookieAddressResolver)
+        throws IOException {
+        try {
+<span class="nc" id="L581">            Class&lt;? extends EnsemblePlacementPolicy&gt; policyCls = conf.getEnsemblePlacementPolicy();</span>
+<span class="nc" id="L582">            return ReflectionUtils.newInstance(policyCls).initialize(conf, Optional.ofNullable(dnsResolver),</span>
+                    timer, featureProvider, statsLogger, bookieAddressResolver);
+<span class="nc" id="L584">        } catch (ConfigurationException e) {</span>
+<span class="nc" id="L585">            throw new IOException(&quot;Failed to initialize ensemble placement policy : &quot;, e);</span>
+        }
+    }
+
+    int getReturnRc(int rc) {
+<span class="nc" id="L590">        return getReturnRc(bookieClient, rc);</span>
+    }
+
+    static int getReturnRc(BookieClient bookieClient, int rc) {
+<span class="nc bnc" id="L594" title="All 2 branches missed.">        if (BKException.Code.OK == rc) {</span>
+<span class="nc" id="L595">            return rc;</span>
+        } else {
+<span class="nc bnc" id="L597" title="All 2 branches missed.">            if (bookieClient.isClosed()) {</span>
+<span class="nc" id="L598">                return BKException.Code.ClientClosedException;</span>
+            } else {
+<span class="nc" id="L600">                return rc;</span>
+            }
+        }
+    }
+
+    void scheduleBookieHealthCheckIfEnabled(ClientConfiguration conf) {
+<span class="nc bnc" id="L606" title="All 2 branches missed.">        if (conf.isBookieHealthCheckEnabled()) {</span>
+<span class="nc" id="L607">            scheduler.scheduleAtFixedRate(new SafeRunnable() {</span>
+
+                @Override
+                public void safeRun() {
+<span class="nc" id="L611">                    checkForFaultyBookies();</span>
+<span class="nc" id="L612">                }</span>
+<span class="nc" id="L613">                    }, conf.getBookieHealthCheckIntervalSeconds(), conf.getBookieHealthCheckIntervalSeconds(),</span>
+                    TimeUnit.SECONDS);
+        }
+<span class="nc" id="L616">    }</span>
+
+    void checkForFaultyBookies() {
+<span class="nc" id="L619">        List&lt;BookieId&gt; faultyBookies = bookieClient.getFaultyBookies();</span>
+<span class="nc bnc" id="L620" title="All 2 branches missed.">        for (BookieId faultyBookie : faultyBookies) {</span>
+<span class="nc bnc" id="L621" title="All 2 branches missed.">            if (Math.random() &lt;= bookieQuarantineRatio) {</span>
+<span class="nc" id="L622">                bookieWatcher.quarantineBookie(faultyBookie);</span>
+<span class="nc" id="L623">                statsLogger.getCounter(BookKeeperServerStats.BOOKIE_QUARANTINE).inc();</span>
+            } else {
+<span class="nc" id="L625">                statsLogger.getCounter(BookKeeperServerStats.BOOKIE_QUARANTINE_SKIP).inc();</span>
+            }
+<span class="nc" id="L627">        }</span>
+<span class="nc" id="L628">    }</span>
+
+    /**
+     * Returns ref to speculative read counter, needed in PendingReadOp.
+     */
+    @VisibleForTesting
+    public LedgerManager getLedgerManager() {
+<span class="nc" id="L635">        return ledgerManager;</span>
+    }
+
+    @VisibleForTesting
+    LedgerManager getUnderlyingLedgerManager() {
+<span class="nc" id="L640">        return ((CleanupLedgerManager) ledgerManager).getUnderlying();</span>
+    }
+
+    @VisibleForTesting
+    LedgerIdGenerator getLedgerIdGenerator() {
+<span class="nc" id="L645">        return ledgerIdGenerator;</span>
+    }
+
+    @VisibleForTesting
+    ReentrantReadWriteLock getCloseLock() {
+<span class="nc" id="L650">        return closeLock;</span>
+    }
+
+    @VisibleForTesting
+    boolean isClosed() {
+<span class="nc" id="L655">        return closed;</span>
+    }
+
+    @VisibleForTesting
+    BookieWatcher getBookieWatcher() {
+<span class="nc" id="L660">        return bookieWatcher;</span>
+    }
+
+    public BookieAddressResolver getBookieAddressResolver() {
+<span class="nc" id="L664">        return bookieWatcher.getBookieAddressResolver();</span>
+    }
+
+    public OrderedExecutor getMainWorkerPool() {
+<span class="nc" id="L668">        return mainWorkerPool;</span>
+    }
+
+    @VisibleForTesting
+    OrderedScheduler getScheduler() {
+<span class="nc" id="L673">        return scheduler;</span>
+    }
+
+    @VisibleForTesting
+    EnsemblePlacementPolicy getPlacementPolicy() {
+<span class="nc" id="L678">        return placementPolicy;</span>
+    }
+
+    @VisibleForTesting
+    public MetadataClientDriver getMetadataClientDriver() {
+<span class="nc" id="L683">        return metadataDriver;</span>
+    }
+
+    /**
+     * There are 3 digest types that can be used for verification. The CRC32 is
+     * cheap to compute but does not protect against byzantine bookies (i.e., a
+     * bookie might report fake bytes and a matching CRC32). The MAC code is more
+     * expensive to compute, but is protected by a password, i.e., a bookie can't
+     * report fake bytes with a mathching MAC unless it knows the password.
+     * The CRC32C, which use SSE processor instruction, has better performance than CRC32.
+     * Legacy DigestType for backward compatibility. If we want to add new DigestType,
+     * we should add it in here, client.api.DigestType and DigestType in DataFormats.proto.
+     * If the digest type is set/passed in as DUMMY, a dummy digest is added/checked.
+     * This DUMMY digest is mostly for test purposes or in situations/use-cases
+     * where digest is considered a overhead.
+     */
+<span class="nc" id="L699">    public enum DigestType {</span>
+<span class="nc" id="L700">        MAC, CRC32, CRC32C, DUMMY;</span>
+
+        public static DigestType fromApiDigestType(org.apache.bookkeeper.client.api.DigestType digestType) {
+<span class="nc bnc" id="L703" title="All 5 branches missed.">            switch (digestType) {</span>
+                case MAC:
+<span class="nc" id="L705">                    return DigestType.MAC;</span>
+                case CRC32:
+<span class="nc" id="L707">                    return DigestType.CRC32;</span>
+                case CRC32C:
+<span class="nc" id="L709">                    return DigestType.CRC32C;</span>
+                case DUMMY:
+<span class="nc" id="L711">                    return DigestType.DUMMY;</span>
+                default:
+<span class="nc" id="L713">                    throw new IllegalArgumentException(&quot;Unable to convert digest type &quot; + digestType);</span>
+            }
+        }
+        public static DataFormats.LedgerMetadataFormat.DigestType toProtoDigestType(DigestType digestType) {
+<span class="nc bnc" id="L717" title="All 5 branches missed.">            switch (digestType) {</span>
+                case MAC:
+<span class="nc" id="L719">                    return DataFormats.LedgerMetadataFormat.DigestType.HMAC;</span>
+                case CRC32:
+<span class="nc" id="L721">                    return DataFormats.LedgerMetadataFormat.DigestType.CRC32;</span>
+                case CRC32C:
+<span class="nc" id="L723">                    return DataFormats.LedgerMetadataFormat.DigestType.CRC32C;</span>
+                case DUMMY:
+<span class="nc" id="L725">                    return DataFormats.LedgerMetadataFormat.DigestType.DUMMY;</span>
+                default:
+<span class="nc" id="L727">                    throw new IllegalArgumentException(&quot;Unable to convert digest type &quot; + digestType);</span>
+            }
+        }
+        public org.apache.bookkeeper.client.api.DigestType toApiDigestType() {
+<span class="nc bnc" id="L731" title="All 5 branches missed.">            switch (this) {</span>
+                case MAC:
+<span class="nc" id="L733">                    return org.apache.bookkeeper.client.api.DigestType.MAC;</span>
+                case CRC32:
+<span class="nc" id="L735">                    return org.apache.bookkeeper.client.api.DigestType.CRC32;</span>
+                case CRC32C:
+<span class="nc" id="L737">                    return org.apache.bookkeeper.client.api.DigestType.CRC32C;</span>
+                case DUMMY:
+<span class="nc" id="L739">                    return org.apache.bookkeeper.client.api.DigestType.DUMMY;</span>
+                default:
+<span class="nc" id="L741">                    throw new IllegalArgumentException(&quot;Unable to convert digest type &quot; + this);</span>
+            }
+        }
+    }
+
+    ZooKeeper getZkHandle() {
+<span class="nc" id="L747">        return ((ZKMetadataClientDriver) metadataDriver).getZk();</span>
+    }
+
+    protected ClientConfiguration getConf() {
+<span class="nc" id="L751">        return conf;</span>
+    }
+
+    StatsLogger getStatsLogger() {
+<span class="nc" id="L755">        return statsLogger;</span>
+    }
+
+    /**
+     * Get the BookieClient, currently used for doing bookie recovery.
+     *
+     * @return BookieClient for the BookKeeper instance.
+     */
+    BookieClient getBookieClient() {
+<span class="nc" id="L764">        return bookieClient;</span>
+    }
+
+    /**
+     * Retrieves BookieInfo from all the bookies in the cluster. It sends requests
+     * to all the bookies in parallel and returns the info from the bookies that responded.
+     * If there was an error in reading from any bookie, nothing will be returned for
+     * that bookie in the map.
+     * @return map
+     *             A map of bookieSocketAddress to its BookiInfo
+     * @throws BKException
+     * @throws InterruptedException
+     */
+    public Map&lt;BookieId, BookieInfo&gt; getBookieInfo() throws BKException, InterruptedException {
+<span class="nc" id="L778">        return bookieInfoReader.getBookieInfo();</span>
+    }
+
+    /**
+     * Creates a new ledger asynchronously. To create a ledger, we need to specify
+     * the ensemble size, the quorum size, the digest type, a password, a callback
+     * implementation, and an optional control object. The ensemble size is how
+     * many bookies the entries should be striped among and the quorum size is the
+     * degree of replication of each entry. The digest type is either a MAC or a
+     * CRC. Note that the CRC option is not able to protect a client against a
+     * bookie that replaces an entry. The password is used not only to
+     * authenticate access to a ledger, but also to verify entries in ledgers.
+     *
+     * @param ensSize
+     *          number of bookies over which to stripe entries
+     * @param writeQuorumSize
+     *          number of bookies each entry will be written to. each of these bookies
+     *          must acknowledge the entry before the call is completed.
+     * @param digestType
+     *          digest type, either MAC or CRC32
+     * @param passwd
+     *          password
+     * @param cb
+     *          createCallback implementation
+     * @param ctx
+     *          optional control object
+     */
+    public void asyncCreateLedger(final int ensSize,
+                                  final int writeQuorumSize,
+                                  final DigestType digestType,
+                                  final byte[] passwd, final CreateCallback cb, final Object ctx) {
+<span class="nc" id="L809">        asyncCreateLedger(ensSize, writeQuorumSize, writeQuorumSize,</span>
+<span class="nc" id="L810">                          digestType, passwd, cb, ctx, Collections.emptyMap());</span>
+<span class="nc" id="L811">    }</span>
+
+    /**
+     * Creates a new ledger asynchronously. Ledgers created with this call have
+     * a separate write quorum and ack quorum size. The write quorum must be larger than
+     * the ack quorum.
+     *
+     * &lt;p&gt;Separating the write and the ack quorum allows the BookKeeper client to continue
+     * writing when a bookie has failed but the failure has not yet been detected. Detecting
+     * a bookie has failed can take a number of seconds, as configured by the read timeout
+     * {@link ClientConfiguration#getReadTimeout()}. Once the bookie failure is detected,
+     * that bookie will be removed from the ensemble.
+     *
+     * &lt;p&gt;The other parameters match those of {@link #asyncCreateLedger(int, int, DigestType, byte[],
+     *                                      AsyncCallback.CreateCallback, Object)}
+     *
+     * @param ensSize
+     *          number of bookies over which to stripe entries
+     * @param writeQuorumSize
+     *          number of bookies each entry will be written to
+     * @param ackQuorumSize
+     *          number of bookies which must acknowledge an entry before the call is completed
+     * @param digestType
+     *          digest type, either MAC or CRC32
+     * @param passwd
+     *          password
+     * @param cb
+     *          createCallback implementation
+     * @param ctx
+     *          optional control object
+     * @param customMetadata
+     *          optional customMetadata that holds user specified metadata
+     */
+
+    public void asyncCreateLedger(final int ensSize, final int writeQuorumSize, final int ackQuorumSize,
+                                  final DigestType digestType, final byte[] passwd,
+                                  final CreateCallback cb, final Object ctx, final Map&lt;String, byte[]&gt; customMetadata) {
+<span class="nc bnc" id="L848" title="All 2 branches missed.">        if (writeQuorumSize &lt; ackQuorumSize) {</span>
+<span class="nc" id="L849">            throw new IllegalArgumentException(&quot;Write quorum must be larger than ack quorum&quot;);</span>
+        }
+<span class="nc" id="L851">        closeLock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L853" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L854">                cb.createComplete(BKException.Code.ClientClosedException, null, ctx);</span>
+<span class="nc" id="L855">                return;</span>
+            }
+<span class="nc" id="L857">            new LedgerCreateOp(BookKeeper.this, ensSize, writeQuorumSize,</span>
+                               ackQuorumSize, digestType, passwd, cb, ctx,
+                               customMetadata, WriteFlag.NONE, clientStats)
+<span class="nc" id="L860">                .initiate();</span>
+        } finally {
+<span class="nc" id="L862">            closeLock.readLock().unlock();</span>
+        }
+<span class="nc" id="L864">    }</span>
+
+
+    /**
+     * Creates a new ledger. Default of 3 servers, and quorum of 2 servers.
+     *
+     * @param digestType
+     *          digest type, either MAC or CRC32
+     * @param passwd
+     *          password
+     * @return a handle to the newly created ledger
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public LedgerHandle createLedger(DigestType digestType, byte[] passwd)
+            throws BKException, InterruptedException {
+<span class="nc" id="L880">        return createLedger(3, 2, digestType, passwd);</span>
+    }
+
+    /**
+     * Synchronous call to create ledger. Parameters match those of
+     * {@link #asyncCreateLedger(int, int, DigestType, byte[],
+     *                           AsyncCallback.CreateCallback, Object)}
+     *
+     * @param ensSize
+     * @param qSize
+     * @param digestType
+     * @param passwd
+     * @return a handle to the newly created ledger
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public LedgerHandle createLedger(int ensSize, int qSize,
+                                     DigestType digestType, byte[] passwd)
+            throws InterruptedException, BKException {
+<span class="nc" id="L899">        return createLedger(ensSize, qSize, qSize, digestType, passwd, Collections.emptyMap());</span>
+    }
+
+    /**
+     * Synchronous call to create ledger. Parameters match those of
+     * {@link #asyncCreateLedger(int, int, DigestType, byte[],
+     *                           AsyncCallback.CreateCallback, Object)}
+     *
+     * @param ensSize
+     * @param writeQuorumSize
+     * @param ackQuorumSize
+     * @param digestType
+     * @param passwd
+     * @return a handle to the newly created ledger
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public LedgerHandle createLedger(int ensSize, int writeQuorumSize, int ackQuorumSize,
+            DigestType digestType, byte[] passwd)
+            throws InterruptedException, BKException {
+<span class="nc" id="L919">        return createLedger(ensSize, writeQuorumSize, ackQuorumSize, digestType, passwd, Collections.emptyMap());</span>
+    }
+
+    /**
+     * Synchronous call to create ledger. Parameters match those of asyncCreateLedger
+     *
+     * @param ensSize
+     * @param writeQuorumSize
+     * @param ackQuorumSize
+     * @param digestType
+     * @param passwd
+     * @param customMetadata
+     * @return a handle to the newly created ledger
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public LedgerHandle createLedger(int ensSize, int writeQuorumSize, int ackQuorumSize,
+                                     DigestType digestType, byte[] passwd, final Map&lt;String, byte[]&gt; customMetadata)
+            throws InterruptedException, BKException {
+<span class="nc" id="L938">        CompletableFuture&lt;LedgerHandle&gt; future = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L939">        SyncCreateCallback result = new SyncCreateCallback(future);</span>
+
+        /*
+         * Calls asynchronous version
+         */
+<span class="nc" id="L944">        asyncCreateLedger(ensSize, writeQuorumSize, ackQuorumSize, digestType, passwd,</span>
+                          result, null, customMetadata);
+
+<span class="nc" id="L947">        LedgerHandle lh = SyncCallbackUtils.waitForResult(future);</span>
+<span class="nc bnc" id="L948" title="All 2 branches missed.">        if (lh == null) {</span>
+<span class="nc" id="L949">            LOG.error(&quot;Unexpected condition : no ledger handle returned for a success ledger creation&quot;);</span>
+<span class="nc" id="L950">            throw BKException.create(BKException.Code.UnexpectedConditionException);</span>
+        }
+<span class="nc" id="L952">        return lh;</span>
+    }
+
+    /**
+     * Synchronous call to create ledger.
+     * Creates a new ledger asynchronously and returns {@link LedgerHandleAdv} which can accept entryId.
+     * Parameters must match those of asyncCreateLedgerAdv
+     *
+     * @param ensSize
+     * @param writeQuorumSize
+     * @param ackQuorumSize
+     * @param digestType
+     * @param passwd
+     *
+     * @return a handle to the newly created ledger
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public LedgerHandle createLedgerAdv(int ensSize, int writeQuorumSize, int ackQuorumSize,
+                                        DigestType digestType, byte[] passwd)
+            throws InterruptedException, BKException {
+<span class="nc" id="L973">        return createLedgerAdv(ensSize, writeQuorumSize, ackQuorumSize,</span>
+<span class="nc" id="L974">                               digestType, passwd, Collections.emptyMap());</span>
+    }
+
+    /**
+     * Synchronous call to create ledger.
+     * Creates a new ledger asynchronously and returns {@link LedgerHandleAdv} which can accept entryId.
+     * Parameters must match those of asyncCreateLedgerAdv
+     *
+     * @param ensSize
+     * @param writeQuorumSize
+     * @param ackQuorumSize
+     * @param digestType
+     * @param passwd
+     * @param customMetadata
+     * @return a handle to the newly created ledger
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public LedgerHandle createLedgerAdv(int ensSize, int writeQuorumSize, int ackQuorumSize,
+                                        DigestType digestType, byte[] passwd, final Map&lt;String, byte[]&gt; customMetadata)
+            throws InterruptedException, BKException {
+<span class="nc" id="L995">        CompletableFuture&lt;LedgerHandleAdv&gt; future = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L996">        SyncCreateAdvCallback result = new SyncCreateAdvCallback(future);</span>
+
+        /*
+         * Calls asynchronous version
+         */
+<span class="nc" id="L1001">        asyncCreateLedgerAdv(ensSize, writeQuorumSize, ackQuorumSize, digestType, passwd,</span>
+                             result, null, customMetadata);
+
+<span class="nc" id="L1004">        LedgerHandle lh = SyncCallbackUtils.waitForResult(future);</span>
+<span class="nc bnc" id="L1005" title="All 2 branches missed.">        if (lh == null) {</span>
+<span class="nc" id="L1006">            LOG.error(&quot;Unexpected condition : no ledger handle returned for a success ledger creation&quot;);</span>
+<span class="nc" id="L1007">            throw BKException.create(BKException.Code.UnexpectedConditionException);</span>
+        }
+<span class="nc" id="L1009">        return lh;</span>
+    }
+
+    /**
+     * Creates a new ledger asynchronously and returns {@link LedgerHandleAdv}
+     * which can accept entryId.  Ledgers created with this call have ability to accept
+     * a separate write quorum and ack quorum size. The write quorum must be larger than
+     * the ack quorum.
+     *
+     * &lt;p&gt;Separating the write and the ack quorum allows the BookKeeper client to continue
+     * writing when a bookie has failed but the failure has not yet been detected. Detecting
+     * a bookie has failed can take a number of seconds, as configured by the read timeout
+     * {@link ClientConfiguration#getReadTimeout()}. Once the bookie failure is detected,
+     * that bookie will be removed from the ensemble.
+     *
+     * &lt;p&gt;The other parameters match those of {@link #asyncCreateLedger(int, int, DigestType, byte[],
+     *                                      AsyncCallback.CreateCallback, Object)}
+     *
+     * @param ensSize
+     *          number of bookies over which to stripe entries
+     * @param writeQuorumSize
+     *          number of bookies each entry will be written to
+     * @param ackQuorumSize
+     *          number of bookies which must acknowledge an entry before the call is completed
+     * @param digestType
+     *          digest type, either MAC or CRC32
+     * @param passwd
+     *          password
+     * @param cb
+     *          createCallback implementation
+     * @param ctx
+     *          optional control object
+     * @param customMetadata
+     *          optional customMetadata that holds user specified metadata
+     */
+    public void asyncCreateLedgerAdv(final int ensSize, final int writeQuorumSize, final int ackQuorumSize,
+            final DigestType digestType, final byte[] passwd, final CreateCallback cb, final Object ctx,
+            final Map&lt;String, byte[]&gt; customMetadata) {
+<span class="nc bnc" id="L1047" title="All 2 branches missed.">        if (writeQuorumSize &lt; ackQuorumSize) {</span>
+<span class="nc" id="L1048">            throw new IllegalArgumentException(&quot;Write quorum must be larger than ack quorum&quot;);</span>
+        }
+<span class="nc" id="L1050">        closeLock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L1052" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L1053">                cb.createComplete(BKException.Code.ClientClosedException, null, ctx);</span>
+<span class="nc" id="L1054">                return;</span>
+            }
+<span class="nc" id="L1056">            new LedgerCreateOp(BookKeeper.this, ensSize, writeQuorumSize,</span>
+                               ackQuorumSize, digestType, passwd, cb, ctx,
+                               customMetadata, WriteFlag.NONE, clientStats)
+<span class="nc" id="L1059">                                       .initiateAdv(-1L);</span>
+        } finally {
+<span class="nc" id="L1061">            closeLock.readLock().unlock();</span>
+        }
+<span class="nc" id="L1063">    }</span>
+
+    /**
+     * Synchronously creates a new ledger using the interface which accepts a ledgerId as input.
+     * This method returns {@link LedgerHandleAdv} which can accept entryId.
+     * Parameters must match those of asyncCreateLedgerAdvWithLedgerId
+     * @param ledgerId
+     * @param ensSize
+     * @param writeQuorumSize
+     * @param ackQuorumSize
+     * @param digestType
+     * @param passwd
+     * @param customMetadata
+     * @return a handle to the newly created ledger
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public LedgerHandle createLedgerAdv(final long ledgerId,
+                                        int ensSize,
+                                        int writeQuorumSize,
+                                        int ackQuorumSize,
+                                        DigestType digestType,
+                                        byte[] passwd,
+                                        final Map&lt;String, byte[]&gt; customMetadata)
+            throws InterruptedException, BKException {
+<span class="nc" id="L1088">        CompletableFuture&lt;LedgerHandleAdv&gt; future = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L1089">        SyncCreateAdvCallback result = new SyncCreateAdvCallback(future);</span>
+
+        /*
+         * Calls asynchronous version
+         */
+<span class="nc" id="L1094">        asyncCreateLedgerAdv(ledgerId, ensSize, writeQuorumSize, ackQuorumSize, digestType, passwd,</span>
+                             result, null, customMetadata);
+
+<span class="nc" id="L1097">        LedgerHandle lh = SyncCallbackUtils.waitForResult(future);</span>
+<span class="nc bnc" id="L1098" title="All 2 branches missed.">        if (lh == null) {</span>
+<span class="nc" id="L1099">            LOG.error(&quot;Unexpected condition : no ledger handle returned for a success ledger creation&quot;);</span>
+<span class="nc" id="L1100">            throw BKException.create(BKException.Code.UnexpectedConditionException);</span>
+<span class="nc bnc" id="L1101" title="All 2 branches missed.">        } else if (ledgerId != lh.getId()) {</span>
+<span class="nc" id="L1102">            LOG.error(&quot;Unexpected condition : Expected ledgerId: {} but got: {}&quot;, ledgerId, lh.getId());</span>
+<span class="nc" id="L1103">            throw BKException.create(BKException.Code.UnexpectedConditionException);</span>
+        }
+
+<span class="nc" id="L1106">        LOG.info(&quot;Ensemble: {} for ledger: {}&quot;, lh.getLedgerMetadata().getEnsembleAt(0L), lh.getId());</span>
+
+<span class="nc" id="L1108">        return lh;</span>
+    }
+
+    /**
+     * Asynchronously creates a new ledger using the interface which accepts a ledgerId as input.
+     * This method returns {@link LedgerHandleAdv} which can accept entryId.
+     * Ledgers created with this call have ability to accept
+     * a separate write quorum and ack quorum size. The write quorum must be larger than
+     * the ack quorum.
+     *
+     * &lt;p&gt;Separating the write and the ack quorum allows the BookKeeper client to continue
+     * writing when a bookie has failed but the failure has not yet been detected. Detecting
+     * a bookie has failed can take a number of seconds, as configured by the read timeout
+     * {@link ClientConfiguration#getReadTimeout()}. Once the bookie failure is detected,
+     * that bookie will be removed from the ensemble.
+     *
+     * &lt;p&gt;The other parameters match those of asyncCreateLedger&lt;/p&gt;
+     *
+     * @param ledgerId
+     *          ledger Id to use for the newly created ledger
+     * @param ensSize
+     *          number of bookies over which to stripe entries
+     * @param writeQuorumSize
+     *          number of bookies each entry will be written to
+     * @param ackQuorumSize
+     *          number of bookies which must acknowledge an entry before the call is completed
+     * @param digestType
+     *          digest type, either MAC or CRC32
+     * @param passwd
+     *          password
+     * @param cb
+     *          createCallback implementation
+     * @param ctx
+     *          optional control object
+     * @param customMetadata
+     *          optional customMetadata that holds user specified metadata
+     */
+    public void asyncCreateLedgerAdv(final long ledgerId,
+                                     final int ensSize,
+                                     final int writeQuorumSize,
+                                     final int ackQuorumSize,
+                                     final DigestType digestType,
+                                     final byte[] passwd,
+                                     final CreateCallback cb,
+                                     final Object ctx,
+                                     final Map&lt;String, byte[]&gt; customMetadata) {
+<span class="nc bnc" id="L1154" title="All 2 branches missed.">        if (writeQuorumSize &lt; ackQuorumSize) {</span>
+<span class="nc" id="L1155">            throw new IllegalArgumentException(&quot;Write quorum must be larger than ack quorum&quot;);</span>
+        }
+<span class="nc" id="L1157">        closeLock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L1159" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L1160">                cb.createComplete(BKException.Code.ClientClosedException, null, ctx);</span>
+<span class="nc" id="L1161">                return;</span>
+            }
+<span class="nc" id="L1163">            new LedgerCreateOp(BookKeeper.this, ensSize, writeQuorumSize,</span>
+                               ackQuorumSize, digestType, passwd, cb, ctx,
+                               customMetadata, WriteFlag.NONE, clientStats)
+<span class="nc" id="L1166">                    .initiateAdv(ledgerId);</span>
+        } finally {
+<span class="nc" id="L1168">            closeLock.readLock().unlock();</span>
+        }
+<span class="nc" id="L1170">    }</span>
+
+    /**
+     * Open existing ledger asynchronously for reading.
+     *
+     * &lt;p&gt;Opening a ledger with this method invokes fencing and recovery on the ledger
+     * if the ledger has not been closed. Fencing will block all other clients from
+     * writing to the ledger. Recovery will make sure that the ledger is closed
+     * before reading from it.
+     *
+     * &lt;p&gt;Recovery also makes sure that any entries which reached one bookie, but not a
+     * quorum, will be replicated to a quorum of bookies. This occurs in cases were
+     * the writer of a ledger crashes after sending a write request to one bookie but
+     * before being able to send it to the rest of the bookies in the quorum.
+     *
+     * &lt;p&gt;If the ledger is already closed, neither fencing nor recovery will be applied.
+     *
+     * @see LedgerHandle#asyncClose
+     *
+     * @param lId
+     *          ledger identifier
+     * @param digestType
+     *          digest type, either MAC or CRC32
+     * @param passwd
+     *          password
+     * @param ctx
+     *          optional control object
+     */
+    public void asyncOpenLedger(final long lId, final DigestType digestType, final byte[] passwd,
+                                final OpenCallback cb, final Object ctx) {
+<span class="nc" id="L1200">        closeLock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L1202" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L1203">                cb.openComplete(BKException.Code.ClientClosedException, null, ctx);</span>
+<span class="nc" id="L1204">                return;</span>
+            }
+<span class="nc" id="L1206">            new LedgerOpenOp(BookKeeper.this, clientStats,</span>
+<span class="nc" id="L1207">                             lId, digestType, passwd, cb, ctx).initiate();</span>
+        } finally {
+<span class="nc" id="L1209">            closeLock.readLock().unlock();</span>
+        }
+<span class="nc" id="L1211">    }</span>
+
+    /**
+     * Open existing ledger asynchronously for reading, but it does not try to
+     * recover the ledger if it is not yet closed. The application needs to use
+     * it carefully, since the writer might have crashed and ledger will remain
+     * unsealed forever if there is no external mechanism to detect the failure
+     * of the writer and the ledger is not open in a safe manner, invoking the
+     * recovery procedure.
+     *
+     * &lt;p&gt;Opening a ledger without recovery does not fence the ledger. As such, other
+     * clients can continue to write to the ledger.
+     *
+     * &lt;p&gt;This method returns a read only ledger handle. It will not be possible
+     * to add entries to the ledger. Any attempt to add entries will throw an
+     * exception.
+     *
+     * &lt;p&gt;Reads from the returned ledger will be able to read entries up until
+     * the lastConfirmedEntry at the point in time at which the ledger was opened.
+     * If an attempt is made to read beyond the ledger handle's LAC, an attempt is made
+     * to get the latest LAC from bookies or metadata, and if the entry_id of the read request
+     * is less than or equal to the new LAC, read will be allowed to proceed.
+     *
+     * @param lId
+     *          ledger identifier
+     * @param digestType
+     *          digest type, either MAC or CRC32
+     * @param passwd
+     *          password
+     * @param ctx
+     *          optional control object
+     */
+    public void asyncOpenLedgerNoRecovery(final long lId, final DigestType digestType, final byte[] passwd,
+                                          final OpenCallback cb, final Object ctx) {
+<span class="nc" id="L1245">        closeLock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L1247" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L1248">                cb.openComplete(BKException.Code.ClientClosedException, null, ctx);</span>
+<span class="nc" id="L1249">                return;</span>
+            }
+<span class="nc" id="L1251">            new LedgerOpenOp(BookKeeper.this, clientStats,</span>
+<span class="nc" id="L1252">                             lId, digestType, passwd, cb, ctx).initiateWithoutRecovery();</span>
+        } finally {
+<span class="nc" id="L1254">            closeLock.readLock().unlock();</span>
+        }
+<span class="nc" id="L1256">    }</span>
+
+
+    /**
+     * Synchronous open ledger call.
+     *
+     * @see #asyncOpenLedger
+     * @param lId
+     *          ledger identifier
+     * @param digestType
+     *          digest type, either MAC or CRC32
+     * @param passwd
+     *          password
+     * @return a handle to the open ledger
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public LedgerHandle openLedger(long lId, DigestType digestType, byte[] passwd)
+            throws BKException, InterruptedException {
+<span class="nc" id="L1275">        CompletableFuture&lt;LedgerHandle&gt; future = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L1276">        SyncOpenCallback result = new SyncOpenCallback(future);</span>
+
+        /*
+         * Calls async open ledger
+         */
+<span class="nc" id="L1281">        asyncOpenLedger(lId, digestType, passwd, result, null);</span>
+
+<span class="nc" id="L1283">        return SyncCallbackUtils.waitForResult(future);</span>
+    }
+
+    /**
+     * Synchronous, unsafe open ledger call.
+     *
+     * @see #asyncOpenLedgerNoRecovery
+     * @param lId
+     *          ledger identifier
+     * @param digestType
+     *          digest type, either MAC or CRC32
+     * @param passwd
+     *          password
+     * @return a handle to the open ledger
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public LedgerHandle openLedgerNoRecovery(long lId, DigestType digestType, byte[] passwd)
+            throws BKException, InterruptedException {
+<span class="nc" id="L1302">        CompletableFuture&lt;LedgerHandle&gt; future = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L1303">        SyncOpenCallback result = new SyncOpenCallback(future);</span>
+
+        /*
+         * Calls async open ledger
+         */
+<span class="nc" id="L1308">        asyncOpenLedgerNoRecovery(lId, digestType, passwd,</span>
+                                  result, null);
+
+<span class="nc" id="L1311">        return SyncCallbackUtils.waitForResult(future);</span>
+    }
+
+    /**
+     * Deletes a ledger asynchronously.
+     *
+     * @param lId
+     *            ledger Id
+     * @param cb
+     *            deleteCallback implementation
+     * @param ctx
+     *            optional control object
+     */
+    public void asyncDeleteLedger(final long lId, final DeleteCallback cb, final Object ctx) {
+<span class="nc" id="L1325">        closeLock.readLock().lock();</span>
+        try {
+<span class="nc bnc" id="L1327" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L1328">                cb.deleteComplete(BKException.Code.ClientClosedException, ctx);</span>
+<span class="nc" id="L1329">                return;</span>
+            }
+<span class="nc" id="L1331">            new LedgerDeleteOp(BookKeeper.this, clientStats, lId, cb, ctx).initiate();</span>
+        } finally {
+<span class="nc" id="L1333">            closeLock.readLock().unlock();</span>
+        }
+<span class="nc" id="L1335">    }</span>
+
+
+    /**
+     * Synchronous call to delete a ledger. Parameters match those of
+     * {@link #asyncDeleteLedger(long, AsyncCallback.DeleteCallback, Object)}
+     *
+     * @param lId
+     *            ledgerId
+     * @throws InterruptedException
+     * @throws BKException
+     */
+    public void deleteLedger(long lId) throws InterruptedException, BKException {
+<span class="nc" id="L1348">        CompletableFuture&lt;Void&gt; future = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L1349">        SyncDeleteCallback result = new SyncDeleteCallback(future);</span>
+        // Call asynchronous version
+<span class="nc" id="L1351">        asyncDeleteLedger(lId, result, null);</span>
+
+<span class="nc" id="L1353">        SyncCallbackUtils.waitForResult(future);</span>
+<span class="nc" id="L1354">    }</span>
+
+    /**
+     * Check asynchronously whether the ledger with identifier &lt;i&gt;lId&lt;/i&gt;
+     * has been closed.
+     *
+     * @param lId   ledger identifier
+     * @param cb    callback method
+     */
+    public void asyncIsClosed(long lId, final IsClosedCallback cb, final Object ctx){
+<span class="nc" id="L1364">        ledgerManager.readLedgerMetadata(lId).whenComplete((metadata, exception) -&gt; {</span>
+<span class="nc bnc" id="L1365" title="All 2 branches missed.">                if (exception == null) {</span>
+<span class="nc" id="L1366">                    cb.isClosedComplete(BKException.Code.OK, metadata.getValue().isClosed(), ctx);</span>
+                } else {
+<span class="nc" id="L1368">                    cb.isClosedComplete(BKException.getExceptionCode(exception), false, ctx);</span>
+                }
+<span class="nc" id="L1370">            });</span>
+<span class="nc" id="L1371">    }</span>
+
+    /**
+     * Check whether the ledger with identifier &lt;i&gt;lId&lt;/i&gt;
+     * has been closed.
+     *
+     * @param lId
+     * @return boolean true if ledger has been closed
+     * @throws BKException
+     */
+    public boolean isClosed(long lId)
+    throws BKException, InterruptedException {
+<span class="nc" id="L1383">        final class Result {</span>
+            int rc;
+            boolean isClosed;
+<span class="nc" id="L1386">            final CountDownLatch notifier = new CountDownLatch(1);</span>
+        }
+
+<span class="nc" id="L1389">        final Result result = new Result();</span>
+
+<span class="nc" id="L1391">        final IsClosedCallback cb = new IsClosedCallback(){</span>
+            @Override
+            public void isClosedComplete(int rc, boolean isClosed, Object ctx){
+<span class="nc" id="L1394">                    result.isClosed = isClosed;</span>
+<span class="nc" id="L1395">                    result.rc = rc;</span>
+<span class="nc" id="L1396">                    result.notifier.countDown();</span>
+<span class="nc" id="L1397">            }</span>
+        };
+
+        /*
+         * Call asynchronous version of isClosed
+         */
+<span class="nc" id="L1403">        asyncIsClosed(lId, cb, null);</span>
+
+        /*
+         * Wait for callback
+         */
+<span class="nc" id="L1408">        result.notifier.await();</span>
+
+<span class="nc bnc" id="L1410" title="All 2 branches missed.">        if (result.rc != BKException.Code.OK) {</span>
+<span class="nc" id="L1411">            throw BKException.create(result.rc);</span>
+        }
+
+<span class="nc" id="L1414">        return result.isClosed;</span>
+    }
+
+    /**
+     * Shuts down client.
+     *
+     */
+    @Override
+    public void close() throws BKException, InterruptedException {
+<span class="nc" id="L1423">        closeLock.writeLock().lock();</span>
+        try {
+<span class="nc bnc" id="L1425" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L1426">                return;</span>
+            }
+<span class="nc" id="L1428">            closed = true;</span>
+        } finally {
+<span class="nc" id="L1430">            closeLock.writeLock().unlock();</span>
+        }
+
+        // Close bookie client so all pending bookie requests would be failed
+        // which will reject any incoming bookie requests.
+<span class="nc" id="L1435">        bookieClient.close();</span>
+        try {
+            // Close ledger manage so all pending metadata requests would be failed
+            // which will reject any incoming metadata requests.
+<span class="nc" id="L1439">            ledgerManager.close();</span>
+<span class="nc" id="L1440">            ledgerIdGenerator.close();</span>
+<span class="nc" id="L1441">        } catch (IOException ie) {</span>
+<span class="nc" id="L1442">            LOG.error(&quot;Failed to close ledger manager : &quot;, ie);</span>
+<span class="nc" id="L1443">        }</span>
+
+        // Close the scheduler
+<span class="nc" id="L1446">        scheduler.shutdown();</span>
+<span class="nc bnc" id="L1447" title="All 2 branches missed.">        if (!scheduler.awaitTermination(10, TimeUnit.SECONDS)) {</span>
+<span class="nc" id="L1448">            LOG.warn(&quot;The scheduler did not shutdown cleanly&quot;);</span>
+        }
+<span class="nc" id="L1450">        mainWorkerPool.shutdown();</span>
+<span class="nc bnc" id="L1451" title="All 2 branches missed.">        if (!mainWorkerPool.awaitTermination(10, TimeUnit.SECONDS)) {</span>
+<span class="nc" id="L1452">            LOG.warn(&quot;The mainWorkerPool did not shutdown cleanly&quot;);</span>
+        }
+<span class="nc bnc" id="L1454" title="All 2 branches missed.">        if (this.bookieInfoScheduler != null) {</span>
+<span class="nc" id="L1455">            this.bookieInfoScheduler.shutdown();</span>
+<span class="nc bnc" id="L1456" title="All 2 branches missed.">            if (!bookieInfoScheduler.awaitTermination(10, TimeUnit.SECONDS)) {</span>
+<span class="nc" id="L1457">                LOG.warn(&quot;The bookieInfoScheduler did not shutdown cleanly&quot;);</span>
+            }
+        }
+
+<span class="nc bnc" id="L1461" title="All 2 branches missed.">        if (ownTimer) {</span>
+<span class="nc" id="L1462">            requestTimer.stop();</span>
+        }
+<span class="nc bnc" id="L1464" title="All 2 branches missed.">        if (ownEventLoopGroup) {</span>
+<span class="nc" id="L1465">            eventLoopGroup.shutdownGracefully();</span>
+        }
+<span class="nc" id="L1467">        this.metadataDriver.close();</span>
+<span class="nc" id="L1468">    }</span>
+
+    @Override
+    public CreateBuilder newCreateLedgerOp() {
+<span class="nc" id="L1472">        return new LedgerCreateOp.CreateBuilderImpl(this);</span>
+    }
+
+    @Override
+    public OpenBuilder newOpenLedgerOp() {
+<span class="nc" id="L1477">        return new LedgerOpenOp.OpenBuilderImpl(this);</span>
+    }
+
+    @Override
+    public DeleteBuilder newDeleteLedgerOp() {
+<span class="nc" id="L1482">        return new LedgerDeleteOp.DeleteBuilderImpl(this);</span>
+    }
+
+    private static final class SyncLedgerIterator implements LedgersIterator {
+
+        private final LedgerRangeIterator iterator;
+        private final ListLedgersResultImpl parent;
+<span class="nc" id="L1489">        Iterator&lt;Long&gt; currentRange = null;</span>
+
+<span class="nc" id="L1491">        public SyncLedgerIterator(LedgerRangeIterator iterator, ListLedgersResultImpl parent) {</span>
+<span class="nc" id="L1492">            this.iterator = iterator;</span>
+<span class="nc" id="L1493">            this.parent = parent;</span>
+<span class="nc" id="L1494">        }</span>
+
+        @Override
+        public boolean hasNext() throws IOException {
+<span class="nc" id="L1498">            parent.checkClosed();</span>
+<span class="nc bnc" id="L1499" title="All 2 branches missed.">            if (currentRange != null) {</span>
+<span class="nc bnc" id="L1500" title="All 2 branches missed.">                if (currentRange.hasNext()) {</span>
+<span class="nc" id="L1501">                    return true;</span>
+                }
+<span class="nc bnc" id="L1503" title="All 2 branches missed.">            } else if (iterator.hasNext()) {</span>
+<span class="nc" id="L1504">                return true;</span>
+            }
+<span class="nc" id="L1506">            return false;</span>
+        }
+
+        @Override
+        public long next() throws IOException {
+<span class="nc" id="L1511">            parent.checkClosed();</span>
+<span class="nc bnc" id="L1512" title="All 4 branches missed.">            if (currentRange == null || !currentRange.hasNext()) {</span>
+<span class="nc" id="L1513">                currentRange = iterator.next().getLedgers().iterator();</span>
+            }
+<span class="nc" id="L1515">            return currentRange.next();</span>
+        }
+    }
+
+    private static final class ListLedgersResultImpl implements ListLedgersResult {
+
+        private final LedgerRangeIterator iterator;
+<span class="nc" id="L1522">        private boolean closed = false;</span>
+        private LedgersIterator ledgersIterator;
+
+<span class="nc" id="L1525">        public ListLedgersResultImpl(LedgerRangeIterator iterator) {</span>
+<span class="nc" id="L1526">            this.iterator = iterator;</span>
+<span class="nc" id="L1527">        }</span>
+
+        void checkClosed() {
+<span class="nc bnc" id="L1530" title="All 2 branches missed.">            if (closed) {</span>
+<span class="nc" id="L1531">                throw new IllegalStateException(&quot;ListLedgersResult is closed&quot;);</span>
+            }
+<span class="nc" id="L1533">        }</span>
+
+        private void initLedgersIterator() {
+<span class="nc bnc" id="L1536" title="All 2 branches missed.">            if (ledgersIterator != null) {</span>
+<span class="nc" id="L1537">                throw new IllegalStateException(&quot;LedgersIterator must be requested once&quot;);</span>
+            }
+<span class="nc" id="L1539">            ledgersIterator = new SyncLedgerIterator(iterator, this);</span>
+<span class="nc" id="L1540">        }</span>
+
+        @Override
+        public LedgersIterator iterator() {
+<span class="nc" id="L1544">            checkClosed();</span>
+<span class="nc" id="L1545">            initLedgersIterator();</span>
+<span class="nc" id="L1546">            return ledgersIterator;</span>
+        }
+
+        @Override
+        public Iterable&lt;Long&gt; toIterable() {
+<span class="nc" id="L1551">            checkClosed();</span>
+<span class="nc" id="L1552">            initLedgersIterator();</span>
+
+<span class="nc" id="L1554">            return () -&gt; new Iterator&lt;Long&gt;() {</span>
+                @Override
+                public boolean hasNext() {
+                    try {
+<span class="nc" id="L1558">                        return ledgersIterator.hasNext();</span>
+<span class="nc" id="L1559">                    } catch (IOException ex) {</span>
+<span class="nc" id="L1560">                        throw new RuntimeException(ex);</span>
+                    }
+                }
+
+                @Override
+                public Long next() {
+                    try {
+<span class="nc" id="L1567">                        return ledgersIterator.next();</span>
+<span class="nc" id="L1568">                    } catch (IOException ex) {</span>
+<span class="nc" id="L1569">                        throw new RuntimeException(ex);</span>
+                    }
+                }
+            };
+        }
+
+        @Override
+        public void close() throws Exception {
+<span class="nc" id="L1577">            closed = true;</span>
+<span class="nc" id="L1578">        }</span>
+    }
+
+    @Override
+    public ListLedgersResultBuilder newListLedgersOp() {
+<span class="nc" id="L1583">        return () -&gt; {</span>
+<span class="nc" id="L1584">            final LedgerRangeIterator iterator = getLedgerManager().getLedgerRanges(0);</span>
+<span class="nc" id="L1585">            return CompletableFuture.completedFuture(new ListLedgersResultImpl(iterator));</span>
+        };
+    }
+
+    @Override
+    public CompletableFuture&lt;LedgerMetadata&gt; getLedgerMetadata(long ledgerId) {
+<span class="nc" id="L1591">        CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; versioned = getLedgerManager().readLedgerMetadata(ledgerId);</span>
+<span class="nc" id="L1592">        return versioned.thenApply(versionedLedgerMetadata -&gt; {</span>
+<span class="nc" id="L1593">            return versionedLedgerMetadata.getValue();</span>
+        });
+    }
+
+<span class="nc" id="L1597">    private final ClientContext clientCtx = new ClientContext() {</span>
+            @Override
+            public ClientInternalConf getConf() {
+<span class="nc" id="L1600">                return internalConf;</span>
+            }
+
+            @Override
+            public LedgerManager getLedgerManager() {
+<span class="nc" id="L1605">                return BookKeeper.this.getLedgerManager();</span>
+            }
+
+            @Override
+            public BookieWatcher getBookieWatcher() {
+<span class="nc" id="L1610">                return BookKeeper.this.getBookieWatcher();</span>
+            }
+
+            @Override
+            public EnsemblePlacementPolicy getPlacementPolicy() {
+<span class="nc" id="L1615">                return BookKeeper.this.getPlacementPolicy();</span>
+            }
+
+            @Override
+            public BookieClient getBookieClient() {
+<span class="nc" id="L1620">                return BookKeeper.this.getBookieClient();</span>
+            }
+
+            @Override
+            public OrderedExecutor getMainWorkerPool() {
+<span class="nc" id="L1625">                return BookKeeper.this.getMainWorkerPool();</span>
+            }
+
+            @Override
+            public OrderedScheduler getScheduler() {
+<span class="nc" id="L1630">                return BookKeeper.this.getScheduler();</span>
+            }
+
+            @Override
+            public BookKeeperClientStats getClientStats() {
+<span class="nc" id="L1635">                return clientStats;</span>
+            }
+
+            @Override
+            public boolean isClientClosed() {
+<span class="nc" id="L1640">                return BookKeeper.this.isClosed();</span>
+            }
+
+            @Override
+            public ByteBufAllocator getByteBufAllocator() {
+<span class="nc" id="L1645">                return allocator;</span>
+            }
+        };
+
+    ClientContext getClientCtx() {
+<span class="nc" id="L1650">        return clientCtx;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>BookieSocketAddress.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.net</a> &gt; <span class="el_source">BookieSocketAddress.java</span></div><h1>BookieSocketAddress.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.net;
+
+import static org.apache.bookkeeper.util.BookKeeperConstants.COLON;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.google.common.net.InetAddresses;
+
+import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
+import java.util.Optional;
+import org.apache.bookkeeper.proto.BookieAddressResolver;
+
+/**
+ * This is a data wrapper class that is an InetSocketAddress, it would use the hostname
+ * provided in constructors directly.
+ *
+ * &lt;p&gt;The string representation of a BookieSocketAddress is : &amp;lt;hostname&amp;gt;:&amp;lt;port&amp;gt;
+ */
+public class BookieSocketAddress {
+
+    // Member fields that make up this class.
+    private final String hostname;
+    private final int port;
+    private final Optional&lt;InetSocketAddress&gt; socketAddress;
+
+    // Constructor that takes in both a port.
+<span class="fc" id="L47">    public BookieSocketAddress(String hostname, int port) {</span>
+<span class="fc" id="L48">        this.hostname = hostname;</span>
+<span class="fc" id="L49">        this.port = port;</span>
+        /*
+         * if ipaddress is used for bookieid then lets cache InetSocketAddress
+         * otherwise not cache it. If Hostname is used for bookieid, then it is
+         * ok for node to change its ipaddress. But if ipaddress is used for
+         * bookieid then it is invalid scenario if node's ipaddress changes and
+         * nodes HostName is considered static.
+         */
+<span class="pc bpc" id="L57" title="1 of 2 branches missed.">        if (InetAddresses.isInetAddress(hostname)) {</span>
+<span class="fc" id="L58">            socketAddress = Optional.of(new InetSocketAddress(hostname, port));</span>
+        } else {
+<span class="nc" id="L60">            socketAddress = Optional.empty();</span>
+        }
+<span class="fc" id="L62">    }</span>
+
+    // Constructor from a String &quot;serialized&quot; version of this class.
+<span class="nc" id="L65">    public BookieSocketAddress(String addr) throws UnknownHostException {</span>
+<span class="nc" id="L66">        String[] parts = addr.split(COLON);</span>
+<span class="nc bnc" id="L67" title="All 2 branches missed.">        if (parts.length &lt; 2) {</span>
+<span class="nc" id="L68">            throw new UnknownHostException(addr);</span>
+        }
+<span class="nc" id="L70">        this.hostname = parts[0];</span>
+        try {
+<span class="nc" id="L72">            this.port = Integer.parseInt(parts[1]);</span>
+<span class="nc" id="L73">        } catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L74">            throw new UnknownHostException(addr);</span>
+<span class="nc" id="L75">        }</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">        if (InetAddresses.isInetAddress(hostname)) {</span>
+<span class="nc" id="L77">            socketAddress = Optional.of(new InetSocketAddress(hostname, port));</span>
+        } else {
+<span class="nc" id="L79">            socketAddress = Optional.empty();</span>
+        }
+<span class="nc" id="L81">    }</span>
+
+
+
+    // Public getters
+    public String getHostName() {
+<span class="nc" id="L87">        return hostname;</span>
+    }
+
+    public int getPort() {
+<span class="nc" id="L91">        return port;</span>
+    }
+
+    // Method to return an InetSocketAddress for the regular port.
+    @JsonIgnore
+    public InetSocketAddress getSocketAddress() {
+        /*
+         * Return each time a new instance of the InetSocketAddress if hostname
+         * is used as bookieid. If we keep using the same InetSocketAddress
+         * instance, if bookies are advertising hostnames and the IP change, the
+         * BK client will keep forever to try to connect to the old IP.
+         */
+<span class="fc" id="L103">        return socketAddress.orElseGet(() -&gt; {</span>
+<span class="nc" id="L104">            return new InetSocketAddress(hostname, port);</span>
+        });
+    }
+
+    // Return the String &quot;serialized&quot; version of this object.
+    @Override
+    public String toString() {
+<span class="fc" id="L111">        return hostname + COLON + port;</span>
+    }
+
+    // Implement an equals method comparing two BookiSocketAddress objects.
+    @Override
+    public boolean equals(Object obj) {
+<span class="nc bnc" id="L117" title="All 2 branches missed.">        if (!(obj instanceof BookieSocketAddress)) {</span>
+<span class="nc" id="L118">            return false;</span>
+        }
+<span class="nc" id="L120">        BookieSocketAddress that = (BookieSocketAddress) obj;</span>
+<span class="nc bnc" id="L121" title="All 4 branches missed.">        return this.hostname.equals(that.hostname) &amp;&amp; (this.port == that.port);</span>
+    }
+
+    @Override
+    public int hashCode() {
+<span class="nc" id="L126">        return this.hostname.hashCode() + 13 * this.port;</span>
+    }
+
+    /**
+     * Create a BookieID in legacy format hostname:port.
+     * @return the BookieID
+     */
+    public BookieId toBookieId() {
+<span class="fc" id="L134">        return BookieId.parse(this.toString());</span>
+    }
+
+    /**
+     * Simple converter from legacy BookieId to a real network address.
+     */
+<span class="fc" id="L140">    public static final BookieAddressResolver LEGACY_BOOKIEID_RESOLVER = (BookieId b) -&gt; {</span>
+        try {
+<span class="nc" id="L142">            return new BookieSocketAddress(b.toString());</span>
+<span class="nc" id="L143">        } catch (UnknownHostException err) {</span>
+<span class="nc" id="L144">            throw new BookieAddressResolver.BookieIdNotResolvedException(b, err);</span>
+        }
+    };
+
+    /**
+     * Utility for Placement Policies that need to create a dummy BookieId that represents
+     * a given host.
+     * @param hostname the hostname
+     * @return a dummy bookie id, compatible with the BookieSocketAddress#toBookieId, with a 0 tcp port.
+     */
+    public static BookieId createDummyBookieIdForHostname(String hostname) {
+<span class="nc" id="L155">        return BookieId.parse(hostname + &quot;:0&quot;);</span>
+    }
+
+    /**
+     * Tells whether a BookieId may be a dummy id.
+     * @param bookieId
+     * @return true if the BookieId looks like it has been generated by
+     * {@link #createDummyBookieIdForHostname(java.lang.String)}
+     */
+    public static boolean isDummyBookieIdForHostname(BookieId bookieId) {
+<span class="nc" id="L165">        return bookieId.getId().endsWith(&quot;:0&quot;);</span>
+    }
+
+    /**
+     * Use legacy resolver to resolve a bookieId.
+     * @param bookieId id supposed to be generated by
+     * {@link #createDummyBookieIdForHostname(java.lang.String)}
+     * @return the BookieSocketAddress
+     */
+    public static BookieSocketAddress resolveDummyBookieId(BookieId bookieId)
+            throws BookieAddressResolver.BookieIdNotResolvedException {
+<span class="nc" id="L176">        return LEGACY_BOOKIEID_RESOLVER.resolve(bookieId);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

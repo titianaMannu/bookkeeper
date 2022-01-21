@@ -1,0 +1,2004 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>Auditor.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.replication</a> &gt; <span class="el_source">Auditor.java</span></div><h1>Auditor.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.replication;
+
+import static org.apache.bookkeeper.replication.ReplicationStats.AUDITOR_SCOPE;
+import static org.apache.bookkeeper.replication.ReplicationStats.AUDIT_BOOKIES_TIME;
+import static org.apache.bookkeeper.replication.ReplicationStats.BOOKIE_TO_LEDGERS_MAP_CREATION_TIME;
+import static org.apache.bookkeeper.replication.ReplicationStats.CHECK_ALL_LEDGERS_TIME;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_BOOKIES_PER_LEDGER;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_BOOKIE_AUDITS_DELAYED;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_DELAYED_BOOKIE_AUDITS_DELAYES_CANCELLED;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_FRAGMENTS_PER_LEDGER;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_LEDGERS_CHECKED;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_LEDGERS_HAVING_LESS_THAN_AQ_REPLICAS_OF_AN_ENTRY;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_LEDGERS_HAVING_LESS_THAN_WQ_REPLICAS_OF_AN_ENTRY;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_LEDGERS_HAVING_NO_REPLICA_OF_AN_ENTRY;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_LEDGERS_NOT_ADHERING_TO_PLACEMENT_POLICY;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_LEDGERS_SOFTLY_ADHERING_TO_PLACEMENT_POLICY;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_UNDERREPLICATED_LEDGERS_ELAPSED_RECOVERY_GRACE_PERIOD;
+import static org.apache.bookkeeper.replication.ReplicationStats.NUM_UNDER_REPLICATED_LEDGERS;
+import static org.apache.bookkeeper.replication.ReplicationStats.PLACEMENT_POLICY_CHECK_TIME;
+import static org.apache.bookkeeper.replication.ReplicationStats.REPLICAS_CHECK_TIME;
+import static org.apache.bookkeeper.replication.ReplicationStats.URL_PUBLISH_TIME_FOR_LOST_BOOKIE;
+import static org.apache.bookkeeper.util.SafeRunnable.safeRun;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Stopwatch;
+import com.google.common.collect.HashMultiset;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Multiset;
+import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.SettableFuture;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.BitSet;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
+import java.util.stream.Collectors;
+
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BKException.Code;
+import org.apache.bookkeeper.client.BookKeeper;
+import org.apache.bookkeeper.client.BookKeeperAdmin;
+import org.apache.bookkeeper.client.EnsemblePlacementPolicy.PlacementPolicyAdherence;
+import org.apache.bookkeeper.client.LedgerChecker;
+import org.apache.bookkeeper.client.LedgerFragment;
+import org.apache.bookkeeper.client.LedgerHandle;
+import org.apache.bookkeeper.client.RoundRobinDistributionSchedule;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.meta.AbstractZkLedgerManagerFactory;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.meta.LedgerManager.LedgerRange;
+import org.apache.bookkeeper.meta.LedgerManager.LedgerRangeIterator;
+import org.apache.bookkeeper.meta.LedgerManagerFactory;
+import org.apache.bookkeeper.meta.LedgerUnderreplicationManager;
+import org.apache.bookkeeper.meta.UnderreplicatedLedger;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.GenericCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.MultiCallback;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.Processor;
+import org.apache.bookkeeper.replication.ReplicationException.BKAuditException;
+import org.apache.bookkeeper.replication.ReplicationException.CompatibilityException;
+import org.apache.bookkeeper.replication.ReplicationException.UnavailableException;
+import org.apache.bookkeeper.stats.Counter;
+import org.apache.bookkeeper.stats.Gauge;
+import org.apache.bookkeeper.stats.NullStatsLogger;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.stats.annotations.StatsDoc;
+import org.apache.bookkeeper.util.AvailabilityOfEntriesOfLedger;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.zookeeper.AsyncCallback;
+import org.apache.zookeeper.AsyncCallback.VoidCallback;
+import org.apache.zookeeper.KeeperException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Auditor is a single entity in the entire Bookie cluster and will be watching
+ * all the bookies under 'ledgerrootpath/available' zkpath. When any of the
+ * bookie failed or disconnected from zk, he will start initiating the
+ * re-replication activities by keeping all the corresponding ledgers of the
+ * failed bookie as underreplicated znode in zk.
+ *
+ * &lt;p&gt;TODO: eliminate the direct usage of zookeeper here {@link https://github.com/apache/bookkeeper/issues/1332}
+ */
+@StatsDoc(
+    name = AUDITOR_SCOPE,
+    help = &quot;Auditor related stats&quot;
+)
+public class Auditor implements AutoCloseable {
+<span class="nc" id="L133">    private static final Logger LOG = LoggerFactory.getLogger(Auditor.class);</span>
+    private static final int MAX_CONCURRENT_REPLICAS_CHECK_LEDGER_REQUESTS = 100;
+    private static final int REPLICAS_CHECK_TIMEOUT_IN_SECS = 120;
+<span class="nc" id="L136">    private static final BitSet EMPTY_BITSET = new BitSet();</span>
+    private final ServerConfiguration conf;
+    private final BookKeeper bkc;
+    private final boolean ownBkc;
+    private final BookKeeperAdmin admin;
+    private final boolean ownAdmin;
+    private BookieLedgerIndexer bookieLedgerIndexer;
+    private LedgerManager ledgerManager;
+    private LedgerUnderreplicationManager ledgerUnderreplicationManager;
+    private final ScheduledExecutorService executor;
+<span class="nc" id="L146">    private List&lt;String&gt; knownBookies = new ArrayList&lt;String&gt;();</span>
+    private final String bookieIdentifier;
+    private volatile Future&lt;?&gt; auditTask;
+<span class="nc" id="L149">    private Set&lt;String&gt; bookiesToBeAudited = Sets.newHashSet();</span>
+    private volatile int lostBookieRecoveryDelayBeforeChange;
+    private final AtomicInteger ledgersNotAdheringToPlacementPolicyGuageValue;
+    private final AtomicInteger numOfLedgersFoundNotAdheringInPlacementPolicyCheck;
+    private final AtomicInteger ledgersSoftlyAdheringToPlacementPolicyGuageValue;
+    private final AtomicInteger numOfLedgersFoundSoftlyAdheringInPlacementPolicyCheck;
+    private final AtomicInteger numOfClosedLedgersAuditedInPlacementPolicyCheck;
+    private final AtomicInteger numOfURLedgersElapsedRecoveryGracePeriodGuageValue;
+    private final AtomicInteger numOfURLedgersElapsedRecoveryGracePeriod;
+    private final AtomicInteger numLedgersHavingNoReplicaOfAnEntryGuageValue;
+    private final AtomicInteger numLedgersFoundHavingNoReplicaOfAnEntry;
+    private final AtomicInteger numLedgersHavingLessThanAQReplicasOfAnEntryGuageValue;
+    private final AtomicInteger numLedgersFoundHavingLessThanAQReplicasOfAnEntry;
+    private final AtomicInteger numLedgersHavingLessThanWQReplicasOfAnEntryGuageValue;
+    private final AtomicInteger numLedgersFoundHavingLessThanWQReplicasOfAnEntry;
+    private final long underreplicatedLedgerRecoveryGracePeriod;
+    private final int zkOpTimeoutMs;
+
+    private final StatsLogger statsLogger;
+    @StatsDoc(
+        name = NUM_UNDER_REPLICATED_LEDGERS,
+        help = &quot;the distribution of num under_replicated ledgers on each auditor run&quot;
+    )
+    private final OpStatsLogger numUnderReplicatedLedger;
+    @StatsDoc(
+        name = URL_PUBLISH_TIME_FOR_LOST_BOOKIE,
+        help = &quot;the latency distribution of publishing under replicated ledgers for lost bookies&quot;
+    )
+    private final OpStatsLogger uRLPublishTimeForLostBookies;
+    @StatsDoc(
+        name = BOOKIE_TO_LEDGERS_MAP_CREATION_TIME,
+        help = &quot;the latency distribution of creating bookies-to-ledgers map&quot;
+    )
+    private final OpStatsLogger bookieToLedgersMapCreationTime;
+    @StatsDoc(
+        name = CHECK_ALL_LEDGERS_TIME,
+        help = &quot;the latency distribution of checking all ledgers&quot;
+    )
+    private final OpStatsLogger checkAllLedgersTime;
+    @StatsDoc(
+            name = PLACEMENT_POLICY_CHECK_TIME,
+            help = &quot;the latency distribution of placementPolicy check&quot;
+        )
+    private final OpStatsLogger placementPolicyCheckTime;
+    @StatsDoc(
+            name = REPLICAS_CHECK_TIME,
+            help = &quot;the latency distribution of replicas check&quot;
+        )
+    private final OpStatsLogger replicasCheckTime;
+    @StatsDoc(
+        name = AUDIT_BOOKIES_TIME,
+        help = &quot;the latency distribution of auditing all the bookies&quot;
+    )
+    private final OpStatsLogger auditBookiesTime;
+    @StatsDoc(
+        name = NUM_LEDGERS_CHECKED,
+        help = &quot;the number of ledgers checked by the auditor&quot;
+    )
+    private final Counter numLedgersChecked;
+    @StatsDoc(
+        name = NUM_FRAGMENTS_PER_LEDGER,
+        help = &quot;the distribution of number of fragments per ledger&quot;
+    )
+    private final OpStatsLogger numFragmentsPerLedger;
+    @StatsDoc(
+        name = NUM_BOOKIES_PER_LEDGER,
+        help = &quot;the distribution of number of bookies per ledger&quot;
+    )
+    private final OpStatsLogger numBookiesPerLedger;
+    @StatsDoc(
+        name = NUM_BOOKIE_AUDITS_DELAYED,
+        help = &quot;the number of bookie-audits delayed&quot;
+    )
+    private final Counter numBookieAuditsDelayed;
+    @StatsDoc(
+        name = NUM_DELAYED_BOOKIE_AUDITS_DELAYES_CANCELLED,
+        help = &quot;the number of delayed-bookie-audits cancelled&quot;
+    )
+    private final Counter numDelayedBookieAuditsCancelled;
+    @StatsDoc(
+            name = NUM_LEDGERS_NOT_ADHERING_TO_PLACEMENT_POLICY,
+            help = &quot;Gauge for number of ledgers not adhering to placement policy found in placement policy check&quot;
+    )
+    private final Gauge&lt;Integer&gt; numLedgersNotAdheringToPlacementPolicy;
+    @StatsDoc(
+            name = NUM_LEDGERS_SOFTLY_ADHERING_TO_PLACEMENT_POLICY,
+            help = &quot;Gauge for number of ledgers softly adhering to placement policy found in placement policy check&quot;
+    )
+    private final Gauge&lt;Integer&gt; numLedgersSoftlyAdheringToPlacementPolicy;
+    @StatsDoc(
+            name = NUM_UNDERREPLICATED_LEDGERS_ELAPSED_RECOVERY_GRACE_PERIOD,
+            help = &quot;Gauge for number of underreplicated ledgers elapsed recovery grace period&quot;
+    )
+    private final Gauge&lt;Integer&gt; numUnderreplicatedLedgersElapsedRecoveryGracePeriod;
+    @StatsDoc(
+            name = NUM_LEDGERS_HAVING_NO_REPLICA_OF_AN_ENTRY,
+            help = &quot;Gauge for number of ledgers having an entry with all the replicas missing&quot;
+    )
+    private final Gauge&lt;Integer&gt; numLedgersHavingNoReplicaOfAnEntry;
+    @StatsDoc(
+            name = NUM_LEDGERS_HAVING_LESS_THAN_AQ_REPLICAS_OF_AN_ENTRY,
+            help = &quot;Gauge for number of ledgers having an entry with less than AQ number of replicas&quot;
+                    + &quot;, this doesn't include ledgers counted towards numLedgersHavingNoReplicaOfAnEntry&quot;
+    )
+    private final Gauge&lt;Integer&gt; numLedgersHavingLessThanAQReplicasOfAnEntry;
+    @StatsDoc(
+            name = NUM_LEDGERS_HAVING_LESS_THAN_WQ_REPLICAS_OF_AN_ENTRY,
+            help = &quot;Gauge for number of ledgers having an entry with less than WQ number of replicas&quot;
+                    + &quot;, this doesn't include ledgers counted towards numLedgersHavingLessThanAQReplicasOfAnEntry&quot;
+    )
+    private final Gauge&lt;Integer&gt; numLedgersHavingLessThanWQReplicasOfAnEntry;
+
+    static BookKeeper createBookKeeperClient(ServerConfiguration conf) throws InterruptedException, IOException {
+<span class="nc" id="L262">        return createBookKeeperClient(conf, NullStatsLogger.INSTANCE);</span>
+    }
+
+    static BookKeeper createBookKeeperClient(ServerConfiguration conf, StatsLogger statsLogger)
+            throws InterruptedException, IOException {
+<span class="nc" id="L267">        ClientConfiguration clientConfiguration = new ClientConfiguration(conf);</span>
+<span class="nc" id="L268">        clientConfiguration.setClientRole(ClientConfiguration.CLIENT_ROLE_SYSTEM);</span>
+        try {
+<span class="nc" id="L270">            return BookKeeper.forConfig(clientConfiguration).statsLogger(statsLogger).build();</span>
+<span class="nc" id="L271">        } catch (BKException e) {</span>
+<span class="nc" id="L272">            throw new IOException(&quot;Failed to create bookkeeper client&quot;, e);</span>
+        }
+    }
+
+    static BookKeeper createBookKeeperClientThrowUnavailableException(ServerConfiguration conf)
+        throws UnavailableException {
+        try {
+<span class="nc" id="L279">            return createBookKeeperClient(conf);</span>
+<span class="nc" id="L280">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L281">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L282">            throw new UnavailableException(&quot;Failed to create bookkeeper client&quot;, e);</span>
+<span class="nc" id="L283">        } catch (IOException e) {</span>
+<span class="nc" id="L284">            throw new UnavailableException(&quot;Failed to create bookkeeper client&quot;, e);</span>
+        }
+    }
+
+
+    public Auditor(final String bookieIdentifier,
+                   ServerConfiguration conf,
+                   StatsLogger statsLogger)
+        throws UnavailableException {
+<span class="nc" id="L293">        this(</span>
+            bookieIdentifier,
+            conf,
+<span class="nc" id="L296">            createBookKeeperClientThrowUnavailableException(conf),</span>
+            true,
+            statsLogger);
+<span class="nc" id="L299">    }</span>
+
+    public Auditor(final String bookieIdentifier,
+            ServerConfiguration conf,
+            BookKeeper bkc,
+            boolean ownBkc,
+            StatsLogger statsLogger)
+                    throws UnavailableException {
+<span class="nc" id="L307">        this(bookieIdentifier,</span>
+                conf,
+                bkc,
+                ownBkc,
+                new BookKeeperAdmin(bkc, statsLogger),
+                true,
+                statsLogger);
+<span class="nc" id="L314">    }</span>
+
+    public Auditor(final String bookieIdentifier,
+            ServerConfiguration conf,
+            BookKeeper bkc,
+            boolean ownBkc,
+            BookKeeperAdmin admin,
+            boolean ownAdmin,
+            StatsLogger statsLogger)
+<span class="nc" id="L323">        throws UnavailableException {</span>
+<span class="nc" id="L324">        this.conf = conf;</span>
+<span class="nc" id="L325">        this.underreplicatedLedgerRecoveryGracePeriod = conf.getUnderreplicatedLedgerRecoveryGracePeriod();</span>
+<span class="nc" id="L326">        this.zkOpTimeoutMs = conf.getZkTimeout() * 2;</span>
+<span class="nc" id="L327">        this.bookieIdentifier = bookieIdentifier;</span>
+<span class="nc" id="L328">        this.statsLogger = statsLogger;</span>
+<span class="nc" id="L329">        this.numOfLedgersFoundNotAdheringInPlacementPolicyCheck = new AtomicInteger(0);</span>
+<span class="nc" id="L330">        this.ledgersNotAdheringToPlacementPolicyGuageValue = new AtomicInteger(0);</span>
+<span class="nc" id="L331">        this.numOfLedgersFoundSoftlyAdheringInPlacementPolicyCheck = new AtomicInteger(0);</span>
+<span class="nc" id="L332">        this.ledgersSoftlyAdheringToPlacementPolicyGuageValue = new AtomicInteger(0);</span>
+<span class="nc" id="L333">        this.numOfClosedLedgersAuditedInPlacementPolicyCheck = new AtomicInteger(0);</span>
+<span class="nc" id="L334">        this.numOfURLedgersElapsedRecoveryGracePeriod = new AtomicInteger(0);</span>
+<span class="nc" id="L335">        this.numOfURLedgersElapsedRecoveryGracePeriodGuageValue = new AtomicInteger(0);</span>
+<span class="nc" id="L336">        this.numLedgersHavingNoReplicaOfAnEntryGuageValue = new AtomicInteger(0);</span>
+<span class="nc" id="L337">        this.numLedgersFoundHavingNoReplicaOfAnEntry = new AtomicInteger(0);</span>
+<span class="nc" id="L338">        this.numLedgersHavingLessThanAQReplicasOfAnEntryGuageValue = new AtomicInteger(0);</span>
+<span class="nc" id="L339">        this.numLedgersFoundHavingLessThanAQReplicasOfAnEntry = new AtomicInteger(0);</span>
+<span class="nc" id="L340">        this.numLedgersHavingLessThanWQReplicasOfAnEntryGuageValue = new AtomicInteger(0);</span>
+<span class="nc" id="L341">        this.numLedgersFoundHavingLessThanWQReplicasOfAnEntry = new AtomicInteger(0);</span>
+
+<span class="nc" id="L343">        numUnderReplicatedLedger = this.statsLogger.getOpStatsLogger(ReplicationStats.NUM_UNDER_REPLICATED_LEDGERS);</span>
+<span class="nc" id="L344">        uRLPublishTimeForLostBookies = this.statsLogger</span>
+<span class="nc" id="L345">                .getOpStatsLogger(ReplicationStats.URL_PUBLISH_TIME_FOR_LOST_BOOKIE);</span>
+<span class="nc" id="L346">        bookieToLedgersMapCreationTime = this.statsLogger</span>
+<span class="nc" id="L347">                .getOpStatsLogger(ReplicationStats.BOOKIE_TO_LEDGERS_MAP_CREATION_TIME);</span>
+<span class="nc" id="L348">        checkAllLedgersTime = this.statsLogger.getOpStatsLogger(ReplicationStats.CHECK_ALL_LEDGERS_TIME);</span>
+<span class="nc" id="L349">        placementPolicyCheckTime = this.statsLogger.getOpStatsLogger(ReplicationStats.PLACEMENT_POLICY_CHECK_TIME);</span>
+<span class="nc" id="L350">        replicasCheckTime = this.statsLogger.getOpStatsLogger(ReplicationStats.REPLICAS_CHECK_TIME);</span>
+<span class="nc" id="L351">        auditBookiesTime = this.statsLogger.getOpStatsLogger(ReplicationStats.AUDIT_BOOKIES_TIME);</span>
+<span class="nc" id="L352">        numLedgersChecked = this.statsLogger.getCounter(ReplicationStats.NUM_LEDGERS_CHECKED);</span>
+<span class="nc" id="L353">        numFragmentsPerLedger = statsLogger.getOpStatsLogger(ReplicationStats.NUM_FRAGMENTS_PER_LEDGER);</span>
+<span class="nc" id="L354">        numBookiesPerLedger = statsLogger.getOpStatsLogger(ReplicationStats.NUM_BOOKIES_PER_LEDGER);</span>
+<span class="nc" id="L355">        numBookieAuditsDelayed = this.statsLogger.getCounter(ReplicationStats.NUM_BOOKIE_AUDITS_DELAYED);</span>
+<span class="nc" id="L356">        numDelayedBookieAuditsCancelled = this.statsLogger</span>
+<span class="nc" id="L357">                .getCounter(ReplicationStats.NUM_DELAYED_BOOKIE_AUDITS_DELAYES_CANCELLED);</span>
+<span class="nc" id="L358">        numLedgersNotAdheringToPlacementPolicy = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L361">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L366">                return ledgersNotAdheringToPlacementPolicyGuageValue.get();</span>
+            }
+        };
+<span class="nc" id="L369">        this.statsLogger.registerGauge(ReplicationStats.NUM_LEDGERS_NOT_ADHERING_TO_PLACEMENT_POLICY,</span>
+                numLedgersNotAdheringToPlacementPolicy);
+<span class="nc" id="L371">        numLedgersSoftlyAdheringToPlacementPolicy = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L374">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L379">                return ledgersSoftlyAdheringToPlacementPolicyGuageValue.get();</span>
+            }
+        };
+<span class="nc" id="L382">        this.statsLogger.registerGauge(ReplicationStats.NUM_LEDGERS_SOFTLY_ADHERING_TO_PLACEMENT_POLICY,</span>
+                numLedgersSoftlyAdheringToPlacementPolicy);
+
+<span class="nc" id="L385">        numUnderreplicatedLedgersElapsedRecoveryGracePeriod = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L388">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L393">                return numOfURLedgersElapsedRecoveryGracePeriodGuageValue.get();</span>
+            }
+        };
+<span class="nc" id="L396">        this.statsLogger.registerGauge(ReplicationStats.NUM_UNDERREPLICATED_LEDGERS_ELAPSED_RECOVERY_GRACE_PERIOD,</span>
+                numUnderreplicatedLedgersElapsedRecoveryGracePeriod);
+
+<span class="nc" id="L399">        numLedgersHavingNoReplicaOfAnEntry = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L402">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L407">                return numLedgersHavingNoReplicaOfAnEntryGuageValue.get();</span>
+            }
+        };
+<span class="nc" id="L410">        this.statsLogger.registerGauge(ReplicationStats.NUM_LEDGERS_HAVING_NO_REPLICA_OF_AN_ENTRY,</span>
+                numLedgersHavingNoReplicaOfAnEntry);
+<span class="nc" id="L412">        numLedgersHavingLessThanAQReplicasOfAnEntry = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L415">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L420">                return numLedgersHavingLessThanAQReplicasOfAnEntryGuageValue.get();</span>
+            }
+        };
+<span class="nc" id="L423">        this.statsLogger.registerGauge(ReplicationStats.NUM_LEDGERS_HAVING_LESS_THAN_AQ_REPLICAS_OF_AN_ENTRY,</span>
+                numLedgersHavingLessThanAQReplicasOfAnEntry);
+<span class="nc" id="L425">        numLedgersHavingLessThanWQReplicasOfAnEntry = new Gauge&lt;Integer&gt;() {</span>
+            @Override
+            public Integer getDefaultValue() {
+<span class="nc" id="L428">                return 0;</span>
+            }
+
+            @Override
+            public Integer getSample() {
+<span class="nc" id="L433">                return numLedgersHavingLessThanWQReplicasOfAnEntryGuageValue.get();</span>
+            }
+        };
+<span class="nc" id="L436">        this.statsLogger.registerGauge(ReplicationStats.NUM_LEDGERS_HAVING_LESS_THAN_WQ_REPLICAS_OF_AN_ENTRY,</span>
+                numLedgersHavingLessThanWQReplicasOfAnEntry);
+
+<span class="nc" id="L439">        this.bkc = bkc;</span>
+<span class="nc" id="L440">        this.ownBkc = ownBkc;</span>
+<span class="nc" id="L441">        this.admin = admin;</span>
+<span class="nc" id="L442">        this.ownAdmin = ownAdmin;</span>
+<span class="nc" id="L443">        initialize(conf, bkc);</span>
+
+<span class="nc" id="L445">        executor = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {</span>
+                @Override
+                public Thread newThread(Runnable r) {
+<span class="nc" id="L448">                    Thread t = new Thread(r, &quot;AuditorBookie-&quot; + bookieIdentifier);</span>
+<span class="nc" id="L449">                    t.setDaemon(true);</span>
+<span class="nc" id="L450">                    return t;</span>
+                }
+            });
+<span class="nc" id="L453">    }</span>
+
+    private void initialize(ServerConfiguration conf, BookKeeper bkc)
+            throws UnavailableException {
+        try {
+<span class="nc" id="L458">            LedgerManagerFactory ledgerManagerFactory = AbstractZkLedgerManagerFactory</span>
+<span class="nc" id="L459">                    .newLedgerManagerFactory(</span>
+                        conf,
+<span class="nc" id="L461">                        bkc.getMetadataClientDriver().getLayoutManager());</span>
+<span class="nc" id="L462">            ledgerManager = ledgerManagerFactory.newLedgerManager();</span>
+<span class="nc" id="L463">            this.bookieLedgerIndexer = new BookieLedgerIndexer(ledgerManager);</span>
+
+<span class="nc" id="L465">            this.ledgerUnderreplicationManager = ledgerManagerFactory</span>
+<span class="nc" id="L466">                    .newLedgerUnderreplicationManager();</span>
+<span class="nc" id="L467">            LOG.info(&quot;AuthProvider used by the Auditor is {}&quot;,</span>
+<span class="nc" id="L468">                admin.getConf().getClientAuthProviderFactoryClass());</span>
+<span class="nc" id="L469">            if (this.ledgerUnderreplicationManager</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">                    .initializeLostBookieRecoveryDelay(conf.getLostBookieRecoveryDelay())) {</span>
+<span class="nc" id="L471">                LOG.info(&quot;Initializing lostBookieRecoveryDelay zNode to the conif value: {}&quot;,</span>
+<span class="nc" id="L472">                        conf.getLostBookieRecoveryDelay());</span>
+            } else {
+<span class="nc" id="L474">                LOG.info(&quot;Valid lostBookieRecoveryDelay zNode is available, so not creating &quot;</span>
+                        + &quot;lostBookieRecoveryDelay zNode as part of Auditor initialization &quot;);
+            }
+<span class="nc" id="L477">            lostBookieRecoveryDelayBeforeChange = this.ledgerUnderreplicationManager.getLostBookieRecoveryDelay();</span>
+<span class="nc" id="L478">        } catch (CompatibilityException ce) {</span>
+<span class="nc" id="L479">            throw new UnavailableException(</span>
+                    &quot;CompatibilityException while initializing Auditor&quot;, ce);
+<span class="nc" id="L481">        } catch (IOException | KeeperException ioe) {</span>
+<span class="nc" id="L482">            throw new UnavailableException(</span>
+                    &quot;Exception while initializing Auditor&quot;, ioe);
+<span class="nc" id="L484">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L485">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L486">            throw new UnavailableException(</span>
+                    &quot;Interrupted while initializing Auditor&quot;, ie);
+<span class="nc" id="L488">        }</span>
+<span class="nc" id="L489">    }</span>
+
+    private void submitShutdownTask() {
+<span class="nc" id="L492">        synchronized (this) {</span>
+<span class="nc" id="L493">            LOG.info(&quot;Executing submitShutdownTask&quot;);</span>
+<span class="nc bnc" id="L494" title="All 2 branches missed.">            if (executor.isShutdown()) {</span>
+<span class="nc" id="L495">                LOG.info(&quot;executor is already shutdown&quot;);</span>
+<span class="nc" id="L496">                return;</span>
+            }
+<span class="nc" id="L498">            executor.submit(safeRun(new Runnable() {</span>
+                @Override
+                public void run() {
+<span class="nc" id="L501">                    synchronized (Auditor.this) {</span>
+<span class="nc" id="L502">                        LOG.info(&quot;Shutting down Auditor's Executor&quot;);</span>
+<span class="nc" id="L503">                        executor.shutdown();</span>
+<span class="nc" id="L504">                    }</span>
+<span class="nc" id="L505">                }</span>
+            }));
+<span class="nc" id="L507">        }</span>
+<span class="nc" id="L508">    }</span>
+
+    @VisibleForTesting
+    synchronized Future&lt;?&gt; submitAuditTask() {
+<span class="nc bnc" id="L512" title="All 2 branches missed.">        if (executor.isShutdown()) {</span>
+<span class="nc" id="L513">            SettableFuture&lt;Void&gt; f = SettableFuture.&lt;Void&gt;create();</span>
+<span class="nc" id="L514">            f.setException(new BKAuditException(&quot;Auditor shutting down&quot;));</span>
+<span class="nc" id="L515">            return f;</span>
+        }
+<span class="nc" id="L517">        return executor.submit(safeRun(new Runnable() {</span>
+                @Override
+                @SuppressWarnings(&quot;unchecked&quot;)
+                public void run() {
+                    try {
+<span class="nc" id="L522">                        waitIfLedgerReplicationDisabled();</span>
+<span class="nc" id="L523">                        int lostBookieRecoveryDelay = Auditor.this.ledgerUnderreplicationManager</span>
+<span class="nc" id="L524">                                .getLostBookieRecoveryDelay();</span>
+<span class="nc" id="L525">                        List&lt;String&gt; availableBookies = getAvailableBookies();</span>
+
+                        // casting to String, as knownBookies and availableBookies
+                        // contains only String values
+                        // find new bookies(if any) and update the known bookie list
+<span class="nc" id="L530">                        Collection&lt;String&gt; newBookies = CollectionUtils.subtract(</span>
+<span class="nc" id="L531">                                availableBookies, knownBookies);</span>
+<span class="nc" id="L532">                        knownBookies.addAll(newBookies);</span>
+<span class="nc bnc" id="L533" title="All 4 branches missed.">                        if (!bookiesToBeAudited.isEmpty() &amp;&amp; knownBookies.containsAll(bookiesToBeAudited)) {</span>
+                            // the bookie, which went down earlier and had an audit scheduled for,
+                            // has come up. So let us stop tracking it and cancel the audit. Since
+                            // we allow delaying of audit when there is only one failed bookie,
+                            // bookiesToBeAudited should just have 1 element and hence containsAll
+                            // check should be ok
+<span class="nc bnc" id="L539" title="All 4 branches missed.">                            if (auditTask != null &amp;&amp; auditTask.cancel(false)) {</span>
+<span class="nc" id="L540">                                auditTask = null;</span>
+<span class="nc" id="L541">                                numDelayedBookieAuditsCancelled.inc();</span>
+                            }
+<span class="nc" id="L543">                            bookiesToBeAudited.clear();</span>
+                        }
+
+                        // find lost bookies(if any)
+<span class="nc" id="L547">                        bookiesToBeAudited.addAll(CollectionUtils.subtract(knownBookies, availableBookies));</span>
+<span class="nc bnc" id="L548" title="All 2 branches missed.">                        if (bookiesToBeAudited.size() == 0) {</span>
+<span class="nc" id="L549">                            return;</span>
+                        }
+
+<span class="nc" id="L552">                        knownBookies.removeAll(bookiesToBeAudited);</span>
+<span class="nc bnc" id="L553" title="All 2 branches missed.">                        if (lostBookieRecoveryDelay == 0) {</span>
+<span class="nc" id="L554">                            startAudit(false);</span>
+<span class="nc" id="L555">                            bookiesToBeAudited.clear();</span>
+<span class="nc" id="L556">                            return;</span>
+                        }
+<span class="nc bnc" id="L558" title="All 2 branches missed.">                        if (bookiesToBeAudited.size() &gt; 1) {</span>
+                            // if more than one bookie is down, start the audit immediately;
+<span class="nc" id="L560">                            LOG.info(&quot;Multiple bookie failure; not delaying bookie audit. &quot;</span>
+                                    + &quot;Bookies lost now: {}; All lost bookies: {}&quot;,
+<span class="nc" id="L562">                                    CollectionUtils.subtract(knownBookies, availableBookies),</span>
+<span class="nc" id="L563">                                    bookiesToBeAudited);</span>
+<span class="nc bnc" id="L564" title="All 4 branches missed.">                            if (auditTask != null &amp;&amp; auditTask.cancel(false)) {</span>
+<span class="nc" id="L565">                                auditTask = null;</span>
+<span class="nc" id="L566">                                numDelayedBookieAuditsCancelled.inc();</span>
+                            }
+<span class="nc" id="L568">                            startAudit(false);</span>
+<span class="nc" id="L569">                            bookiesToBeAudited.clear();</span>
+<span class="nc" id="L570">                            return;</span>
+                        }
+<span class="nc bnc" id="L572" title="All 2 branches missed.">                        if (auditTask == null) {</span>
+                            // if there is no scheduled audit, schedule one
+<span class="nc" id="L574">                            auditTask = executor.schedule(safeRun(new Runnable() {</span>
+                                @Override
+                                public void run() {
+<span class="nc" id="L577">                                    startAudit(false);</span>
+<span class="nc" id="L578">                                    auditTask = null;</span>
+<span class="nc" id="L579">                                    bookiesToBeAudited.clear();</span>
+<span class="nc" id="L580">                                }</span>
+                            }), lostBookieRecoveryDelay, TimeUnit.SECONDS);
+<span class="nc" id="L582">                            numBookieAuditsDelayed.inc();</span>
+<span class="nc" id="L583">                            LOG.info(&quot;Delaying bookie audit by {} secs for {}&quot;, lostBookieRecoveryDelay,</span>
+<span class="nc" id="L584">                                    bookiesToBeAudited);</span>
+                        }
+<span class="nc" id="L586">                    } catch (BKException bke) {</span>
+<span class="nc" id="L587">                        LOG.error(&quot;Exception getting bookie list&quot;, bke);</span>
+<span class="nc" id="L588">                    } catch (InterruptedException ie) {</span>
+<span class="nc" id="L589">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L590">                        LOG.error(&quot;Interrupted while watching available bookies &quot;, ie);</span>
+<span class="nc" id="L591">                    } catch (UnavailableException ue) {</span>
+<span class="nc" id="L592">                        LOG.error(&quot;Exception while watching available bookies&quot;, ue);</span>
+<span class="nc" id="L593">                    }</span>
+<span class="nc" id="L594">                }</span>
+            }));
+    }
+
+    synchronized Future&lt;?&gt; submitLostBookieRecoveryDelayChangedEvent() {
+<span class="nc bnc" id="L599" title="All 2 branches missed.">        if (executor.isShutdown()) {</span>
+<span class="nc" id="L600">            SettableFuture&lt;Void&gt; f = SettableFuture.&lt;Void&gt; create();</span>
+<span class="nc" id="L601">            f.setException(new BKAuditException(&quot;Auditor shutting down&quot;));</span>
+<span class="nc" id="L602">            return f;</span>
+        }
+<span class="nc" id="L604">        return executor.submit(safeRun(new Runnable() {</span>
+<span class="nc" id="L605">            int lostBookieRecoveryDelay = -1;</span>
+            @Override
+            public void run() {
+                try {
+<span class="nc" id="L609">                    waitIfLedgerReplicationDisabled();</span>
+<span class="nc" id="L610">                    lostBookieRecoveryDelay = Auditor.this.ledgerUnderreplicationManager</span>
+<span class="nc" id="L611">                            .getLostBookieRecoveryDelay();</span>
+                    // if there is pending auditTask, cancel the task. So that it can be rescheduled
+                    // after new lostBookieRecoveryDelay period
+<span class="nc bnc" id="L614" title="All 2 branches missed.">                    if (auditTask != null) {</span>
+<span class="nc" id="L615">                        LOG.info(&quot;lostBookieRecoveryDelay period has been changed so canceling the pending AuditTask&quot;);</span>
+<span class="nc" id="L616">                        auditTask.cancel(false);</span>
+<span class="nc" id="L617">                        numDelayedBookieAuditsCancelled.inc();</span>
+                    }
+
+                    // if lostBookieRecoveryDelay is set to its previous value then consider it as
+                    // signal to trigger the Audit immediately.
+<span class="nc bnc" id="L622" title="All 2 branches missed.">                    if ((lostBookieRecoveryDelay == 0)</span>
+<span class="nc bnc" id="L623" title="All 2 branches missed.">                            || (lostBookieRecoveryDelay == lostBookieRecoveryDelayBeforeChange)) {</span>
+<span class="nc" id="L624">                        LOG.info(</span>
+                                &quot;lostBookieRecoveryDelay has been set to 0 or reset to its previous value, &quot;
+                                + &quot;so starting AuditTask. Current lostBookieRecoveryDelay: {}, &quot;
+                                + &quot;previous lostBookieRecoveryDelay: {}&quot;,
+<span class="nc" id="L628">                                lostBookieRecoveryDelay, lostBookieRecoveryDelayBeforeChange);</span>
+<span class="nc" id="L629">                        startAudit(false);</span>
+<span class="nc" id="L630">                        auditTask = null;</span>
+<span class="nc" id="L631">                        bookiesToBeAudited.clear();</span>
+<span class="nc bnc" id="L632" title="All 2 branches missed.">                    } else if (auditTask != null) {</span>
+<span class="nc" id="L633">                        LOG.info(&quot;lostBookieRecoveryDelay has been set to {}, so rescheduling AuditTask accordingly&quot;,</span>
+<span class="nc" id="L634">                                lostBookieRecoveryDelay);</span>
+<span class="nc" id="L635">                        auditTask = executor.schedule(safeRun(new Runnable() {</span>
+                            @Override
+                            public void run() {
+<span class="nc" id="L638">                                startAudit(false);</span>
+<span class="nc" id="L639">                                auditTask = null;</span>
+<span class="nc" id="L640">                                bookiesToBeAudited.clear();</span>
+<span class="nc" id="L641">                            }</span>
+                        }), lostBookieRecoveryDelay, TimeUnit.SECONDS);
+<span class="nc" id="L643">                        numBookieAuditsDelayed.inc();</span>
+                    }
+<span class="nc" id="L645">                } catch (InterruptedException ie) {</span>
+<span class="nc" id="L646">                    Thread.currentThread().interrupt();</span>
+<span class="nc" id="L647">                    LOG.error(&quot;Interrupted while for LedgersReplication to be enabled &quot;, ie);</span>
+<span class="nc" id="L648">                } catch (UnavailableException ue) {</span>
+<span class="nc" id="L649">                    LOG.error(&quot;Exception while reading from ZK&quot;, ue);</span>
+                } finally {
+<span class="nc bnc" id="L651" title="All 2 branches missed.">                    if (lostBookieRecoveryDelay != -1) {</span>
+<span class="nc" id="L652">                        lostBookieRecoveryDelayBeforeChange = lostBookieRecoveryDelay;</span>
+                    }
+                }
+<span class="nc" id="L655">            }</span>
+        }));
+    }
+
+    public void start() {
+<span class="nc" id="L660">        LOG.info(&quot;I'm starting as Auditor Bookie. ID: {}&quot;, bookieIdentifier);</span>
+        // on startup watching available bookie and based on the
+        // available bookies determining the bookie failures.
+<span class="nc" id="L663">        synchronized (this) {</span>
+<span class="nc bnc" id="L664" title="All 2 branches missed.">            if (executor.isShutdown()) {</span>
+<span class="nc" id="L665">                return;</span>
+            }
+
+            try {
+<span class="nc" id="L669">                watchBookieChanges();</span>
+<span class="nc" id="L670">                knownBookies = getAvailableBookies();</span>
+<span class="nc" id="L671">            } catch (BKException bke) {</span>
+<span class="nc" id="L672">                LOG.error(&quot;Couldn't get bookie list, so exiting&quot;, bke);</span>
+<span class="nc" id="L673">                submitShutdownTask();</span>
+<span class="nc" id="L674">            }</span>
+
+            try {
+<span class="nc" id="L677">                this.ledgerUnderreplicationManager</span>
+<span class="nc" id="L678">                        .notifyLostBookieRecoveryDelayChanged(new LostBookieRecoveryDelayChangedCb());</span>
+<span class="nc" id="L679">            } catch (UnavailableException ue) {</span>
+<span class="nc" id="L680">                LOG.error(&quot;Exception while registering for LostBookieRecoveryDelay change notification, so exiting&quot;,</span>
+                        ue);
+<span class="nc" id="L682">                submitShutdownTask();</span>
+<span class="nc" id="L683">            }</span>
+
+<span class="nc" id="L685">            scheduleBookieCheckTask();</span>
+<span class="nc" id="L686">            scheduleCheckAllLedgersTask();</span>
+<span class="nc" id="L687">            schedulePlacementPolicyCheckTask();</span>
+<span class="nc" id="L688">            scheduleReplicasCheckTask();</span>
+<span class="nc" id="L689">        }</span>
+<span class="nc" id="L690">    }</span>
+
+    private void scheduleBookieCheckTask() {
+<span class="nc" id="L693">        long bookieCheckInterval = conf.getAuditorPeriodicBookieCheckInterval();</span>
+<span class="nc bnc" id="L694" title="All 2 branches missed.">        if (bookieCheckInterval == 0) {</span>
+<span class="nc" id="L695">            LOG.info(&quot;Auditor periodic bookie checking disabled, running once check now anyhow&quot;);</span>
+<span class="nc" id="L696">            executor.submit(safeRun(bookieCheck));</span>
+        } else {
+<span class="nc" id="L698">            LOG.info(&quot;Auditor periodic bookie checking enabled&quot; + &quot; 'auditorPeriodicBookieCheckInterval' {} seconds&quot;,</span>
+<span class="nc" id="L699">                    bookieCheckInterval);</span>
+<span class="nc" id="L700">            executor.scheduleAtFixedRate(safeRun(bookieCheck), 0, bookieCheckInterval, TimeUnit.SECONDS);</span>
+        }
+<span class="nc" id="L702">    }</span>
+
+    private void scheduleCheckAllLedgersTask(){
+<span class="nc" id="L705">        long interval = conf.getAuditorPeriodicCheckInterval();</span>
+
+<span class="nc bnc" id="L707" title="All 2 branches missed.">        if (interval &gt; 0) {</span>
+<span class="nc" id="L708">            LOG.info(&quot;Auditor periodic ledger checking enabled&quot; + &quot; 'auditorPeriodicCheckInterval' {} seconds&quot;,</span>
+<span class="nc" id="L709">                    interval);</span>
+
+            long checkAllLedgersLastExecutedCTime;
+            long durationSinceLastExecutionInSecs;
+            long initialDelay;
+            try {
+<span class="nc" id="L715">                checkAllLedgersLastExecutedCTime = ledgerUnderreplicationManager.getCheckAllLedgersCTime();</span>
+<span class="nc" id="L716">            } catch (UnavailableException ue) {</span>
+<span class="nc" id="L717">                LOG.error(&quot;Got UnavailableException while trying to get checkAllLedgersCTime&quot;, ue);</span>
+<span class="nc" id="L718">                checkAllLedgersLastExecutedCTime = -1;</span>
+<span class="nc" id="L719">            }</span>
+<span class="nc bnc" id="L720" title="All 2 branches missed.">            if (checkAllLedgersLastExecutedCTime == -1) {</span>
+<span class="nc" id="L721">                durationSinceLastExecutionInSecs = -1;</span>
+<span class="nc" id="L722">                initialDelay = 0;</span>
+            } else {
+<span class="nc" id="L724">                durationSinceLastExecutionInSecs = (System.currentTimeMillis() - checkAllLedgersLastExecutedCTime)</span>
+                        / 1000;
+<span class="nc bnc" id="L726" title="All 2 branches missed.">                if (durationSinceLastExecutionInSecs &lt; 0) {</span>
+                    // this can happen if there is no strict time ordering
+<span class="nc" id="L728">                    durationSinceLastExecutionInSecs = 0;</span>
+                }
+<span class="nc bnc" id="L730" title="All 2 branches missed.">                initialDelay = durationSinceLastExecutionInSecs &gt; interval ? 0</span>
+                        : (interval - durationSinceLastExecutionInSecs);
+            }
+<span class="nc" id="L733">            LOG.info(</span>
+                    &quot;checkAllLedgers scheduling info.  checkAllLedgersLastExecutedCTime: {} &quot;
+                            + &quot;durationSinceLastExecutionInSecs: {} initialDelay: {} interval: {}&quot;,
+<span class="nc" id="L736">                    checkAllLedgersLastExecutedCTime, durationSinceLastExecutionInSecs, initialDelay, interval);</span>
+
+<span class="nc" id="L738">            executor.scheduleAtFixedRate(safeRun(new Runnable() {</span>
+                @Override
+                public void run() {
+                    try {
+<span class="nc bnc" id="L742" title="All 2 branches missed.">                        if (!ledgerUnderreplicationManager.isLedgerReplicationEnabled()) {</span>
+<span class="nc" id="L743">                            LOG.info(&quot;Ledger replication disabled, skipping checkAllLedgers&quot;);</span>
+<span class="nc" id="L744">                            return;</span>
+                        }
+
+<span class="nc" id="L747">                        Stopwatch stopwatch = Stopwatch.createStarted();</span>
+<span class="nc" id="L748">                        LOG.info(&quot;Starting checkAllLedgers&quot;);</span>
+<span class="nc" id="L749">                        checkAllLedgers();</span>
+<span class="nc" id="L750">                        long checkAllLedgersDuration = stopwatch.stop().elapsed(TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L751">                        LOG.info(&quot;Completed checkAllLedgers in {} milliSeconds&quot;, checkAllLedgersDuration);</span>
+<span class="nc" id="L752">                        checkAllLedgersTime.registerSuccessfulEvent(checkAllLedgersDuration, TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L753">                    } catch (KeeperException ke) {</span>
+<span class="nc" id="L754">                        LOG.error(&quot;Exception while running periodic check&quot;, ke);</span>
+<span class="nc" id="L755">                    } catch (InterruptedException ie) {</span>
+<span class="nc" id="L756">                        Thread.currentThread().interrupt();</span>
+<span class="nc" id="L757">                        LOG.error(&quot;Interrupted while running periodic check&quot;, ie);</span>
+<span class="nc" id="L758">                    } catch (BKException bke) {</span>
+<span class="nc" id="L759">                        LOG.error(&quot;Exception running periodic check&quot;, bke);</span>
+<span class="nc" id="L760">                    } catch (IOException ioe) {</span>
+<span class="nc" id="L761">                        LOG.error(&quot;I/O exception running periodic check&quot;, ioe);</span>
+<span class="nc" id="L762">                    } catch (ReplicationException.UnavailableException ue) {</span>
+<span class="nc" id="L763">                        LOG.error(&quot;Underreplication manager unavailable running periodic check&quot;, ue);</span>
+<span class="nc" id="L764">                    }</span>
+<span class="nc" id="L765">                }</span>
+                }), initialDelay, interval, TimeUnit.SECONDS);
+<span class="nc" id="L767">        } else {</span>
+<span class="nc" id="L768">            LOG.info(&quot;Periodic checking disabled&quot;);</span>
+        }
+<span class="nc" id="L770">    }</span>
+
+    private void schedulePlacementPolicyCheckTask(){
+<span class="nc" id="L773">        long interval = conf.getAuditorPeriodicPlacementPolicyCheckInterval();</span>
+
+<span class="nc bnc" id="L775" title="All 2 branches missed.">        if (interval &gt; 0) {</span>
+<span class="nc" id="L776">            LOG.info(&quot;Auditor periodic placement policy check enabled&quot;</span>
+<span class="nc" id="L777">                    + &quot; 'auditorPeriodicPlacementPolicyCheckInterval' {} seconds&quot;, interval);</span>
+
+            long placementPolicyCheckLastExecutedCTime;
+            long durationSinceLastExecutionInSecs;
+            long initialDelay;
+            try {
+<span class="nc" id="L783">                placementPolicyCheckLastExecutedCTime = ledgerUnderreplicationManager.getPlacementPolicyCheckCTime();</span>
+<span class="nc" id="L784">            } catch (UnavailableException ue) {</span>
+<span class="nc" id="L785">                LOG.error(&quot;Got UnavailableException while trying to get placementPolicyCheckCTime&quot;, ue);</span>
+<span class="nc" id="L786">                placementPolicyCheckLastExecutedCTime = -1;</span>
+<span class="nc" id="L787">            }</span>
+<span class="nc bnc" id="L788" title="All 2 branches missed.">            if (placementPolicyCheckLastExecutedCTime == -1) {</span>
+<span class="nc" id="L789">                durationSinceLastExecutionInSecs = -1;</span>
+<span class="nc" id="L790">                initialDelay = 0;</span>
+            } else {
+<span class="nc" id="L792">                durationSinceLastExecutionInSecs = (System.currentTimeMillis() - placementPolicyCheckLastExecutedCTime)</span>
+                        / 1000;
+<span class="nc bnc" id="L794" title="All 2 branches missed.">                if (durationSinceLastExecutionInSecs &lt; 0) {</span>
+                    // this can happen if there is no strict time ordering
+<span class="nc" id="L796">                    durationSinceLastExecutionInSecs = 0;</span>
+                }
+<span class="nc bnc" id="L798" title="All 2 branches missed.">                initialDelay = durationSinceLastExecutionInSecs &gt; interval ? 0</span>
+                        : (interval - durationSinceLastExecutionInSecs);
+            }
+<span class="nc" id="L801">            LOG.info(</span>
+                    &quot;placementPolicyCheck scheduling info.  placementPolicyCheckLastExecutedCTime: {} &quot;
+                            + &quot;durationSinceLastExecutionInSecs: {} initialDelay: {} interval: {}&quot;,
+<span class="nc" id="L804">                    placementPolicyCheckLastExecutedCTime, durationSinceLastExecutionInSecs, initialDelay, interval);</span>
+
+<span class="nc" id="L806">            executor.scheduleAtFixedRate(safeRun(new Runnable() {</span>
+                @Override
+                public void run() {
+                    try {
+<span class="nc" id="L810">                        Stopwatch stopwatch = Stopwatch.createStarted();</span>
+<span class="nc" id="L811">                        LOG.info(&quot;Starting PlacementPolicyCheck&quot;);</span>
+<span class="nc" id="L812">                        placementPolicyCheck();</span>
+<span class="nc" id="L813">                        long placementPolicyCheckDuration = stopwatch.stop().elapsed(TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L814">                        int numOfLedgersFoundNotAdheringInPlacementPolicyCheckValue =</span>
+<span class="nc" id="L815">                                numOfLedgersFoundNotAdheringInPlacementPolicyCheck.get();</span>
+<span class="nc" id="L816">                        int numOfLedgersFoundSoftlyAdheringInPlacementPolicyCheckValue =</span>
+<span class="nc" id="L817">                                numOfLedgersFoundSoftlyAdheringInPlacementPolicyCheck.get();</span>
+<span class="nc" id="L818">                        int numOfClosedLedgersAuditedInPlacementPolicyCheckValue =</span>
+<span class="nc" id="L819">                                numOfClosedLedgersAuditedInPlacementPolicyCheck.get();</span>
+<span class="nc" id="L820">                        int numOfURLedgersElapsedRecoveryGracePeriodValue =</span>
+<span class="nc" id="L821">                                numOfURLedgersElapsedRecoveryGracePeriod.get();</span>
+<span class="nc" id="L822">                        LOG.info(</span>
+                                &quot;Completed placementPolicyCheck in {} milliSeconds.&quot;
+                                        + &quot; numOfClosedLedgersAuditedInPlacementPolicyCheck {}&quot;
+                                        + &quot; numOfLedgersNotAdheringToPlacementPolicy {}&quot;
+                                        + &quot; numOfLedgersSoftlyAdheringToPlacementPolicy {}&quot;
+                                        + &quot; numOfURLedgersElapsedRecoveryGracePeriod {}&quot;,
+<span class="nc" id="L828">                                placementPolicyCheckDuration, numOfClosedLedgersAuditedInPlacementPolicyCheckValue,</span>
+<span class="nc" id="L829">                                numOfLedgersFoundNotAdheringInPlacementPolicyCheckValue,</span>
+<span class="nc" id="L830">                                numOfLedgersFoundSoftlyAdheringInPlacementPolicyCheckValue,</span>
+<span class="nc" id="L831">                                numOfURLedgersElapsedRecoveryGracePeriodValue);</span>
+<span class="nc" id="L832">                        ledgersNotAdheringToPlacementPolicyGuageValue</span>
+<span class="nc" id="L833">                                .set(numOfLedgersFoundNotAdheringInPlacementPolicyCheckValue);</span>
+<span class="nc" id="L834">                        ledgersSoftlyAdheringToPlacementPolicyGuageValue</span>
+<span class="nc" id="L835">                                .set(numOfLedgersFoundSoftlyAdheringInPlacementPolicyCheckValue);</span>
+<span class="nc" id="L836">                        numOfURLedgersElapsedRecoveryGracePeriodGuageValue</span>
+<span class="nc" id="L837">                                .set(numOfURLedgersElapsedRecoveryGracePeriodValue);</span>
+<span class="nc" id="L838">                        placementPolicyCheckTime.registerSuccessfulEvent(placementPolicyCheckDuration,</span>
+                                TimeUnit.MILLISECONDS);
+<span class="nc" id="L840">                    } catch (BKAuditException e) {</span>
+<span class="nc" id="L841">                        int numOfLedgersFoundInPlacementPolicyCheckValue =</span>
+<span class="nc" id="L842">                                numOfLedgersFoundNotAdheringInPlacementPolicyCheck.get();</span>
+<span class="nc bnc" id="L843" title="All 2 branches missed.">                        if (numOfLedgersFoundInPlacementPolicyCheckValue &gt; 0) {</span>
+                            /*
+                             * Though there is BKAuditException while doing
+                             * placementPolicyCheck, it found few ledgers not
+                             * adhering to placement policy. So reporting it.
+                             */
+<span class="nc" id="L849">                            ledgersNotAdheringToPlacementPolicyGuageValue</span>
+<span class="nc" id="L850">                                    .set(numOfLedgersFoundInPlacementPolicyCheckValue);</span>
+                        }
+
+<span class="nc" id="L853">                        int numOfLedgersFoundSoftlyAdheringInPlacementPolicyCheckValue =</span>
+<span class="nc" id="L854">                                numOfLedgersFoundSoftlyAdheringInPlacementPolicyCheck.get();</span>
+<span class="nc bnc" id="L855" title="All 2 branches missed.">                        if (numOfLedgersFoundSoftlyAdheringInPlacementPolicyCheckValue &gt; 0) {</span>
+                            /*
+                             * Though there is BKAuditException while doing
+                             * placementPolicyCheck, it found few ledgers softly
+                             * adhering to placement policy. So reporting it.
+                             */
+<span class="nc" id="L861">                            ledgersSoftlyAdheringToPlacementPolicyGuageValue</span>
+<span class="nc" id="L862">                                    .set(numOfLedgersFoundSoftlyAdheringInPlacementPolicyCheckValue);</span>
+                        }
+
+<span class="nc" id="L865">                        int numOfURLedgersElapsedRecoveryGracePeriodValue =</span>
+<span class="nc" id="L866">                                numOfURLedgersElapsedRecoveryGracePeriod.get();</span>
+<span class="nc bnc" id="L867" title="All 2 branches missed.">                        if (numOfURLedgersElapsedRecoveryGracePeriodValue &gt; 0) {</span>
+                            /*
+                             * Though there is BKAuditException while doing
+                             * placementPolicyCheck, it found few urledgers have
+                             * elapsed recovery graceperiod. So reporting it.
+                             */
+<span class="nc" id="L873">                            numOfURLedgersElapsedRecoveryGracePeriodGuageValue</span>
+<span class="nc" id="L874">                                    .set(numOfURLedgersElapsedRecoveryGracePeriodValue);</span>
+                        }
+
+<span class="nc" id="L877">                        LOG.error(</span>
+                                &quot;BKAuditException running periodic placementPolicy check.&quot;
+                                        + &quot;numOfLedgersNotAdheringToPlacementPolicy {}, &quot;
+                                        + &quot;numOfLedgersSoftlyAdheringToPlacementPolicy {},&quot;
+                                        + &quot;numOfURLedgersElapsedRecoveryGracePeriod {}&quot;,
+<span class="nc" id="L882">                                numOfLedgersFoundInPlacementPolicyCheckValue,</span>
+<span class="nc" id="L883">                                numOfLedgersFoundSoftlyAdheringInPlacementPolicyCheckValue,</span>
+<span class="nc" id="L884">                                numOfURLedgersElapsedRecoveryGracePeriodValue, e);</span>
+<span class="nc" id="L885">                    }</span>
+<span class="nc" id="L886">                }</span>
+            }), initialDelay, interval, TimeUnit.SECONDS);
+<span class="nc" id="L888">        } else {</span>
+<span class="nc" id="L889">            LOG.info(&quot;Periodic placementPolicy check disabled&quot;);</span>
+        }
+<span class="nc" id="L891">    }</span>
+
+    private void scheduleReplicasCheckTask() {
+<span class="nc" id="L894">        long interval = conf.getAuditorPeriodicReplicasCheckInterval();</span>
+
+<span class="nc bnc" id="L896" title="All 2 branches missed.">        if (interval &lt;= 0) {</span>
+<span class="nc" id="L897">            LOG.info(&quot;Periodic replicas check disabled&quot;);</span>
+<span class="nc" id="L898">            return;</span>
+        }
+
+<span class="nc" id="L901">        LOG.info(&quot;Auditor periodic replicas check enabled&quot; + &quot; 'auditorReplicasCheckInterval' {} seconds&quot;, interval);</span>
+        long replicasCheckLastExecutedCTime;
+        long durationSinceLastExecutionInSecs;
+        long initialDelay;
+        try {
+<span class="nc" id="L906">            replicasCheckLastExecutedCTime = ledgerUnderreplicationManager.getReplicasCheckCTime();</span>
+<span class="nc" id="L907">        } catch (UnavailableException ue) {</span>
+<span class="nc" id="L908">            LOG.error(&quot;Got UnavailableException while trying to get replicasCheckCTime&quot;, ue);</span>
+<span class="nc" id="L909">            replicasCheckLastExecutedCTime = -1;</span>
+<span class="nc" id="L910">        }</span>
+<span class="nc bnc" id="L911" title="All 2 branches missed.">        if (replicasCheckLastExecutedCTime == -1) {</span>
+<span class="nc" id="L912">            durationSinceLastExecutionInSecs = -1;</span>
+<span class="nc" id="L913">            initialDelay = 0;</span>
+        } else {
+<span class="nc" id="L915">            durationSinceLastExecutionInSecs = (System.currentTimeMillis() - replicasCheckLastExecutedCTime) / 1000;</span>
+<span class="nc bnc" id="L916" title="All 2 branches missed.">            if (durationSinceLastExecutionInSecs &lt; 0) {</span>
+                // this can happen if there is no strict time ordering
+<span class="nc" id="L918">                durationSinceLastExecutionInSecs = 0;</span>
+            }
+<span class="nc bnc" id="L920" title="All 2 branches missed.">            initialDelay = durationSinceLastExecutionInSecs &gt; interval ? 0</span>
+                    : (interval - durationSinceLastExecutionInSecs);
+        }
+<span class="nc" id="L923">        LOG.info(</span>
+                &quot;replicasCheck scheduling info. replicasCheckLastExecutedCTime: {} &quot;
+                        + &quot;durationSinceLastExecutionInSecs: {} initialDelay: {} interval: {}&quot;,
+<span class="nc" id="L926">                replicasCheckLastExecutedCTime, durationSinceLastExecutionInSecs, initialDelay, interval);</span>
+
+<span class="nc" id="L928">        executor.scheduleAtFixedRate(safeRun(new Runnable() {</span>
+            @Override
+            public void run() {
+                try {
+<span class="nc" id="L932">                    Stopwatch stopwatch = Stopwatch.createStarted();</span>
+<span class="nc" id="L933">                    LOG.info(&quot;Starting ReplicasCheck&quot;);</span>
+<span class="nc" id="L934">                    replicasCheck();</span>
+<span class="nc" id="L935">                    long replicasCheckDuration = stopwatch.stop().elapsed(TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L936">                    int numLedgersFoundHavingNoReplicaOfAnEntryValue = numLedgersFoundHavingNoReplicaOfAnEntry.get();</span>
+<span class="nc" id="L937">                    int numLedgersFoundHavingLessThanAQReplicasOfAnEntryValue =</span>
+<span class="nc" id="L938">                            numLedgersFoundHavingLessThanAQReplicasOfAnEntry.get();</span>
+<span class="nc" id="L939">                    int numLedgersFoundHavingLessThanWQReplicasOfAnEntryValue =</span>
+<span class="nc" id="L940">                            numLedgersFoundHavingLessThanWQReplicasOfAnEntry.get();</span>
+<span class="nc" id="L941">                    LOG.info(</span>
+                            &quot;Completed ReplicasCheck in {} milliSeconds numLedgersFoundHavingNoReplicaOfAnEntry {}&quot;
+                                    + &quot; numLedgersFoundHavingLessThanAQReplicasOfAnEntry {}&quot;
+                                    + &quot; numLedgersFoundHavingLessThanWQReplicasOfAnEntry {}.&quot;,
+<span class="nc" id="L945">                            replicasCheckDuration, numLedgersFoundHavingNoReplicaOfAnEntryValue,</span>
+<span class="nc" id="L946">                            numLedgersFoundHavingLessThanAQReplicasOfAnEntryValue,</span>
+<span class="nc" id="L947">                            numLedgersFoundHavingLessThanWQReplicasOfAnEntryValue);</span>
+<span class="nc" id="L948">                    numLedgersHavingNoReplicaOfAnEntryGuageValue.set(numLedgersFoundHavingNoReplicaOfAnEntryValue);</span>
+<span class="nc" id="L949">                    numLedgersHavingLessThanAQReplicasOfAnEntryGuageValue</span>
+<span class="nc" id="L950">                            .set(numLedgersFoundHavingLessThanAQReplicasOfAnEntryValue);</span>
+<span class="nc" id="L951">                    numLedgersHavingLessThanWQReplicasOfAnEntryGuageValue</span>
+<span class="nc" id="L952">                            .set(numLedgersFoundHavingLessThanWQReplicasOfAnEntryValue);</span>
+<span class="nc" id="L953">                    replicasCheckTime.registerSuccessfulEvent(replicasCheckDuration, TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L954">                } catch (BKAuditException e) {</span>
+<span class="nc" id="L955">                    LOG.error(&quot;BKAuditException running periodic replicas check.&quot;, e);</span>
+<span class="nc" id="L956">                    int numLedgersFoundHavingNoReplicaOfAnEntryValue = numLedgersFoundHavingNoReplicaOfAnEntry.get();</span>
+<span class="nc bnc" id="L957" title="All 2 branches missed.">                    if (numLedgersFoundHavingNoReplicaOfAnEntryValue &gt; 0) {</span>
+                        /*
+                         * Though there is BKAuditException while doing
+                         * replicasCheck, it found few ledgers having no replica
+                         * of an entry. So reporting it.
+                         */
+<span class="nc" id="L963">                        numLedgersHavingNoReplicaOfAnEntryGuageValue.set(numLedgersFoundHavingNoReplicaOfAnEntryValue);</span>
+                    }
+<span class="nc" id="L965">                    int numLedgersFoundHavingLessThanAQReplicasOfAnEntryValue =</span>
+<span class="nc" id="L966">                            numLedgersFoundHavingLessThanAQReplicasOfAnEntry.get();</span>
+<span class="nc bnc" id="L967" title="All 2 branches missed.">                    if (numLedgersFoundHavingLessThanAQReplicasOfAnEntryValue &gt; 0) {</span>
+                        /*
+                         * Though there is BKAuditException while doing
+                         * replicasCheck, it found few ledgers having an entry
+                         * less than AQ num of Replicas. So reporting it.
+                         */
+<span class="nc" id="L973">                        numLedgersHavingLessThanAQReplicasOfAnEntryGuageValue</span>
+<span class="nc" id="L974">                                .set(numLedgersFoundHavingLessThanAQReplicasOfAnEntryValue);</span>
+                    }
+<span class="nc" id="L976">                    int numLedgersFoundHavingLessThanWQReplicasOfAnEntryValue =</span>
+<span class="nc" id="L977">                            numLedgersFoundHavingLessThanWQReplicasOfAnEntry.get();</span>
+<span class="nc bnc" id="L978" title="All 2 branches missed.">                    if (numLedgersFoundHavingLessThanWQReplicasOfAnEntryValue &gt; 0) {</span>
+                        /*
+                         * Though there is BKAuditException while doing
+                         * replicasCheck, it found few ledgers having an entry
+                         * less than WQ num of Replicas. So reporting it.
+                         */
+<span class="nc" id="L984">                        numLedgersHavingLessThanWQReplicasOfAnEntryGuageValue</span>
+<span class="nc" id="L985">                                .set(numLedgersFoundHavingLessThanWQReplicasOfAnEntryValue);</span>
+                    }
+<span class="nc" id="L987">                }</span>
+<span class="nc" id="L988">            }</span>
+        }), initialDelay, interval, TimeUnit.SECONDS);
+<span class="nc" id="L990">    }</span>
+
+<span class="nc" id="L992">    private class LostBookieRecoveryDelayChangedCb implements GenericCallback&lt;Void&gt; {</span>
+        @Override
+        public void operationComplete(int rc, Void result) {
+            try {
+<span class="nc" id="L996">                Auditor.this.ledgerUnderreplicationManager</span>
+<span class="nc" id="L997">                        .notifyLostBookieRecoveryDelayChanged(LostBookieRecoveryDelayChangedCb.this);</span>
+<span class="nc" id="L998">            } catch (UnavailableException ae) {</span>
+<span class="nc" id="L999">                LOG.error(&quot;Exception while registering for a LostBookieRecoveryDelay notification&quot;, ae);</span>
+<span class="nc" id="L1000">            }</span>
+<span class="nc" id="L1001">            Auditor.this.submitLostBookieRecoveryDelayChangedEvent();</span>
+<span class="nc" id="L1002">        }</span>
+    }
+
+    private void waitIfLedgerReplicationDisabled() throws UnavailableException,
+            InterruptedException {
+<span class="nc" id="L1007">        ReplicationEnableCb cb = new ReplicationEnableCb();</span>
+<span class="nc bnc" id="L1008" title="All 2 branches missed.">        if (!ledgerUnderreplicationManager.isLedgerReplicationEnabled()) {</span>
+<span class="nc" id="L1009">            LOG.info(&quot;LedgerReplication is disabled externally through Zookeeper, &quot;</span>
+                    + &quot;since DISABLE_NODE ZNode is created, so waiting untill it is enabled&quot;);
+<span class="nc" id="L1011">            ledgerUnderreplicationManager.notifyLedgerReplicationEnabled(cb);</span>
+<span class="nc" id="L1012">            cb.await();</span>
+        }
+<span class="nc" id="L1014">    }</span>
+
+    private List&lt;String&gt; getAvailableBookies() throws BKException {
+        // Get the available bookies
+<span class="nc" id="L1018">        Collection&lt;BookieId&gt; availableBkAddresses = admin.getAvailableBookies();</span>
+<span class="nc" id="L1019">        Collection&lt;BookieId&gt; readOnlyBkAddresses = admin.getReadOnlyBookies();</span>
+<span class="nc" id="L1020">        availableBkAddresses.addAll(readOnlyBkAddresses);</span>
+
+<span class="nc" id="L1022">        List&lt;String&gt; availableBookies = new ArrayList&lt;String&gt;();</span>
+<span class="nc bnc" id="L1023" title="All 2 branches missed.">        for (BookieId addr : availableBkAddresses) {</span>
+<span class="nc" id="L1024">            availableBookies.add(addr.toString());</span>
+<span class="nc" id="L1025">        }</span>
+<span class="nc" id="L1026">        return availableBookies;</span>
+    }
+
+    private void watchBookieChanges() throws BKException {
+<span class="nc" id="L1030">        admin.watchWritableBookiesChanged(bookies -&gt; submitAuditTask());</span>
+<span class="nc" id="L1031">        admin.watchReadOnlyBookiesChanged(bookies -&gt; submitAuditTask());</span>
+<span class="nc" id="L1032">    }</span>
+
+    /**
+     * Start running the actual audit task.
+     *
+     * @param shutDownTask
+     *      A boolean that indicates whether or not to schedule shutdown task on any failure
+     */
+    private void startAudit(boolean shutDownTask) {
+        try {
+<span class="nc" id="L1042">            auditBookies();</span>
+<span class="nc" id="L1043">            shutDownTask = false;</span>
+<span class="nc" id="L1044">        } catch (BKException bke) {</span>
+<span class="nc" id="L1045">            LOG.error(&quot;Exception getting bookie list&quot;, bke);</span>
+<span class="nc" id="L1046">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L1047">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1048">            LOG.error(&quot;Interrupted while watching available bookies &quot;, ie);</span>
+<span class="nc" id="L1049">        } catch (BKAuditException bke) {</span>
+<span class="nc" id="L1050">            LOG.error(&quot;Exception while watching available bookies&quot;, bke);</span>
+<span class="nc" id="L1051">        }</span>
+<span class="nc bnc" id="L1052" title="All 2 branches missed.">        if (shutDownTask) {</span>
+<span class="nc" id="L1053">            submitShutdownTask();</span>
+        }
+<span class="nc" id="L1055">    }</span>
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private void auditBookies()
+            throws BKAuditException, InterruptedException, BKException {
+        try {
+<span class="nc" id="L1061">            waitIfLedgerReplicationDisabled();</span>
+<span class="nc" id="L1062">        } catch (UnavailableException ue) {</span>
+<span class="nc" id="L1063">            LOG.error(&quot;Underreplication unavailable, skipping audit.&quot;</span>
+                      + &quot;Will retry after a period&quot;);
+<span class="nc" id="L1065">            return;</span>
+<span class="nc" id="L1066">        }</span>
+<span class="nc" id="L1067">        LOG.info(&quot;Starting auditBookies&quot;);</span>
+<span class="nc" id="L1068">        Stopwatch stopwatch = Stopwatch.createStarted();</span>
+        // put exit cases here
+<span class="nc" id="L1070">        Map&lt;String, Set&lt;Long&gt;&gt; ledgerDetails = generateBookie2LedgersIndex();</span>
+        try {
+<span class="nc bnc" id="L1072" title="All 2 branches missed.">            if (!ledgerUnderreplicationManager.isLedgerReplicationEnabled()) {</span>
+                // has been disabled while we were generating the index
+                // discard this run, and schedule a new one
+<span class="nc" id="L1075">                executor.submit(safeRun(bookieCheck));</span>
+<span class="nc" id="L1076">                return;</span>
+            }
+<span class="nc" id="L1078">        } catch (UnavailableException ue) {</span>
+<span class="nc" id="L1079">            LOG.error(&quot;Underreplication unavailable, skipping audit.&quot;</span>
+                      + &quot;Will retry after a period&quot;);
+<span class="nc" id="L1081">            return;</span>
+<span class="nc" id="L1082">        }</span>
+
+<span class="nc" id="L1084">        List&lt;String&gt; availableBookies = getAvailableBookies();</span>
+        // find lost bookies
+<span class="nc" id="L1086">        Set&lt;String&gt; knownBookies = ledgerDetails.keySet();</span>
+<span class="nc" id="L1087">        Collection&lt;String&gt; lostBookies = CollectionUtils.subtract(knownBookies,</span>
+                availableBookies);
+
+<span class="nc" id="L1090">        bookieToLedgersMapCreationTime.registerSuccessfulEvent(stopwatch.elapsed(TimeUnit.MILLISECONDS),</span>
+                TimeUnit.MILLISECONDS);
+<span class="nc bnc" id="L1092" title="All 2 branches missed.">        if (lostBookies.size() &gt; 0) {</span>
+            try {
+<span class="nc" id="L1094">                FutureUtils.result(</span>
+<span class="nc" id="L1095">                    handleLostBookiesAsync(lostBookies, ledgerDetails), ReplicationException.EXCEPTION_HANDLER);</span>
+<span class="nc" id="L1096">            } catch (ReplicationException e) {</span>
+<span class="nc" id="L1097">                throw new BKAuditException(e.getMessage(), e.getCause());</span>
+<span class="nc" id="L1098">            }</span>
+<span class="nc" id="L1099">            uRLPublishTimeForLostBookies.registerSuccessfulEvent(stopwatch.elapsed(TimeUnit.MILLISECONDS),</span>
+                    TimeUnit.MILLISECONDS);
+        }
+<span class="nc" id="L1102">        LOG.info(&quot;Completed auditBookies&quot;);</span>
+<span class="nc" id="L1103">        auditBookiesTime.registerSuccessfulEvent(stopwatch.stop().elapsed(TimeUnit.MILLISECONDS),</span>
+                TimeUnit.MILLISECONDS);
+<span class="nc" id="L1105">    }</span>
+
+    private Map&lt;String, Set&lt;Long&gt;&gt; generateBookie2LedgersIndex()
+            throws BKAuditException {
+<span class="nc" id="L1109">        return bookieLedgerIndexer.getBookieToLedgerIndex();</span>
+    }
+
+    private CompletableFuture&lt;?&gt; handleLostBookiesAsync(Collection&lt;String&gt; lostBookies,
+                                                        Map&lt;String, Set&lt;Long&gt;&gt; ledgerDetails) {
+<span class="nc" id="L1114">        LOG.info(&quot;Following are the failed bookies: {},&quot;</span>
+                + &quot; and searching its ledgers for re-replication&quot;, lostBookies);
+
+<span class="nc" id="L1117">        return FutureUtils.processList(</span>
+<span class="nc" id="L1118">            Lists.newArrayList(lostBookies),</span>
+<span class="nc" id="L1119">            bookieIP -&gt; publishSuspectedLedgersAsync(</span>
+<span class="nc" id="L1120">                Lists.newArrayList(bookieIP), ledgerDetails.get(bookieIP)),</span>
+            null
+        );
+    }
+
+    private CompletableFuture&lt;?&gt; publishSuspectedLedgersAsync(Collection&lt;String&gt; missingBookies, Set&lt;Long&gt; ledgers) {
+<span class="nc bnc" id="L1126" title="All 4 branches missed.">        if (null == ledgers || ledgers.size() == 0) {</span>
+            // there is no ledgers available for this bookie and just
+            // ignoring the bookie failures
+<span class="nc" id="L1129">            LOG.info(&quot;There is no ledgers for the failed bookie: {}&quot;, missingBookies);</span>
+<span class="nc" id="L1130">            return FutureUtils.Void();</span>
+        }
+<span class="nc" id="L1132">        LOG.info(&quot;Following ledgers: {} of bookie: {} are identified as underreplicated&quot;, ledgers, missingBookies);</span>
+<span class="nc" id="L1133">        numUnderReplicatedLedger.registerSuccessfulValue(ledgers.size());</span>
+<span class="nc" id="L1134">        return FutureUtils.processList(</span>
+<span class="nc" id="L1135">            Lists.newArrayList(ledgers),</span>
+<span class="nc" id="L1136">            ledgerId -&gt; ledgerUnderreplicationManager.markLedgerUnderreplicatedAsync(ledgerId, missingBookies),</span>
+            null
+        );
+    }
+
+    /**
+     * Process the result returned from checking a ledger.
+     */
+    private class ProcessLostFragmentsCb implements GenericCallback&lt;Set&lt;LedgerFragment&gt;&gt; {
+        final LedgerHandle lh;
+        final AsyncCallback.VoidCallback callback;
+
+<span class="nc" id="L1148">        ProcessLostFragmentsCb(LedgerHandle lh, AsyncCallback.VoidCallback callback) {</span>
+<span class="nc" id="L1149">            this.lh = lh;</span>
+<span class="nc" id="L1150">            this.callback = callback;</span>
+<span class="nc" id="L1151">        }</span>
+
+        @Override
+        public void operationComplete(int rc, Set&lt;LedgerFragment&gt; fragments) {
+<span class="nc bnc" id="L1155" title="All 2 branches missed.">            if (rc == BKException.Code.OK) {</span>
+<span class="nc" id="L1156">                Set&lt;BookieId&gt; bookies = Sets.newHashSet();</span>
+<span class="nc bnc" id="L1157" title="All 2 branches missed.">                for (LedgerFragment f : fragments) {</span>
+<span class="nc" id="L1158">                    bookies.addAll(f.getAddresses());</span>
+<span class="nc" id="L1159">                }</span>
+<span class="nc bnc" id="L1160" title="All 2 branches missed.">                if (bookies.isEmpty()) {</span>
+                    // no missing fragments
+<span class="nc" id="L1162">                    callback.processResult(Code.OK, null, null);</span>
+<span class="nc" id="L1163">                    return;</span>
+                }
+<span class="nc" id="L1165">                publishSuspectedLedgersAsync(bookies.stream().map(BookieId::toString).collect(Collectors.toList()),</span>
+<span class="nc" id="L1166">                    Sets.newHashSet(lh.getId())</span>
+<span class="nc" id="L1167">                ).whenComplete((result, cause) -&gt; {</span>
+<span class="nc bnc" id="L1168" title="All 2 branches missed.">                    if (null != cause) {</span>
+<span class="nc" id="L1169">                        LOG.error(&quot;Auditor exception publishing suspected ledger {} with lost bookies {}&quot;,</span>
+<span class="nc" id="L1170">                            lh.getId(), bookies, cause);</span>
+<span class="nc" id="L1171">                        callback.processResult(Code.ReplicationException, null, null);</span>
+                    } else {
+<span class="nc" id="L1173">                        callback.processResult(Code.OK, null, null);</span>
+                    }
+<span class="nc" id="L1175">                });</span>
+<span class="nc" id="L1176">            } else {</span>
+<span class="nc" id="L1177">                callback.processResult(rc, null, null);</span>
+            }
+<span class="nc" id="L1179">            lh.closeAsync().whenComplete((result, cause) -&gt; {</span>
+<span class="nc bnc" id="L1180" title="All 2 branches missed.">                if (null != cause) {</span>
+<span class="nc" id="L1181">                    LOG.warn(&quot;Error closing ledger {} : {}&quot;, lh.getId(), cause.getMessage());</span>
+                }
+<span class="nc" id="L1183">            });</span>
+<span class="nc" id="L1184">        }</span>
+    }
+
+    /**
+     * List all the ledgers and check them individually. This should not
+     * be run very often.
+     */
+    void checkAllLedgers() throws BKException, IOException, InterruptedException, KeeperException {
+<span class="nc" id="L1192">        final BookKeeper localClient = createBookKeeperClient(conf);</span>
+<span class="nc" id="L1193">        final BookKeeperAdmin localAdmin = new BookKeeperAdmin(localClient, statsLogger);</span>
+
+        try {
+<span class="nc" id="L1196">            final LedgerChecker checker = new LedgerChecker(localClient);</span>
+
+<span class="nc" id="L1198">            final CompletableFuture&lt;Void&gt; processFuture = new CompletableFuture&lt;&gt;();</span>
+
+<span class="nc" id="L1200">            Processor&lt;Long&gt; checkLedgersProcessor = (ledgerId, callback) -&gt; {</span>
+                try {
+<span class="nc bnc" id="L1202" title="All 2 branches missed.">                    if (!ledgerUnderreplicationManager.isLedgerReplicationEnabled()) {</span>
+<span class="nc" id="L1203">                        LOG.info(&quot;Ledger rereplication has been disabled, aborting periodic check&quot;);</span>
+<span class="nc" id="L1204">                        FutureUtils.complete(processFuture, null);</span>
+<span class="nc" id="L1205">                        return;</span>
+                    }
+<span class="nc" id="L1207">                } catch (UnavailableException ue) {</span>
+<span class="nc" id="L1208">                    LOG.error(&quot;Underreplication manager unavailable running periodic check&quot;, ue);</span>
+<span class="nc" id="L1209">                    FutureUtils.complete(processFuture, null);</span>
+<span class="nc" id="L1210">                    return;</span>
+<span class="nc" id="L1211">                }</span>
+
+<span class="nc" id="L1213">                localAdmin.asyncOpenLedgerNoRecovery(ledgerId, (rc, lh, ctx) -&gt; {</span>
+<span class="nc bnc" id="L1214" title="All 2 branches missed.">                    if (Code.OK == rc) {</span>
+<span class="nc" id="L1215">                        checker.checkLedger(lh,</span>
+                                // the ledger handle will be closed after checkLedger is done.
+                                new ProcessLostFragmentsCb(lh, callback),
+<span class="nc" id="L1218">                                conf.getAuditorLedgerVerificationPercentage());</span>
+                        // we collect the following stats to get a measure of the
+                        // distribution of a single ledger within the bk cluster
+                        // the higher the number of fragments/bookies, the more distributed it is
+<span class="nc" id="L1222">                        numFragmentsPerLedger.registerSuccessfulValue(lh.getNumFragments());</span>
+<span class="nc" id="L1223">                        numBookiesPerLedger.registerSuccessfulValue(lh.getNumBookies());</span>
+<span class="nc" id="L1224">                        numLedgersChecked.inc();</span>
+<span class="nc bnc" id="L1225" title="All 2 branches missed.">                    } else if (Code.NoSuchLedgerExistsOnMetadataServerException == rc) {</span>
+<span class="nc bnc" id="L1226" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L1227">                            LOG.debug(&quot;Ledger {} was deleted before we could check it&quot;, ledgerId);</span>
+                        }
+<span class="nc" id="L1229">                        callback.processResult(Code.OK, null, null);</span>
+                    } else {
+<span class="nc" id="L1231">                        LOG.error(&quot;Couldn't open ledger {} to check : {}&quot;, ledgerId, BKException.getMessage(rc));</span>
+<span class="nc" id="L1232">                        callback.processResult(rc, null, null);</span>
+                    }
+<span class="nc" id="L1234">                }, null);</span>
+<span class="nc" id="L1235">            };</span>
+
+<span class="nc" id="L1237">            ledgerManager.asyncProcessLedgers(checkLedgersProcessor,</span>
+                (rc, path, ctx) -&gt; {
+<span class="nc bnc" id="L1239" title="All 2 branches missed.">                    if (Code.OK == rc) {</span>
+<span class="nc" id="L1240">                        FutureUtils.complete(processFuture, null);</span>
+                    } else {
+<span class="nc" id="L1242">                        FutureUtils.completeExceptionally(processFuture, BKException.create(rc));</span>
+                    }
+<span class="nc" id="L1244">                }, null, BKException.Code.OK, BKException.Code.ReadException);</span>
+<span class="nc" id="L1245">            FutureUtils.result(processFuture, BKException.HANDLER);</span>
+            try {
+<span class="nc" id="L1247">                ledgerUnderreplicationManager.setCheckAllLedgersCTime(System.currentTimeMillis());</span>
+<span class="nc" id="L1248">            } catch (UnavailableException ue) {</span>
+<span class="nc" id="L1249">                LOG.error(&quot;Got exception while trying to set checkAllLedgersCTime&quot;, ue);</span>
+<span class="nc" id="L1250">            }</span>
+        } finally {
+<span class="nc" id="L1252">            localAdmin.close();</span>
+<span class="nc" id="L1253">            localClient.close();</span>
+        }
+<span class="nc" id="L1255">    }</span>
+
+    void placementPolicyCheck() throws BKAuditException {
+<span class="nc" id="L1258">        final CountDownLatch placementPolicyCheckLatch = new CountDownLatch(1);</span>
+<span class="nc" id="L1259">        this.numOfLedgersFoundNotAdheringInPlacementPolicyCheck.set(0);</span>
+<span class="nc" id="L1260">        this.numOfLedgersFoundSoftlyAdheringInPlacementPolicyCheck.set(0);</span>
+<span class="nc" id="L1261">        this.numOfClosedLedgersAuditedInPlacementPolicyCheck.set(0);</span>
+<span class="nc" id="L1262">        this.numOfURLedgersElapsedRecoveryGracePeriod.set(0);</span>
+<span class="nc bnc" id="L1263" title="All 2 branches missed.">        if (this.underreplicatedLedgerRecoveryGracePeriod &gt; 0) {</span>
+<span class="nc" id="L1264">            Iterator&lt;UnderreplicatedLedger&gt; underreplicatedLedgersInfo = ledgerUnderreplicationManager</span>
+<span class="nc" id="L1265">                    .listLedgersToRereplicate(null);</span>
+<span class="nc" id="L1266">            List&lt;Long&gt; urLedgersElapsedRecoveryGracePeriod = new ArrayList&lt;Long&gt;();</span>
+<span class="nc bnc" id="L1267" title="All 2 branches missed.">            while (underreplicatedLedgersInfo.hasNext()) {</span>
+<span class="nc" id="L1268">                UnderreplicatedLedger underreplicatedLedger = underreplicatedLedgersInfo.next();</span>
+<span class="nc" id="L1269">                long underreplicatedLedgerMarkTimeInMilSecs = underreplicatedLedger.getCtime();</span>
+<span class="nc bnc" id="L1270" title="All 2 branches missed.">                if (underreplicatedLedgerMarkTimeInMilSecs != UnderreplicatedLedger.UNASSIGNED_CTIME) {</span>
+                    long elapsedTimeInSecs =
+<span class="nc" id="L1272">                            (System.currentTimeMillis() - underreplicatedLedgerMarkTimeInMilSecs) / 1000;</span>
+<span class="nc bnc" id="L1273" title="All 2 branches missed.">                    if (elapsedTimeInSecs &gt; this.underreplicatedLedgerRecoveryGracePeriod) {</span>
+<span class="nc" id="L1274">                        urLedgersElapsedRecoveryGracePeriod.add(underreplicatedLedger.getLedgerId());</span>
+<span class="nc" id="L1275">                        numOfURLedgersElapsedRecoveryGracePeriod.incrementAndGet();</span>
+                    }
+                }
+<span class="nc" id="L1278">            }</span>
+<span class="nc bnc" id="L1279" title="All 2 branches missed.">            if (urLedgersElapsedRecoveryGracePeriod.isEmpty()) {</span>
+<span class="nc" id="L1280">                LOG.info(&quot;No Underreplicated ledger has elapsed recovery graceperiod: {}&quot;,</span>
+                        urLedgersElapsedRecoveryGracePeriod);
+            } else {
+<span class="nc" id="L1283">                LOG.error(&quot;Following Underreplicated ledgers have elapsed recovery graceperiod: {}&quot;,</span>
+                        urLedgersElapsedRecoveryGracePeriod);
+            }
+        }
+<span class="nc" id="L1287">        Processor&lt;Long&gt; ledgerProcessor = new Processor&lt;Long&gt;() {</span>
+            @Override
+            public void process(Long ledgerId, AsyncCallback.VoidCallback iterCallback) {
+<span class="nc" id="L1290">                ledgerManager.readLedgerMetadata(ledgerId).whenComplete((metadataVer, exception) -&gt; {</span>
+<span class="nc bnc" id="L1291" title="All 2 branches missed.">                    if (exception == null) {</span>
+<span class="nc" id="L1292">                        LedgerMetadata metadata = metadataVer.getValue();</span>
+<span class="nc" id="L1293">                        int writeQuorumSize = metadata.getWriteQuorumSize();</span>
+<span class="nc" id="L1294">                        int ackQuorumSize = metadata.getAckQuorumSize();</span>
+<span class="nc bnc" id="L1295" title="All 2 branches missed.">                        if (metadata.isClosed()) {</span>
+<span class="nc" id="L1296">                            boolean foundSegmentNotAdheringToPlacementPolicy = false;</span>
+<span class="nc" id="L1297">                            boolean foundSegmentSoftlyAdheringToPlacementPolicy = false;</span>
+<span class="nc bnc" id="L1298" title="All 2 branches missed.">                            for (Map.Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; ensemble : metadata</span>
+<span class="nc" id="L1299">                                    .getAllEnsembles().entrySet()) {</span>
+<span class="nc" id="L1300">                                long startEntryIdOfSegment = ensemble.getKey();</span>
+<span class="nc" id="L1301">                                List&lt;BookieId&gt; ensembleOfSegment = ensemble.getValue();</span>
+<span class="nc" id="L1302">                                PlacementPolicyAdherence segmentAdheringToPlacementPolicy = admin</span>
+<span class="nc" id="L1303">                                        .isEnsembleAdheringToPlacementPolicy(ensembleOfSegment, writeQuorumSize,</span>
+                                                ackQuorumSize);
+<span class="nc bnc" id="L1305" title="All 2 branches missed.">                                if (segmentAdheringToPlacementPolicy == PlacementPolicyAdherence.FAIL) {</span>
+<span class="nc" id="L1306">                                    foundSegmentNotAdheringToPlacementPolicy = true;</span>
+<span class="nc" id="L1307">                                    LOG.warn(</span>
+                                            &quot;For ledger: {}, Segment starting at entry: {}, with ensemble: {} having &quot;
+                                                    + &quot;writeQuorumSize: {} and ackQuorumSize: {} is not adhering to &quot;
+                                                    + &quot;EnsemblePlacementPolicy&quot;,
+<span class="nc" id="L1311">                                            ledgerId, startEntryIdOfSegment, ensembleOfSegment, writeQuorumSize,</span>
+<span class="nc" id="L1312">                                            ackQuorumSize);</span>
+<span class="nc bnc" id="L1313" title="All 2 branches missed.">                                } else if (segmentAdheringToPlacementPolicy == PlacementPolicyAdherence.MEETS_SOFT) {</span>
+<span class="nc" id="L1314">                                    foundSegmentSoftlyAdheringToPlacementPolicy = true;</span>
+<span class="nc bnc" id="L1315" title="All 2 branches missed.">                                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L1316">                                        LOG.debug(</span>
+                                                &quot;For ledger: {}, Segment starting at entry: {}, with ensemble: {}&quot;
+                                                        + &quot; having writeQuorumSize: {} and ackQuorumSize: {} is&quot;
+                                                        + &quot; softly adhering to EnsemblePlacementPolicy&quot;,
+<span class="nc" id="L1320">                                                ledgerId, startEntryIdOfSegment, ensembleOfSegment, writeQuorumSize,</span>
+<span class="nc" id="L1321">                                                ackQuorumSize);</span>
+                                    }
+                                }
+<span class="nc" id="L1324">                            }</span>
+<span class="nc bnc" id="L1325" title="All 2 branches missed.">                            if (foundSegmentNotAdheringToPlacementPolicy) {</span>
+<span class="nc" id="L1326">                                numOfLedgersFoundNotAdheringInPlacementPolicyCheck.incrementAndGet();</span>
+<span class="nc bnc" id="L1327" title="All 2 branches missed.">                            } else if (foundSegmentSoftlyAdheringToPlacementPolicy) {</span>
+<span class="nc" id="L1328">                                numOfLedgersFoundSoftlyAdheringInPlacementPolicyCheck.incrementAndGet();</span>
+                            }
+<span class="nc" id="L1330">                            numOfClosedLedgersAuditedInPlacementPolicyCheck.incrementAndGet();</span>
+<span class="nc" id="L1331">                        } else {</span>
+<span class="nc bnc" id="L1332" title="All 2 branches missed.">                            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L1333">                                LOG.debug(&quot;Ledger: {} is not yet closed, so skipping the placementPolicy&quot;</span>
+                                        + &quot;check analysis for now&quot;, ledgerId);
+                            }
+                        }
+<span class="nc" id="L1337">                        iterCallback.processResult(BKException.Code.OK, null, null);</span>
+<span class="nc bnc" id="L1338" title="All 2 branches missed.">                    } else if (BKException.getExceptionCode(exception)</span>
+                            == BKException.Code.NoSuchLedgerExistsOnMetadataServerException) {
+<span class="nc" id="L1340">                        LOG.debug(&quot;Ignoring replication of already deleted ledger {}&quot;, ledgerId);</span>
+<span class="nc" id="L1341">                        iterCallback.processResult(BKException.Code.OK, null, null);</span>
+                    } else {
+<span class="nc" id="L1343">                        LOG.warn(&quot;Unable to read the ledger: {} information&quot;, ledgerId);</span>
+<span class="nc" id="L1344">                        iterCallback.processResult(BKException.getExceptionCode(exception), null, null);</span>
+                    }
+<span class="nc" id="L1346">                });</span>
+<span class="nc" id="L1347">            }</span>
+        };
+        // Reading the result after processing all the ledgers
+<span class="nc" id="L1350">        final List&lt;Integer&gt; resultCode = new ArrayList&lt;Integer&gt;(1);</span>
+<span class="nc" id="L1351">        ledgerManager.asyncProcessLedgers(ledgerProcessor, new AsyncCallback.VoidCallback() {</span>
+
+            @Override
+            public void processResult(int rc, String s, Object obj) {
+<span class="nc" id="L1355">                resultCode.add(rc);</span>
+<span class="nc" id="L1356">                placementPolicyCheckLatch.countDown();</span>
+<span class="nc" id="L1357">            }</span>
+        }, null, BKException.Code.OK, BKException.Code.ReadException);
+        try {
+<span class="nc" id="L1360">            placementPolicyCheckLatch.await();</span>
+<span class="nc" id="L1361">        } catch (InterruptedException e) {</span>
+<span class="nc" id="L1362">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1363">            throw new BKAuditException(&quot;Exception while doing placementPolicy check&quot;, e);</span>
+<span class="nc" id="L1364">        }</span>
+<span class="nc bnc" id="L1365" title="All 2 branches missed.">        if (!resultCode.contains(BKException.Code.OK)) {</span>
+<span class="nc" id="L1366">            throw new BKAuditException(&quot;Exception while doing placementPolicy check&quot;,</span>
+<span class="nc" id="L1367">                    BKException.create(resultCode.get(0)));</span>
+        }
+        try {
+<span class="nc" id="L1370">            ledgerUnderreplicationManager.setPlacementPolicyCheckCTime(System.currentTimeMillis());</span>
+<span class="nc" id="L1371">        } catch (UnavailableException ue) {</span>
+<span class="nc" id="L1372">            LOG.error(&quot;Got exception while trying to set PlacementPolicyCheckCTime&quot;, ue);</span>
+<span class="nc" id="L1373">        }</span>
+<span class="nc" id="L1374">    }</span>
+
+    private static class MissingEntriesInfo {
+        // ledger id of missing entries
+        private final long ledgerId;
+        /*
+         * segment details, like start entryid of the segment and ensemble List.
+         */
+        private final Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; segmentEnsemble;
+        // bookie missing these entries
+        private final BookieId bookieMissingEntries;
+        /*
+         * entries of this segment which are supposed to contain in this bookie
+         * but missing in this bookie.
+         */
+        private final List&lt;Long&gt; unavailableEntriesList;
+
+        private MissingEntriesInfo(long ledgerId, Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; segmentEnsemble,
+<span class="nc" id="L1392">                BookieId bookieMissingEntries, List&lt;Long&gt; unavailableEntriesList) {</span>
+<span class="nc" id="L1393">            this.ledgerId = ledgerId;</span>
+<span class="nc" id="L1394">            this.segmentEnsemble = segmentEnsemble;</span>
+<span class="nc" id="L1395">            this.bookieMissingEntries = bookieMissingEntries;</span>
+<span class="nc" id="L1396">            this.unavailableEntriesList = unavailableEntriesList;</span>
+<span class="nc" id="L1397">        }</span>
+
+        private long getLedgerId() {
+<span class="nc" id="L1400">            return ledgerId;</span>
+        }
+
+        private Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; getSegmentEnsemble() {
+<span class="nc" id="L1404">            return segmentEnsemble;</span>
+        }
+
+        private BookieId getBookieMissingEntries() {
+<span class="nc" id="L1408">            return bookieMissingEntries;</span>
+        }
+
+        private List&lt;Long&gt; getUnavailableEntriesList() {
+<span class="nc" id="L1412">            return unavailableEntriesList;</span>
+        }
+    }
+
+    private static class MissingEntriesInfoOfLedger {
+        private final long ledgerId;
+        private final int ensembleSize;
+        private final int writeQuorumSize;
+        private final int ackQuorumSize;
+        private final List&lt;MissingEntriesInfo&gt; missingEntriesInfoList;
+
+        private MissingEntriesInfoOfLedger(long ledgerId, int ensembleSize, int writeQuorumSize, int ackQuorumSize,
+<span class="nc" id="L1424">                List&lt;MissingEntriesInfo&gt; missingEntriesInfoList) {</span>
+<span class="nc" id="L1425">            this.ledgerId = ledgerId;</span>
+<span class="nc" id="L1426">            this.ensembleSize = ensembleSize;</span>
+<span class="nc" id="L1427">            this.writeQuorumSize = writeQuorumSize;</span>
+<span class="nc" id="L1428">            this.ackQuorumSize = ackQuorumSize;</span>
+<span class="nc" id="L1429">            this.missingEntriesInfoList = missingEntriesInfoList;</span>
+<span class="nc" id="L1430">        }</span>
+
+        private long getLedgerId() {
+<span class="nc" id="L1433">            return ledgerId;</span>
+        }
+
+        private int getEnsembleSize() {
+<span class="nc" id="L1437">            return ensembleSize;</span>
+        }
+
+        private int getWriteQuorumSize() {
+<span class="nc" id="L1441">            return writeQuorumSize;</span>
+        }
+
+        private int getAckQuorumSize() {
+<span class="nc" id="L1445">            return ackQuorumSize;</span>
+        }
+
+        private List&lt;MissingEntriesInfo&gt; getMissingEntriesInfoList() {
+<span class="nc" id="L1449">            return missingEntriesInfoList;</span>
+        }
+    }
+
+    private class ReadLedgerMetadataCallbackForReplicasCheck
+            implements BiConsumer&lt;Versioned&lt;LedgerMetadata&gt;, Throwable&gt; {
+        private final long ledgerInRange;
+        private final MultiCallback mcbForThisLedgerRange;
+        private final ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt; ledgersWithMissingEntries;
+        private final ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt; ledgersWithUnavailableBookies;
+
+        ReadLedgerMetadataCallbackForReplicasCheck(long ledgerInRange, MultiCallback mcbForThisLedgerRange,
+                ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt; ledgersWithMissingEntries,
+<span class="nc" id="L1462">                ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt; ledgersWithUnavailableBookies) {</span>
+<span class="nc" id="L1463">            this.ledgerInRange = ledgerInRange;</span>
+<span class="nc" id="L1464">            this.mcbForThisLedgerRange = mcbForThisLedgerRange;</span>
+<span class="nc" id="L1465">            this.ledgersWithMissingEntries = ledgersWithMissingEntries;</span>
+<span class="nc" id="L1466">            this.ledgersWithUnavailableBookies = ledgersWithUnavailableBookies;</span>
+<span class="nc" id="L1467">        }</span>
+
+        @Override
+        public void accept(Versioned&lt;LedgerMetadata&gt; metadataVer, Throwable exception) {
+<span class="nc bnc" id="L1471" title="All 2 branches missed.">            if (exception != null) {</span>
+<span class="nc" id="L1472">                if (BKException</span>
+<span class="nc bnc" id="L1473" title="All 2 branches missed.">                        .getExceptionCode(exception) == BKException.Code.NoSuchLedgerExistsOnMetadataServerException) {</span>
+<span class="nc" id="L1474">                    LOG.debug(&quot;Ignoring replicas check of already deleted ledger {}&quot;, ledgerInRange);</span>
+<span class="nc" id="L1475">                    mcbForThisLedgerRange.processResult(BKException.Code.OK, null, null);</span>
+<span class="nc" id="L1476">                    return;</span>
+                } else {
+<span class="nc" id="L1478">                    LOG.warn(&quot;Unable to read the ledger: {} information&quot;, ledgerInRange, exception);</span>
+<span class="nc" id="L1479">                    mcbForThisLedgerRange.processResult(BKException.getExceptionCode(exception), null, null);</span>
+<span class="nc" id="L1480">                    return;</span>
+                }
+            }
+
+<span class="nc" id="L1484">            LedgerMetadata metadata = metadataVer.getValue();</span>
+<span class="nc bnc" id="L1485" title="All 2 branches missed.">            if (!metadata.isClosed()) {</span>
+<span class="nc" id="L1486">                LOG.debug(&quot;Ledger: {} is not yet closed, so skipping the replicas check analysis for now&quot;,</span>
+<span class="nc" id="L1487">                        ledgerInRange);</span>
+<span class="nc" id="L1488">                mcbForThisLedgerRange.processResult(BKException.Code.OK, null, null);</span>
+<span class="nc" id="L1489">                return;</span>
+            }
+
+<span class="nc" id="L1492">            final long lastEntryId = metadata.getLastEntryId();</span>
+<span class="nc bnc" id="L1493" title="All 2 branches missed.">            if (lastEntryId == -1) {</span>
+<span class="nc" id="L1494">                LOG.debug(&quot;Ledger: {} is closed but it doesn't has any entries, so skipping the replicas check&quot;,</span>
+<span class="nc" id="L1495">                        ledgerInRange);</span>
+<span class="nc" id="L1496">                mcbForThisLedgerRange.processResult(BKException.Code.OK, null, null);</span>
+<span class="nc" id="L1497">                return;</span>
+            }
+
+<span class="nc" id="L1500">            int writeQuorumSize = metadata.getWriteQuorumSize();</span>
+<span class="nc" id="L1501">            int ackQuorumSize = metadata.getAckQuorumSize();</span>
+<span class="nc" id="L1502">            int ensembleSize = metadata.getEnsembleSize();</span>
+<span class="nc" id="L1503">            RoundRobinDistributionSchedule distributionSchedule = new RoundRobinDistributionSchedule(writeQuorumSize,</span>
+                    ackQuorumSize, ensembleSize);
+<span class="nc" id="L1505">            List&lt;Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt;&gt; segments = new LinkedList&lt;&gt;(</span>
+<span class="nc" id="L1506">                    metadata.getAllEnsembles().entrySet());</span>
+            /*
+             * since there are multiple segments, MultiCallback should be
+             * created for (ensembleSize * segments.size()) calls.
+             */
+<span class="nc" id="L1511">            MultiCallback mcbForThisLedger = new MultiCallback(ensembleSize * segments.size(), mcbForThisLedgerRange,</span>
+                    null, BKException.Code.OK, BKException.Code.ReadException);
+<span class="nc" id="L1513">            HashMap&lt;BookieId, List&lt;BookieExpectedToContainSegmentInfo&gt;&gt; bookiesSegmentInfoMap =</span>
+                    new HashMap&lt;BookieId, List&lt;BookieExpectedToContainSegmentInfo&gt;&gt;();
+<span class="nc bnc" id="L1515" title="All 2 branches missed.">            for (int segmentNum = 0; segmentNum &lt; segments.size(); segmentNum++) {</span>
+<span class="nc" id="L1516">                final Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; segmentEnsemble = segments.get(segmentNum);</span>
+<span class="nc" id="L1517">                final List&lt;BookieId&gt; ensembleOfSegment = segmentEnsemble.getValue();</span>
+<span class="nc" id="L1518">                final long startEntryIdOfSegment = segmentEnsemble.getKey();</span>
+<span class="nc bnc" id="L1519" title="All 2 branches missed.">                final boolean lastSegment = (segmentNum == (segments.size() - 1));</span>
+<span class="nc bnc" id="L1520" title="All 2 branches missed.">                final long lastEntryIdOfSegment = lastSegment ? lastEntryId</span>
+<span class="nc" id="L1521">                        : segments.get(segmentNum + 1).getKey() - 1;</span>
+                /*
+                 * Segment can be empty. If last segment is empty, then
+                 * startEntryIdOfSegment of it will be greater than lastEntryId
+                 * of the ledger. If the segment in middle is empty, then its
+                 * startEntry will be same as startEntry of the following
+                 * segment.
+                 */
+<span class="nc bnc" id="L1529" title="All 4 branches missed.">                final boolean emptySegment = lastSegment ? (startEntryIdOfSegment &gt; lastEntryId)</span>
+<span class="nc bnc" id="L1530" title="All 2 branches missed.">                        : (startEntryIdOfSegment == segments.get(segmentNum + 1).getKey());</span>
+<span class="nc bnc" id="L1531" title="All 2 branches missed.">                for (int bookieIndex = 0; bookieIndex &lt; ensembleOfSegment.size(); bookieIndex++) {</span>
+<span class="nc" id="L1532">                    final BookieId bookieInEnsemble = ensembleOfSegment.get(bookieIndex);</span>
+<span class="nc bnc" id="L1533" title="All 2 branches missed.">                    final BitSet entriesStripedToThisBookie = emptySegment ? EMPTY_BITSET</span>
+<span class="nc" id="L1534">                            : distributionSchedule.getEntriesStripedToTheBookie(bookieIndex, startEntryIdOfSegment,</span>
+                                    lastEntryIdOfSegment);
+<span class="nc bnc" id="L1536" title="All 2 branches missed.">                    if (entriesStripedToThisBookie.cardinality() == 0) {</span>
+                        /*
+                         * if no entry is expected to contain in this bookie,
+                         * then there is no point in making
+                         * getListOfEntriesOfLedger call for this bookie. So
+                         * instead callback with success result.
+                         */
+<span class="nc bnc" id="L1543" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L1544">                            LOG.debug(</span>
+                                    &quot;For ledger: {}, in Segment: {}, no entry is expected to contain in&quot;
+                                            + &quot; this bookie: {}. So skipping getListOfEntriesOfLedger call&quot;,
+<span class="nc" id="L1547">                                    ledgerInRange, segmentEnsemble, bookieInEnsemble);</span>
+                        }
+<span class="nc" id="L1549">                        mcbForThisLedger.processResult(BKException.Code.OK, null, null);</span>
+<span class="nc" id="L1550">                        continue;</span>
+                    }
+<span class="nc" id="L1552">                    List&lt;BookieExpectedToContainSegmentInfo&gt; bookieSegmentInfoList = bookiesSegmentInfoMap</span>
+<span class="nc" id="L1553">                            .get(bookieInEnsemble);</span>
+<span class="nc bnc" id="L1554" title="All 2 branches missed.">                    if (bookieSegmentInfoList == null) {</span>
+<span class="nc" id="L1555">                        bookieSegmentInfoList = new ArrayList&lt;BookieExpectedToContainSegmentInfo&gt;();</span>
+<span class="nc" id="L1556">                        bookiesSegmentInfoMap.put(bookieInEnsemble, bookieSegmentInfoList);</span>
+                    }
+<span class="nc" id="L1558">                    bookieSegmentInfoList.add(new BookieExpectedToContainSegmentInfo(startEntryIdOfSegment,</span>
+                            lastEntryIdOfSegment, segmentEnsemble, entriesStripedToThisBookie));
+                }
+            }
+            for (Entry&lt;BookieId, List&lt;BookieExpectedToContainSegmentInfo&gt;&gt; bookiesSegmentInfoTuple :
+<span class="nc bnc" id="L1563" title="All 2 branches missed.">                bookiesSegmentInfoMap.entrySet()) {</span>
+<span class="nc" id="L1564">                final BookieId bookieInEnsemble = bookiesSegmentInfoTuple.getKey();</span>
+<span class="nc" id="L1565">                final List&lt;BookieExpectedToContainSegmentInfo&gt; bookieSegmentInfoList = bookiesSegmentInfoTuple</span>
+<span class="nc" id="L1566">                        .getValue();</span>
+<span class="nc" id="L1567">                admin.asyncGetListOfEntriesOfLedger(bookieInEnsemble, ledgerInRange)</span>
+<span class="nc" id="L1568">                        .whenComplete(new GetListOfEntriesOfLedgerCallbackForReplicasCheck(ledgerInRange, ensembleSize,</span>
+                                writeQuorumSize, ackQuorumSize, bookieInEnsemble, bookieSegmentInfoList,
+                                ledgersWithMissingEntries, ledgersWithUnavailableBookies, mcbForThisLedger));
+<span class="nc" id="L1571">            }</span>
+<span class="nc" id="L1572">        }</span>
+    }
+
+    private static class BookieExpectedToContainSegmentInfo {
+        private final long startEntryIdOfSegment;
+        private final long lastEntryIdOfSegment;
+        private final Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; segmentEnsemble;
+        private final BitSet entriesOfSegmentStripedToThisBookie;
+
+        private BookieExpectedToContainSegmentInfo(long startEntryIdOfSegment, long lastEntryIdOfSegment,
+                Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; segmentEnsemble,
+<span class="nc" id="L1583">                BitSet entriesOfSegmentStripedToThisBookie) {</span>
+<span class="nc" id="L1584">            this.startEntryIdOfSegment = startEntryIdOfSegment;</span>
+<span class="nc" id="L1585">            this.lastEntryIdOfSegment = lastEntryIdOfSegment;</span>
+<span class="nc" id="L1586">            this.segmentEnsemble = segmentEnsemble;</span>
+<span class="nc" id="L1587">            this.entriesOfSegmentStripedToThisBookie = entriesOfSegmentStripedToThisBookie;</span>
+<span class="nc" id="L1588">        }</span>
+
+        public long getStartEntryIdOfSegment() {
+<span class="nc" id="L1591">            return startEntryIdOfSegment;</span>
+        }
+
+        public long getLastEntryIdOfSegment() {
+<span class="nc" id="L1595">            return lastEntryIdOfSegment;</span>
+        }
+
+        public Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; getSegmentEnsemble() {
+<span class="nc" id="L1599">            return segmentEnsemble;</span>
+        }
+
+        public BitSet getEntriesOfSegmentStripedToThisBookie() {
+<span class="nc" id="L1603">            return entriesOfSegmentStripedToThisBookie;</span>
+        }
+    }
+
+    private static class GetListOfEntriesOfLedgerCallbackForReplicasCheck
+            implements BiConsumer&lt;AvailabilityOfEntriesOfLedger, Throwable&gt; {
+        private final long ledgerInRange;
+        private final int ensembleSize;
+        private final int writeQuorumSize;
+        private final int ackQuorumSize;
+        private final BookieId bookieInEnsemble;
+        private final List&lt;BookieExpectedToContainSegmentInfo&gt; bookieExpectedToContainSegmentInfoList;
+        private final ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt; ledgersWithMissingEntries;
+        private final ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt; ledgersWithUnavailableBookies;
+        private final MultiCallback mcbForThisLedger;
+
+        private GetListOfEntriesOfLedgerCallbackForReplicasCheck(long ledgerInRange, int ensembleSize,
+                int writeQuorumSize, int ackQuorumSize, BookieId bookieInEnsemble,
+                List&lt;BookieExpectedToContainSegmentInfo&gt; bookieExpectedToContainSegmentInfoList,
+                ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt; ledgersWithMissingEntries,
+                ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt; ledgersWithUnavailableBookies,
+<span class="nc" id="L1624">                MultiCallback mcbForThisLedger) {</span>
+<span class="nc" id="L1625">            this.ledgerInRange = ledgerInRange;</span>
+<span class="nc" id="L1626">            this.ensembleSize = ensembleSize;</span>
+<span class="nc" id="L1627">            this.writeQuorumSize = writeQuorumSize;</span>
+<span class="nc" id="L1628">            this.ackQuorumSize = ackQuorumSize;</span>
+<span class="nc" id="L1629">            this.bookieInEnsemble = bookieInEnsemble;</span>
+<span class="nc" id="L1630">            this.bookieExpectedToContainSegmentInfoList = bookieExpectedToContainSegmentInfoList;</span>
+<span class="nc" id="L1631">            this.ledgersWithMissingEntries = ledgersWithMissingEntries;</span>
+<span class="nc" id="L1632">            this.ledgersWithUnavailableBookies = ledgersWithUnavailableBookies;</span>
+<span class="nc" id="L1633">            this.mcbForThisLedger = mcbForThisLedger;</span>
+<span class="nc" id="L1634">        }</span>
+
+        @Override
+        public void accept(AvailabilityOfEntriesOfLedger availabilityOfEntriesOfLedger,
+                Throwable listOfEntriesException) {
+
+<span class="nc bnc" id="L1640" title="All 2 branches missed.">            if (listOfEntriesException != null) {</span>
+<span class="nc" id="L1641">                if (BKException</span>
+<span class="nc bnc" id="L1642" title="All 2 branches missed.">                        .getExceptionCode(listOfEntriesException) == BKException.Code.NoSuchLedgerExistsException) {</span>
+<span class="nc" id="L1643">                    LOG.debug(&quot;Got NoSuchLedgerExistsException for ledger: {} from bookie: {}&quot;, ledgerInRange,</span>
+                            bookieInEnsemble);
+                    /*
+                     * in the case of NoSuchLedgerExistsException, it should be
+                     * considered as empty AvailabilityOfEntriesOfLedger.
+                     */
+<span class="nc" id="L1649">                    availabilityOfEntriesOfLedger = AvailabilityOfEntriesOfLedger.EMPTY_AVAILABILITYOFENTRIESOFLEDGER;</span>
+                } else {
+<span class="nc" id="L1651">                    LOG.warn(&quot;Unable to GetListOfEntriesOfLedger for ledger: {} from: {}&quot;, ledgerInRange,</span>
+                            bookieInEnsemble, listOfEntriesException);
+<span class="nc" id="L1653">                    MissingEntriesInfoOfLedger unavailableBookiesInfoOfThisLedger = ledgersWithUnavailableBookies</span>
+<span class="nc" id="L1654">                            .get(ledgerInRange);</span>
+<span class="nc bnc" id="L1655" title="All 2 branches missed.">                    if (unavailableBookiesInfoOfThisLedger == null) {</span>
+<span class="nc" id="L1656">                        ledgersWithUnavailableBookies.putIfAbsent(ledgerInRange,</span>
+                                new MissingEntriesInfoOfLedger(ledgerInRange, ensembleSize, writeQuorumSize,
+                                        ackQuorumSize,
+<span class="nc" id="L1659">                                        Collections.synchronizedList(new ArrayList&lt;MissingEntriesInfo&gt;())));</span>
+<span class="nc" id="L1660">                        unavailableBookiesInfoOfThisLedger = ledgersWithUnavailableBookies.get(ledgerInRange);</span>
+                    }
+<span class="nc" id="L1662">                    List&lt;MissingEntriesInfo&gt; missingEntriesInfoList =</span>
+<span class="nc" id="L1663">                            unavailableBookiesInfoOfThisLedger.getMissingEntriesInfoList();</span>
+                    for (BookieExpectedToContainSegmentInfo bookieExpectedToContainSegmentInfo
+<span class="nc bnc" id="L1665" title="All 2 branches missed.">                            : bookieExpectedToContainSegmentInfoList) {</span>
+<span class="nc" id="L1666">                        missingEntriesInfoList.add(new MissingEntriesInfo(ledgerInRange,</span>
+<span class="nc" id="L1667">                                bookieExpectedToContainSegmentInfo.getSegmentEnsemble(), bookieInEnsemble, null));</span>
+                        /*
+                         * though GetListOfEntriesOfLedger has failed with
+                         * exception, mcbForThisLedger should be called back
+                         * with OK response, because we dont consider this as
+                         * fatal error in replicasCheck and dont want
+                         * replicasCheck to exit just because of this issue. So
+                         * instead maintain the state of
+                         * ledgersWithUnavailableBookies, so that replicascheck
+                         * will report these ledgers/bookies appropriately.
+                         */
+<span class="nc" id="L1678">                        mcbForThisLedger.processResult(BKException.Code.OK, null, null);</span>
+<span class="nc" id="L1679">                    }</span>
+<span class="nc" id="L1680">                    return;</span>
+                }
+            }
+
+            for (BookieExpectedToContainSegmentInfo bookieExpectedToContainSegmentInfo
+<span class="nc bnc" id="L1685" title="All 2 branches missed.">                    : bookieExpectedToContainSegmentInfoList) {</span>
+<span class="nc" id="L1686">                final long startEntryIdOfSegment = bookieExpectedToContainSegmentInfo.getStartEntryIdOfSegment();</span>
+<span class="nc" id="L1687">                final long lastEntryIdOfSegment = bookieExpectedToContainSegmentInfo.getLastEntryIdOfSegment();</span>
+<span class="nc" id="L1688">                final BitSet entriesStripedToThisBookie = bookieExpectedToContainSegmentInfo</span>
+<span class="nc" id="L1689">                        .getEntriesOfSegmentStripedToThisBookie();</span>
+<span class="nc" id="L1690">                final Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; segmentEnsemble =</span>
+<span class="nc" id="L1691">                        bookieExpectedToContainSegmentInfo.getSegmentEnsemble();</span>
+<span class="nc" id="L1692">                final List&lt;Long&gt; unavailableEntriesList = availabilityOfEntriesOfLedger</span>
+<span class="nc" id="L1693">                        .getUnavailableEntries(startEntryIdOfSegment, lastEntryIdOfSegment, entriesStripedToThisBookie);</span>
+<span class="nc bnc" id="L1694" title="All 4 branches missed.">                if ((unavailableEntriesList != null) &amp;&amp; (!unavailableEntriesList.isEmpty())) {</span>
+<span class="nc" id="L1695">                    MissingEntriesInfoOfLedger missingEntriesInfoOfThisLedger = ledgersWithMissingEntries</span>
+<span class="nc" id="L1696">                            .get(ledgerInRange);</span>
+<span class="nc bnc" id="L1697" title="All 2 branches missed.">                    if (missingEntriesInfoOfThisLedger == null) {</span>
+<span class="nc" id="L1698">                        ledgersWithMissingEntries.putIfAbsent(ledgerInRange,</span>
+                                new MissingEntriesInfoOfLedger(ledgerInRange, ensembleSize, writeQuorumSize,
+                                        ackQuorumSize,
+<span class="nc" id="L1701">                                        Collections.synchronizedList(new ArrayList&lt;MissingEntriesInfo&gt;())));</span>
+<span class="nc" id="L1702">                        missingEntriesInfoOfThisLedger = ledgersWithMissingEntries.get(ledgerInRange);</span>
+                    }
+<span class="nc" id="L1704">                    missingEntriesInfoOfThisLedger.getMissingEntriesInfoList().add(new MissingEntriesInfo(ledgerInRange,</span>
+                            segmentEnsemble, bookieInEnsemble, unavailableEntriesList));
+                }
+                /*
+                 * here though unavailableEntriesList is not empty,
+                 * mcbForThisLedger should be called back with OK response,
+                 * because we dont consider this as fatal error in replicasCheck
+                 * and dont want replicasCheck to exit just because of this
+                 * issue. So instead maintain the state of
+                 * missingEntriesInfoOfThisLedger, so that replicascheck will
+                 * report these ledgers/bookies/missingentries appropriately.
+                 */
+<span class="nc" id="L1716">                mcbForThisLedger.processResult(BKException.Code.OK, null, null);</span>
+<span class="nc" id="L1717">            }</span>
+<span class="nc" id="L1718">        }</span>
+    }
+
+    private static class ReplicasCheckFinalCallback implements AsyncCallback.VoidCallback {
+        final AtomicInteger resultCode;
+        final CountDownLatch replicasCheckLatch;
+
+<span class="nc" id="L1725">        private ReplicasCheckFinalCallback(AtomicInteger resultCode, CountDownLatch replicasCheckLatch) {</span>
+<span class="nc" id="L1726">            this.resultCode = resultCode;</span>
+<span class="nc" id="L1727">            this.replicasCheckLatch = replicasCheckLatch;</span>
+<span class="nc" id="L1728">        }</span>
+
+        @Override
+        public void processResult(int rc, String s, Object obj) {
+<span class="nc" id="L1732">            resultCode.set(rc);</span>
+<span class="nc" id="L1733">            replicasCheckLatch.countDown();</span>
+<span class="nc" id="L1734">        }</span>
+    }
+
+    void replicasCheck() throws BKAuditException {
+<span class="nc" id="L1738">        ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt; ledgersWithMissingEntries =</span>
+                    new ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt;();
+<span class="nc" id="L1740">        ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt; ledgersWithUnavailableBookies =</span>
+                    new ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt;();
+<span class="nc" id="L1742">        LedgerRangeIterator ledgerRangeIterator = ledgerManager.getLedgerRanges(zkOpTimeoutMs);</span>
+<span class="nc" id="L1743">        final Semaphore maxConcurrentSemaphore = new Semaphore(MAX_CONCURRENT_REPLICAS_CHECK_LEDGER_REQUESTS);</span>
+        while (true) {
+<span class="nc" id="L1745">            LedgerRange ledgerRange = null;</span>
+            try {
+<span class="nc bnc" id="L1747" title="All 2 branches missed.">                if (ledgerRangeIterator.hasNext()) {</span>
+<span class="nc" id="L1748">                    ledgerRange = ledgerRangeIterator.next();</span>
+                } else {
+<span class="nc" id="L1750">                    break;</span>
+                }
+<span class="nc" id="L1752">            } catch (IOException ioe) {</span>
+<span class="nc" id="L1753">                LOG.error(&quot;Got IOException while iterating LedgerRangeIterator&quot;, ioe);</span>
+<span class="nc" id="L1754">                throw new BKAuditException(&quot;Got IOException while iterating LedgerRangeIterator&quot;, ioe);</span>
+<span class="nc" id="L1755">            }</span>
+<span class="nc" id="L1756">            ledgersWithMissingEntries.clear();</span>
+<span class="nc" id="L1757">            ledgersWithUnavailableBookies.clear();</span>
+<span class="nc" id="L1758">            numLedgersFoundHavingNoReplicaOfAnEntry.set(0);</span>
+<span class="nc" id="L1759">            numLedgersFoundHavingLessThanAQReplicasOfAnEntry.set(0);</span>
+<span class="nc" id="L1760">            numLedgersFoundHavingLessThanWQReplicasOfAnEntry.set(0);</span>
+<span class="nc" id="L1761">            Set&lt;Long&gt; ledgersInRange = ledgerRange.getLedgers();</span>
+<span class="nc" id="L1762">            int numOfLedgersInRange = ledgersInRange.size();</span>
+            // Final result after processing all the ledgers
+<span class="nc" id="L1764">            final AtomicInteger resultCode = new AtomicInteger();</span>
+<span class="nc" id="L1765">            final CountDownLatch replicasCheckLatch = new CountDownLatch(1);</span>
+
+<span class="nc" id="L1767">            ReplicasCheckFinalCallback finalCB = new ReplicasCheckFinalCallback(resultCode, replicasCheckLatch);</span>
+<span class="nc" id="L1768">            MultiCallback mcbForThisLedgerRange = new MultiCallback(numOfLedgersInRange, finalCB, null,</span>
+<span class="nc" id="L1769">                    BKException.Code.OK, BKException.Code.ReadException) {</span>
+                @Override
+                public void processResult(int rc, String path, Object ctx) {
+                    try {
+<span class="nc" id="L1773">                        super.processResult(rc, path, ctx);</span>
+                    } finally {
+<span class="nc" id="L1775">                        maxConcurrentSemaphore.release();</span>
+                    }
+<span class="nc" id="L1777">                }</span>
+            };
+<span class="nc" id="L1779">            LOG.debug(&quot;Number of ledgers in the current LedgerRange : {}&quot;, numOfLedgersInRange);</span>
+<span class="nc bnc" id="L1780" title="All 2 branches missed.">            for (Long ledgerInRange : ledgersInRange) {</span>
+                try {
+<span class="nc bnc" id="L1782" title="All 2 branches missed.">                    if (!maxConcurrentSemaphore.tryAcquire(REPLICAS_CHECK_TIMEOUT_IN_SECS, TimeUnit.SECONDS)) {</span>
+<span class="nc" id="L1783">                        LOG.error(&quot;Timedout ({} secs) while waiting for acquiring semaphore&quot;,</span>
+<span class="nc" id="L1784">                                REPLICAS_CHECK_TIMEOUT_IN_SECS);</span>
+<span class="nc" id="L1785">                        throw new BKAuditException(&quot;Timedout while waiting for acquiring semaphore&quot;);</span>
+                    }
+<span class="nc" id="L1787">                } catch (InterruptedException ie) {</span>
+<span class="nc" id="L1788">                    Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1789">                    LOG.error(&quot;Got InterruptedException while acquiring semaphore for replicascheck&quot;, ie);</span>
+<span class="nc" id="L1790">                    throw new BKAuditException(&quot;Got InterruptedException while acquiring semaphore for replicascheck&quot;,</span>
+                            ie);
+<span class="nc" id="L1792">                }</span>
+<span class="nc bnc" id="L1793" title="All 2 branches missed.">                if (checkUnderReplicationForReplicasCheck(ledgerInRange, mcbForThisLedgerRange)) {</span>
+                    /*
+                     * if ledger is marked underreplicated, then ignore this
+                     * ledger for replicascheck.
+                     */
+<span class="nc" id="L1798">                    continue;</span>
+                }
+<span class="nc" id="L1800">                ledgerManager.readLedgerMetadata(ledgerInRange)</span>
+<span class="nc" id="L1801">                        .whenComplete(new ReadLedgerMetadataCallbackForReplicasCheck(ledgerInRange,</span>
+                                mcbForThisLedgerRange, ledgersWithMissingEntries, ledgersWithUnavailableBookies));
+<span class="nc" id="L1803">            }</span>
+            try {
+                /*
+                 * if mcbForThisLedgerRange is not calledback within
+                 * REPLICAS_CHECK_TIMEOUT_IN_SECS secs then better give up
+                 * doing replicascheck, since there could be an issue and
+                 * blocking the single threaded auditor executor thread is not
+                 * expected.
+                 */
+<span class="nc bnc" id="L1812" title="All 2 branches missed.">                if (!replicasCheckLatch.await(REPLICAS_CHECK_TIMEOUT_IN_SECS, TimeUnit.SECONDS)) {</span>
+<span class="nc" id="L1813">                    LOG.error(</span>
+                            &quot;For LedgerRange with num of ledgers : {} it didn't complete replicascheck&quot;
+                                    + &quot; in {} secs, so giving up&quot;,
+<span class="nc" id="L1816">                            numOfLedgersInRange, REPLICAS_CHECK_TIMEOUT_IN_SECS);</span>
+<span class="nc" id="L1817">                    throw new BKAuditException(&quot;Got InterruptedException while doing replicascheck&quot;);</span>
+                }
+<span class="nc" id="L1819">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L1820">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1821">                LOG.error(&quot;Got InterruptedException while doing replicascheck&quot;, ie);</span>
+<span class="nc" id="L1822">                throw new BKAuditException(&quot;Got InterruptedException while doing replicascheck&quot;, ie);</span>
+<span class="nc" id="L1823">            }</span>
+<span class="nc" id="L1824">            reportLedgersWithMissingEntries(ledgersWithMissingEntries);</span>
+<span class="nc" id="L1825">            reportLedgersWithUnavailableBookies(ledgersWithUnavailableBookies);</span>
+<span class="nc" id="L1826">            int resultCodeIntValue = resultCode.get();</span>
+<span class="nc bnc" id="L1827" title="All 2 branches missed.">            if (resultCodeIntValue != BKException.Code.OK) {</span>
+<span class="nc" id="L1828">                throw new BKAuditException(&quot;Exception while doing replicas check&quot;,</span>
+<span class="nc" id="L1829">                        BKException.create(resultCodeIntValue));</span>
+            }
+<span class="nc" id="L1831">        }</span>
+        try {
+<span class="nc" id="L1833">            ledgerUnderreplicationManager.setReplicasCheckCTime(System.currentTimeMillis());</span>
+<span class="nc" id="L1834">        } catch (UnavailableException ue) {</span>
+<span class="nc" id="L1835">            LOG.error(&quot;Got exception while trying to set ReplicasCheckCTime&quot;, ue);</span>
+<span class="nc" id="L1836">        }</span>
+<span class="nc" id="L1837">    }</span>
+
+    private void reportLedgersWithMissingEntries(
+            ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt; ledgersWithMissingEntries) {
+<span class="nc" id="L1841">        StringBuilder errMessage = new StringBuilder();</span>
+<span class="nc" id="L1842">        HashMultiset&lt;Long&gt; missingEntries = HashMultiset.create();</span>
+        int writeQuorumSize;
+        int ackQuorumSize;
+<span class="nc bnc" id="L1845" title="All 2 branches missed.">        for (Map.Entry&lt;Long, MissingEntriesInfoOfLedger&gt; missingEntriesInfoOfLedgerEntry : ledgersWithMissingEntries</span>
+<span class="nc" id="L1846">                .entrySet()) {</span>
+<span class="nc" id="L1847">            missingEntries.clear();</span>
+<span class="nc" id="L1848">            errMessage.setLength(0);</span>
+<span class="nc" id="L1849">            long ledgerWithMissingEntries = missingEntriesInfoOfLedgerEntry.getKey();</span>
+<span class="nc" id="L1850">            MissingEntriesInfoOfLedger missingEntriesInfoOfLedger = missingEntriesInfoOfLedgerEntry.getValue();</span>
+<span class="nc" id="L1851">            List&lt;MissingEntriesInfo&gt; missingEntriesInfoList = missingEntriesInfoOfLedger.getMissingEntriesInfoList();</span>
+<span class="nc" id="L1852">            writeQuorumSize = missingEntriesInfoOfLedger.getWriteQuorumSize();</span>
+<span class="nc" id="L1853">            ackQuorumSize = missingEntriesInfoOfLedger.getAckQuorumSize();</span>
+<span class="nc" id="L1854">            errMessage.append(&quot;Ledger : &quot; + ledgerWithMissingEntries + &quot; has following missing entries : &quot;);</span>
+<span class="nc bnc" id="L1855" title="All 2 branches missed.">            for (int listInd = 0; listInd &lt; missingEntriesInfoList.size(); listInd++) {</span>
+<span class="nc" id="L1856">                MissingEntriesInfo missingEntriesInfo = missingEntriesInfoList.get(listInd);</span>
+<span class="nc" id="L1857">                List&lt;Long&gt; unavailableEntriesList = missingEntriesInfo.getUnavailableEntriesList();</span>
+<span class="nc" id="L1858">                Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; segmentEnsemble =</span>
+<span class="nc" id="L1859">                        missingEntriesInfo.getSegmentEnsemble();</span>
+<span class="nc" id="L1860">                missingEntries.addAll(unavailableEntriesList);</span>
+<span class="nc" id="L1861">                errMessage.append(&quot;In segment starting at &quot; + segmentEnsemble.getKey() + &quot; with ensemble &quot;</span>
+<span class="nc" id="L1862">                        + segmentEnsemble.getValue() + &quot;, following entries &quot; + unavailableEntriesList</span>
+<span class="nc" id="L1863">                        + &quot; are missing in bookie: &quot; + missingEntriesInfo.getBookieMissingEntries());</span>
+<span class="nc bnc" id="L1864" title="All 2 branches missed.">                if (listInd &lt; (missingEntriesInfoList.size() - 1)) {</span>
+<span class="nc" id="L1865">                    errMessage.append(&quot;, &quot;);</span>
+                }
+            }
+<span class="nc" id="L1868">            LOG.error(errMessage.toString());</span>
+<span class="nc" id="L1869">            Set&lt;Multiset.Entry&lt;Long&gt;&gt; missingEntriesSet = missingEntries.entrySet();</span>
+<span class="nc" id="L1870">            int maxNumOfMissingReplicas = 0;</span>
+<span class="nc" id="L1871">            long entryWithMaxNumOfMissingReplicas = -1L;</span>
+<span class="nc bnc" id="L1872" title="All 2 branches missed.">            for (Multiset.Entry&lt;Long&gt; missingEntryWithCount : missingEntriesSet) {</span>
+<span class="nc bnc" id="L1873" title="All 2 branches missed.">                if (missingEntryWithCount.getCount() &gt; maxNumOfMissingReplicas) {</span>
+<span class="nc" id="L1874">                    maxNumOfMissingReplicas = missingEntryWithCount.getCount();</span>
+<span class="nc" id="L1875">                    entryWithMaxNumOfMissingReplicas = missingEntryWithCount.getElement();</span>
+                }
+<span class="nc" id="L1877">            }</span>
+<span class="nc" id="L1878">            int leastNumOfReplicasOfAnEntry = writeQuorumSize - maxNumOfMissingReplicas;</span>
+<span class="nc bnc" id="L1879" title="All 2 branches missed.">            if (leastNumOfReplicasOfAnEntry == 0) {</span>
+<span class="nc" id="L1880">                numLedgersFoundHavingNoReplicaOfAnEntry.incrementAndGet();</span>
+<span class="nc" id="L1881">                LOG.error(&quot;Ledger : {} entryId : {} is missing all replicas&quot;, ledgerWithMissingEntries,</span>
+<span class="nc" id="L1882">                        entryWithMaxNumOfMissingReplicas);</span>
+<span class="nc bnc" id="L1883" title="All 2 branches missed.">            } else if (leastNumOfReplicasOfAnEntry &lt; ackQuorumSize) {</span>
+<span class="nc" id="L1884">                numLedgersFoundHavingLessThanAQReplicasOfAnEntry.incrementAndGet();</span>
+<span class="nc" id="L1885">                LOG.error(&quot;Ledger : {} entryId : {} is having: {} replicas, less than ackQuorum num of replicas : {}&quot;,</span>
+<span class="nc" id="L1886">                        ledgerWithMissingEntries, entryWithMaxNumOfMissingReplicas, leastNumOfReplicasOfAnEntry,</span>
+<span class="nc" id="L1887">                        ackQuorumSize);</span>
+<span class="nc bnc" id="L1888" title="All 2 branches missed.">            } else if (leastNumOfReplicasOfAnEntry &lt; writeQuorumSize) {</span>
+<span class="nc" id="L1889">                numLedgersFoundHavingLessThanWQReplicasOfAnEntry.incrementAndGet();</span>
+<span class="nc" id="L1890">                LOG.error(&quot;Ledger : {} entryId : {} is having: {} replicas, less than writeQuorum num of replicas : {}&quot;,</span>
+<span class="nc" id="L1891">                        ledgerWithMissingEntries, entryWithMaxNumOfMissingReplicas, leastNumOfReplicasOfAnEntry,</span>
+<span class="nc" id="L1892">                        writeQuorumSize);</span>
+            }
+<span class="nc" id="L1894">        }</span>
+<span class="nc" id="L1895">    }</span>
+
+    private void reportLedgersWithUnavailableBookies(
+            ConcurrentHashMap&lt;Long, MissingEntriesInfoOfLedger&gt; ledgersWithUnavailableBookies) {
+<span class="nc" id="L1899">        StringBuilder errMessage = new StringBuilder();</span>
+        for (Map.Entry&lt;Long, MissingEntriesInfoOfLedger&gt; ledgerWithUnavailableBookiesInfo :
+<span class="nc bnc" id="L1901" title="All 2 branches missed.">                ledgersWithUnavailableBookies.entrySet()) {</span>
+<span class="nc" id="L1902">            errMessage.setLength(0);</span>
+<span class="nc" id="L1903">            long ledgerWithUnavailableBookies = ledgerWithUnavailableBookiesInfo.getKey();</span>
+<span class="nc" id="L1904">            List&lt;MissingEntriesInfo&gt; missingBookiesInfoList = ledgerWithUnavailableBookiesInfo.getValue()</span>
+<span class="nc" id="L1905">                    .getMissingEntriesInfoList();</span>
+<span class="nc" id="L1906">            errMessage.append(&quot;Ledger : &quot; + ledgerWithUnavailableBookies + &quot; has following unavailable bookies : &quot;);</span>
+<span class="nc bnc" id="L1907" title="All 2 branches missed.">            for (int listInd = 0; listInd &lt; missingBookiesInfoList.size(); listInd++) {</span>
+<span class="nc" id="L1908">                MissingEntriesInfo missingBookieInfo = missingBookiesInfoList.get(listInd);</span>
+<span class="nc" id="L1909">                Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; segmentEnsemble =</span>
+<span class="nc" id="L1910">                        missingBookieInfo.getSegmentEnsemble();</span>
+<span class="nc" id="L1911">                errMessage.append(&quot;In segment starting at &quot; + segmentEnsemble.getKey() + &quot; with ensemble &quot;</span>
+<span class="nc" id="L1912">                        + segmentEnsemble.getValue() + &quot;, following bookie has not responded &quot;</span>
+<span class="nc" id="L1913">                        + missingBookieInfo.getBookieMissingEntries());</span>
+<span class="nc bnc" id="L1914" title="All 2 branches missed.">                if (listInd &lt; (missingBookiesInfoList.size() - 1)) {</span>
+<span class="nc" id="L1915">                    errMessage.append(&quot;, &quot;);</span>
+                }
+            }
+<span class="nc" id="L1918">            LOG.error(errMessage.toString());</span>
+<span class="nc" id="L1919">        }</span>
+<span class="nc" id="L1920">    }</span>
+
+    boolean checkUnderReplicationForReplicasCheck(long ledgerInRange, VoidCallback mcbForThisLedgerRange) {
+        try {
+<span class="nc bnc" id="L1924" title="All 2 branches missed.">            if (ledgerUnderreplicationManager.getLedgerUnreplicationInfo(ledgerInRange) == null) {</span>
+<span class="nc" id="L1925">                return false;</span>
+            }
+            /*
+             * this ledger is marked underreplicated, so ignore it for
+             * replicasCheck.
+             */
+<span class="nc" id="L1931">            LOG.debug(&quot;Ledger: {} is marked underrreplicated, ignore this ledger for replicasCheck&quot;,</span>
+<span class="nc" id="L1932">                    ledgerInRange);</span>
+<span class="nc" id="L1933">            mcbForThisLedgerRange.processResult(BKException.Code.OK, null, null);</span>
+<span class="nc" id="L1934">            return true;</span>
+<span class="nc" id="L1935">        } catch (UnavailableException une) {</span>
+<span class="nc" id="L1936">            LOG.error(&quot;Got exception while trying to check if ledger: {} is underreplicated&quot;, ledgerInRange, une);</span>
+<span class="nc" id="L1937">            mcbForThisLedgerRange.processResult(BKException.getExceptionCode(une), null, null);</span>
+<span class="nc" id="L1938">            return true;</span>
+        }
+    }
+
+    /**
+     * Shutdown the auditor.
+     */
+    public void shutdown() {
+<span class="nc" id="L1946">        LOG.info(&quot;Shutting down auditor&quot;);</span>
+<span class="nc" id="L1947">        executor.shutdown();</span>
+        try {
+<span class="nc bnc" id="L1949" title="All 2 branches missed.">            while (!executor.awaitTermination(30, TimeUnit.SECONDS)) {</span>
+<span class="nc" id="L1950">                LOG.warn(&quot;Executor not shutting down, interrupting&quot;);</span>
+<span class="nc" id="L1951">                executor.shutdownNow();</span>
+            }
+<span class="nc bnc" id="L1953" title="All 2 branches missed.">            if (ownAdmin) {</span>
+<span class="nc" id="L1954">                admin.close();</span>
+            }
+<span class="nc bnc" id="L1956" title="All 2 branches missed.">            if (ownBkc) {</span>
+<span class="nc" id="L1957">                bkc.close();</span>
+            }
+<span class="nc" id="L1959">        } catch (InterruptedException ie) {</span>
+<span class="nc" id="L1960">            Thread.currentThread().interrupt();</span>
+<span class="nc" id="L1961">            LOG.warn(&quot;Interrupted while shutting down auditor bookie&quot;, ie);</span>
+<span class="nc" id="L1962">        } catch (BKException bke) {</span>
+<span class="nc" id="L1963">            LOG.warn(&quot;Exception while shutting down auditor bookie&quot;, bke);</span>
+<span class="nc" id="L1964">        }</span>
+<span class="nc" id="L1965">    }</span>
+
+    @Override
+    public void close() {
+<span class="nc" id="L1969">        shutdown();</span>
+<span class="nc" id="L1970">    }</span>
+
+    /**
+     * Return true if auditor is running otherwise return false.
+     *
+     * @return auditor status
+     */
+    public boolean isRunning() {
+<span class="nc bnc" id="L1978" title="All 2 branches missed.">        return !executor.isShutdown();</span>
+    }
+
+<span class="nc" id="L1981">    private final Runnable bookieCheck = new Runnable() {</span>
+            @Override
+            public void run() {
+<span class="nc bnc" id="L1984" title="All 2 branches missed.">                if (auditTask == null) {</span>
+<span class="nc" id="L1985">                    startAudit(true);</span>
+                } else {
+                    // if due to a lost bookie an audit task was scheduled,
+                    // let us not run this periodic bookie check now, if we
+                    // went ahead, we'll report under replication and the user
+                    // wanted to avoid that(with lostBookieRecoveryDelay option)
+<span class="nc" id="L1991">                    LOG.info(&quot;Audit already scheduled; skipping periodic bookie check&quot;);</span>
+                }
+<span class="nc" id="L1993">            }</span>
+        };
+
+    int getLostBookieRecoveryDelayBeforeChange() {
+<span class="nc" id="L1997">        return lostBookieRecoveryDelayBeforeChange;</span>
+    }
+
+    Future&lt;?&gt; getAuditTask() {
+<span class="nc" id="L2001">        return auditTask;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

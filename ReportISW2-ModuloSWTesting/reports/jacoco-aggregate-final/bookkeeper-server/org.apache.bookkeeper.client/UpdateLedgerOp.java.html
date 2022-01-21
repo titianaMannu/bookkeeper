@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>UpdateLedgerOp.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.client</a> &gt; <span class="el_source">UpdateLedgerOp.java</span></div><h1>UpdateLedgerOp.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.bookkeeper.client;
+
+import com.google.common.util.concurrent.RateLimiter;
+
+import java.io.IOException;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+
+import org.apache.bookkeeper.bookie.BookieShell.UpdateLedgerNotifier;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Encapsulates updating the ledger metadata operation.
+ */
+public class UpdateLedgerOp {
+
+<span class="nc" id="L51">    private static final Logger LOG = LoggerFactory.getLogger(UpdateLedgerOp.class);</span>
+    private final LedgerManager lm;
+    private final BookKeeperAdmin admin;
+
+<span class="nc" id="L55">    public UpdateLedgerOp(final BookKeeper bkc, final BookKeeperAdmin admin) {</span>
+<span class="nc" id="L56">        this.lm = bkc.getLedgerManager();</span>
+<span class="nc" id="L57">        this.admin = admin;</span>
+<span class="nc" id="L58">    }</span>
+
+    /**
+     * Update the bookie id present in the ledger metadata.
+     *
+     * @param oldBookieId
+     *            current bookie id
+     * @param newBookieId
+     *            new bookie id
+     * @param rate
+     *            number of ledgers updating per second (default 5 per sec)
+     * @param limit
+     *            maximum number of ledgers to update (default: no limit). Stop
+     *            update if reaching limit
+     * @param progressable
+     *            report progress of the ledger updates
+     * @throws IOException
+     *             if there is an error when updating bookie id in ledger
+     *             metadata
+     */
+    public void updateBookieIdInLedgers(final BookieId oldBookieId, final BookieId newBookieId,
+                                        final int rate, int maxOutstandingReads, final int limit,
+                                        final UpdateLedgerNotifier progressable)
+            throws IOException, InterruptedException {
+
+<span class="nc" id="L83">        final AtomicInteger issuedLedgerCnt = new AtomicInteger();</span>
+<span class="nc" id="L84">        final AtomicInteger updatedLedgerCnt = new AtomicInteger();</span>
+<span class="nc" id="L85">        final CompletableFuture&lt;Void&gt; finalPromise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L86">        final Set&lt;CompletableFuture&lt;?&gt;&gt; outstanding =</span>
+<span class="nc" id="L87">            Collections.newSetFromMap(new ConcurrentHashMap&lt;CompletableFuture&lt;?&gt;, Boolean&gt;());</span>
+<span class="nc" id="L88">        final RateLimiter throttler = RateLimiter.create(rate);</span>
+<span class="nc" id="L89">        final Semaphore outstandingReads = new Semaphore(maxOutstandingReads);</span>
+<span class="nc" id="L90">        final Iterator&lt;Long&gt; ledgerItr = admin.listLedgers().iterator();</span>
+
+        // iterate through all the ledgers
+<span class="nc bnc" id="L93" title="All 6 branches missed.">        while (ledgerItr.hasNext() &amp;&amp; !finalPromise.isDone()</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">               &amp;&amp; (limit == Integer.MIN_VALUE || issuedLedgerCnt.get() &lt; limit)) {</span>
+            // semaphore to control reads according to update throttling
+<span class="nc" id="L96">            outstandingReads.acquire();</span>
+
+<span class="nc" id="L98">            final long ledgerId = ledgerItr.next();</span>
+<span class="nc" id="L99">            issuedLedgerCnt.incrementAndGet();</span>
+
+<span class="nc" id="L101">            CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; writePromise = lm.readLedgerMetadata(ledgerId)</span>
+<span class="nc" id="L102">                .thenCompose((readMetadata) -&gt; {</span>
+<span class="nc" id="L103">                    AtomicReference&lt;Versioned&lt;LedgerMetadata&gt;&gt; ref = new AtomicReference&lt;&gt;(readMetadata);</span>
+<span class="nc" id="L104">                    return new MetadataUpdateLoop(</span>
+                            lm, ledgerId,
+                            ref::get,
+                            (metadata) -&gt; {
+<span class="nc" id="L108">                                return metadata.getAllEnsembles().values().stream()</span>
+<span class="nc" id="L109">                                    .flatMap(Collection::stream)</span>
+<span class="nc" id="L110">                                    .anyMatch(b -&gt; b.equals(oldBookieId));</span>
+                            },
+                            (metadata) -&gt; {
+<span class="nc" id="L113">                                return replaceBookieInEnsembles(metadata, oldBookieId, newBookieId);</span>
+                            },
+<span class="nc" id="L115">                            ref::compareAndSet, throttler).run();</span>
+                });
+
+<span class="nc" id="L118">            outstanding.add(writePromise);</span>
+<span class="nc" id="L119">            writePromise.whenComplete((metadata, ex) -&gt; {</span>
+<span class="nc bnc" id="L120" title="All 4 branches missed.">                        if (ex != null</span>
+                            &amp;&amp; !(ex instanceof BKException.BKNoSuchLedgerExistsOnMetadataServerException)) {
+<span class="nc" id="L122">                            String error = String.format(&quot;Failed to update ledger metadata %s, replacing %s with %s&quot;,</span>
+<span class="nc" id="L123">                                                         ledgerId, oldBookieId, newBookieId);</span>
+<span class="nc" id="L124">                            LOG.error(error, ex);</span>
+<span class="nc" id="L125">                            finalPromise.completeExceptionally(new IOException(error, ex));</span>
+<span class="nc" id="L126">                        } else {</span>
+<span class="nc" id="L127">                            LOG.info(&quot;Updated ledger {} metadata, replacing {} with {}&quot;,</span>
+<span class="nc" id="L128">                                     ledgerId, oldBookieId, newBookieId);</span>
+
+<span class="nc" id="L130">                            updatedLedgerCnt.incrementAndGet();</span>
+<span class="nc" id="L131">                            progressable.progress(updatedLedgerCnt.get(), issuedLedgerCnt.get());</span>
+                        }
+<span class="nc" id="L133">                        outstandingReads.release();</span>
+<span class="nc" id="L134">                        outstanding.remove(writePromise);</span>
+<span class="nc" id="L135">                    });</span>
+<span class="nc" id="L136">        }</span>
+
+<span class="nc" id="L138">        CompletableFuture.allOf(outstanding.stream().toArray(CompletableFuture[]::new))</span>
+<span class="nc" id="L139">            .whenComplete((res, ex) -&gt; {</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">                    if (ex != null) {</span>
+<span class="nc" id="L141">                        finalPromise.completeExceptionally(ex);</span>
+                    } else {
+<span class="nc" id="L143">                        finalPromise.complete(null);</span>
+                    }
+<span class="nc" id="L145">                });</span>
+
+        try {
+<span class="nc" id="L148">            finalPromise.get();</span>
+<span class="nc" id="L149">            LOG.info(&quot;Total number of ledgers issued={} updated={}&quot;,</span>
+<span class="nc" id="L150">                     issuedLedgerCnt.get(), updatedLedgerCnt.get());</span>
+<span class="nc" id="L151">        } catch (ExecutionException e) {</span>
+<span class="nc" id="L152">            String error = String.format(&quot;Error waiting for ledger metadata updates to complete (replacing %s with %s)&quot;,</span>
+                                         oldBookieId, newBookieId);
+<span class="nc" id="L154">            LOG.info(error, e);</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">            if (e.getCause() instanceof IOException) {</span>
+<span class="nc" id="L156">                throw (IOException) e.getCause();</span>
+            } else {
+<span class="nc" id="L158">                throw new IOException(error, e);</span>
+            }
+<span class="nc" id="L160">        }</span>
+<span class="nc" id="L161">    }</span>
+
+    private static LedgerMetadata replaceBookieInEnsembles(LedgerMetadata metadata,
+                                                           BookieId oldBookieId,
+                                                           BookieId newBookieId) {
+<span class="nc" id="L166">        LedgerMetadataBuilder builder = LedgerMetadataBuilder.from(metadata);</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        for (Map.Entry&lt;Long, ? extends List&lt;BookieId&gt;&gt; e : metadata.getAllEnsembles().entrySet()) {</span>
+<span class="nc" id="L168">            List&lt;BookieId&gt; newEnsemble = e.getValue().stream()</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">                .map(b -&gt; b.equals(oldBookieId) ? newBookieId : b)</span>
+<span class="nc" id="L170">                .collect(Collectors.toList());</span>
+<span class="nc" id="L171">            builder.replaceEnsembleEntry(e.getKey(), newEnsemble);</span>
+<span class="nc" id="L172">        }</span>
+
+<span class="nc" id="L174">        return builder.build();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ReadEntryProcessor.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto</a> &gt; <span class="el_source">ReadEntryProcessor.java</span></div><h1>ReadEntryProcessor.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.proto;
+
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.SettableFuture;
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.Channel;
+import io.netty.util.Recycler;
+import io.netty.util.ReferenceCountUtil;
+
+import java.io.IOException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+import org.apache.bookkeeper.bookie.Bookie;
+import org.apache.bookkeeper.bookie.BookieException;
+import org.apache.bookkeeper.proto.BookieProtocol.ReadRequest;
+import org.apache.bookkeeper.stats.OpStatsLogger;
+import org.apache.bookkeeper.util.MathUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+
+class ReadEntryProcessor extends PacketProcessorBase&lt;ReadRequest&gt; {
+<span class="nc" id="L45">    private static final Logger LOG = LoggerFactory.getLogger(ReadEntryProcessor.class);</span>
+
+    private ExecutorService fenceThreadPool;
+
+    public static ReadEntryProcessor create(ReadRequest request,
+                                            Channel channel,
+                                            BookieRequestProcessor requestProcessor,
+                                            ExecutorService fenceThreadPool) {
+<span class="nc" id="L53">        ReadEntryProcessor rep = RECYCLER.get();</span>
+<span class="nc" id="L54">        rep.init(request, channel, requestProcessor);</span>
+<span class="nc" id="L55">        rep.fenceThreadPool = fenceThreadPool;</span>
+<span class="nc" id="L56">        return rep;</span>
+    }
+
+    @Override
+    protected void processPacket() {
+<span class="nc bnc" id="L61" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L62">            LOG.debug(&quot;Received new read request: {}&quot;, request);</span>
+        }
+<span class="nc" id="L64">        int errorCode = BookieProtocol.EOK;</span>
+<span class="nc" id="L65">        long startTimeNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L66">        ByteBuf data = null;</span>
+        try {
+<span class="nc" id="L68">            SettableFuture&lt;Boolean&gt; fenceResult = null;</span>
+<span class="nc bnc" id="L69" title="All 2 branches missed.">            if (request.isFencing()) {</span>
+<span class="nc" id="L70">                LOG.warn(&quot;Ledger: {}  fenced by: {}&quot;, request.getLedgerId(), channel.remoteAddress());</span>
+
+<span class="nc bnc" id="L72" title="All 2 branches missed.">                if (request.hasMasterKey()) {</span>
+<span class="nc" id="L73">                    fenceResult = requestProcessor.getBookie().fenceLedger(request.getLedgerId(),</span>
+<span class="nc" id="L74">                            request.getMasterKey());</span>
+                } else {
+<span class="nc" id="L76">                    LOG.error(&quot;Password not provided, Not safe to fence {}&quot;, request.getLedgerId());</span>
+<span class="nc" id="L77">                    throw BookieException.create(BookieException.Code.UnauthorizedAccessException);</span>
+                }
+            }
+<span class="nc" id="L80">            data = requestProcessor.getBookie().readEntry(request.getLedgerId(), request.getEntryId());</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L82">                LOG.debug(&quot;##### Read entry ##### {} -- ref-count: {}&quot;, data.readableBytes(), data.refCnt());</span>
+            }
+<span class="nc bnc" id="L84" title="All 2 branches missed.">            if (fenceResult != null) {</span>
+<span class="nc" id="L85">                handleReadResultForFenceRead(fenceResult, data, startTimeNanos);</span>
+<span class="nc" id="L86">                return;</span>
+            }
+<span class="nc" id="L88">        } catch (Bookie.NoLedgerException e) {</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L90">                LOG.debug(&quot;Error reading {}&quot;, request, e);</span>
+            }
+<span class="nc" id="L92">            errorCode = BookieProtocol.ENOLEDGER;</span>
+<span class="nc" id="L93">        } catch (Bookie.NoEntryException e) {</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L95">                LOG.debug(&quot;Error reading {}&quot;, request, e);</span>
+            }
+<span class="nc" id="L97">            errorCode = BookieProtocol.ENOENTRY;</span>
+<span class="nc" id="L98">        } catch (IOException e) {</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L100">                LOG.debug(&quot;Error reading {}&quot;, request, e);</span>
+            }
+<span class="nc" id="L102">            errorCode = BookieProtocol.EIO;</span>
+<span class="nc" id="L103">        } catch (BookieException e) {</span>
+<span class="nc" id="L104">            LOG.error(&quot;Unauthorized access to ledger {}&quot;, request.getLedgerId(), e);</span>
+<span class="nc" id="L105">            errorCode = BookieProtocol.EUA;</span>
+<span class="nc" id="L106">        } catch (Throwable t) {</span>
+<span class="nc" id="L107">            LOG.error(&quot;Unexpected exception reading at {}:{} : {}&quot;, request.getLedgerId(), request.getEntryId(),</span>
+<span class="nc" id="L108">                      t.getMessage(), t);</span>
+<span class="nc" id="L109">            errorCode = BookieProtocol.EBADREQ;</span>
+<span class="nc" id="L110">        }</span>
+
+<span class="nc bnc" id="L112" title="All 2 branches missed.">        if (LOG.isTraceEnabled()) {</span>
+<span class="nc" id="L113">            LOG.trace(&quot;Read entry rc = {} for {}&quot;, errorCode, request);</span>
+        }
+<span class="nc" id="L115">        sendResponse(data, errorCode, startTimeNanos);</span>
+<span class="nc" id="L116">    }</span>
+
+    private void sendResponse(ByteBuf data, int errorCode, long startTimeNanos) {
+<span class="nc" id="L119">        final RequestStats stats = requestProcessor.getRequestStats();</span>
+<span class="nc" id="L120">        final OpStatsLogger logger = stats.getReadEntryStats();</span>
+        BookieProtocol.Response response;
+<span class="nc bnc" id="L122" title="All 2 branches missed.">        if (errorCode == BookieProtocol.EOK) {</span>
+<span class="nc" id="L123">            logger.registerSuccessfulEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L124">            response = ResponseBuilder.buildReadResponse(data, request);</span>
+        } else {
+<span class="nc bnc" id="L126" title="All 2 branches missed.">            if (data != null) {</span>
+<span class="nc" id="L127">                ReferenceCountUtil.release(data);</span>
+            }
+<span class="nc" id="L129">            logger.registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L130">            response = ResponseBuilder.buildErrorResponse(errorCode, request);</span>
+        }
+<span class="nc" id="L132">        sendResponse(errorCode, response, stats.getReadRequestStats());</span>
+<span class="nc" id="L133">        recycle();</span>
+<span class="nc" id="L134">    }</span>
+
+    private void sendFenceResponse(Boolean result, ByteBuf data, long startTimeNanos) {
+<span class="nc bnc" id="L137" title="All 4 branches missed.">        final int retCode = result != null &amp;&amp; result ? BookieProtocol.EOK : BookieProtocol.EIO;</span>
+<span class="nc" id="L138">        sendResponse(data, retCode, startTimeNanos);</span>
+<span class="nc" id="L139">    }</span>
+
+    private void handleReadResultForFenceRead(ListenableFuture&lt;Boolean&gt; fenceResult,
+                                              ByteBuf data,
+                                              long startTimeNanos) {
+<span class="nc bnc" id="L144" title="All 2 branches missed.">        if (null != fenceThreadPool) {</span>
+<span class="nc" id="L145">            Futures.addCallback(fenceResult, new FutureCallback&lt;Boolean&gt;() {</span>
+                @Override
+                public void onSuccess(Boolean result) {
+<span class="nc" id="L148">                    sendFenceResponse(result, data, startTimeNanos);</span>
+<span class="nc" id="L149">                }</span>
+
+                @Override
+                public void onFailure(Throwable t) {
+<span class="nc" id="L153">                    LOG.error(&quot;Error processing fence request&quot;, t);</span>
+                    // if failed to fence, fail the read request to make it retry.
+<span class="nc" id="L155">                    sendResponse(data, BookieProtocol.EIO, startTimeNanos);</span>
+<span class="nc" id="L156">                }</span>
+            }, fenceThreadPool);
+        } else {
+            try {
+<span class="nc" id="L160">                Boolean fenced = fenceResult.get(1000, TimeUnit.MILLISECONDS);</span>
+<span class="nc" id="L161">                sendFenceResponse(fenced, data, startTimeNanos);</span>
+<span class="nc" id="L162">                return;</span>
+<span class="nc" id="L163">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L164">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L165">                LOG.error(&quot;Interrupting fence read entry {}&quot;, request, ie);</span>
+<span class="nc" id="L166">            } catch (ExecutionException ee) {</span>
+<span class="nc" id="L167">                LOG.error(&quot;Failed to fence read entry {}&quot;, request, ee.getCause());</span>
+<span class="nc" id="L168">            } catch (TimeoutException te) {</span>
+<span class="nc" id="L169">                LOG.error(&quot;Timeout to fence read entry {}&quot;, request, te);</span>
+<span class="nc" id="L170">            }</span>
+<span class="nc" id="L171">            sendResponse(data, BookieProtocol.EIO, startTimeNanos);</span>
+        }
+<span class="nc" id="L173">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc" id="L177">        return String.format(&quot;ReadEntry(%d, %d)&quot;, request.getLedgerId(), request.getEntryId());</span>
+    }
+
+    private void recycle() {
+<span class="nc" id="L181">        super.reset();</span>
+<span class="nc" id="L182">        this.recyclerHandle.recycle(this);</span>
+<span class="nc" id="L183">    }</span>
+
+    private final Recycler.Handle&lt;ReadEntryProcessor&gt; recyclerHandle;
+
+<span class="nc" id="L187">    private ReadEntryProcessor(Recycler.Handle&lt;ReadEntryProcessor&gt; recyclerHandle) {</span>
+<span class="nc" id="L188">        this.recyclerHandle = recyclerHandle;</span>
+<span class="nc" id="L189">    }</span>
+
+<span class="nc" id="L191">    private static final Recycler&lt;ReadEntryProcessor&gt; RECYCLER = new Recycler&lt;ReadEntryProcessor&gt;() {</span>
+        @Override
+        protected ReadEntryProcessor newObject(Recycler.Handle&lt;ReadEntryProcessor&gt; handle) {
+<span class="nc" id="L194">            return new ReadEntryProcessor(handle);</span>
+        }
+    };
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

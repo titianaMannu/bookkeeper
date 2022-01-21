@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>GetBookieInfoProcessorV3.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.proto</a> &gt; <span class="el_source">GetBookieInfoProcessorV3.java</span></div><h1>GetBookieInfoProcessorV3.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.proto;
+
+import io.netty.channel.Channel;
+
+import java.io.IOException;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.bookkeeper.proto.BookkeeperProtocol.GetBookieInfoRequest;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.GetBookieInfoResponse;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.Request;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.Response;
+import org.apache.bookkeeper.proto.BookkeeperProtocol.StatusCode;
+import org.apache.bookkeeper.util.MathUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * A processor class for v3 bookie metadata packets.
+ */
+public class GetBookieInfoProcessorV3 extends PacketProcessorBaseV3 implements Runnable {
+<span class="nc" id="L41">    private static final Logger LOG = LoggerFactory.getLogger(GetBookieInfoProcessorV3.class);</span>
+
+    public GetBookieInfoProcessorV3(Request request, Channel channel,
+                                     BookieRequestProcessor requestProcessor) {
+<span class="nc" id="L45">        super(request, channel, requestProcessor);</span>
+<span class="nc" id="L46">    }</span>
+
+    private GetBookieInfoResponse getGetBookieInfoResponse() {
+<span class="nc" id="L49">        long startTimeNanos = MathUtils.nowInNano();</span>
+<span class="nc" id="L50">        GetBookieInfoRequest getBookieInfoRequest = request.getGetBookieInfoRequest();</span>
+<span class="nc" id="L51">        long requested = getBookieInfoRequest.getRequested();</span>
+
+<span class="nc" id="L53">        GetBookieInfoResponse.Builder getBookieInfoResponse = GetBookieInfoResponse.newBuilder();</span>
+
+<span class="nc bnc" id="L55" title="All 2 branches missed.">        if (!isVersionCompatible()) {</span>
+<span class="nc" id="L56">            getBookieInfoResponse.setStatus(StatusCode.EBADVERSION);</span>
+<span class="nc" id="L57">            requestProcessor.getRequestStats().getGetBookieInfoStats()</span>
+<span class="nc" id="L58">                .registerFailedEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L59">            return getBookieInfoResponse.build();</span>
+        }
+
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L63">            LOG.debug(&quot;Received new getBookieInfo request: {}&quot;, request);</span>
+        }
+<span class="nc" id="L65">        StatusCode status = StatusCode.EOK;</span>
+<span class="nc" id="L66">        long freeDiskSpace = 0L, totalDiskSpace = 0L;</span>
+        try {
+<span class="nc bnc" id="L68" title="All 2 branches missed.">            if ((requested &amp; GetBookieInfoRequest.Flags.FREE_DISK_SPACE_VALUE) != 0) {</span>
+<span class="nc" id="L69">                freeDiskSpace = requestProcessor.getBookie().getTotalFreeSpace();</span>
+<span class="nc" id="L70">                getBookieInfoResponse.setFreeDiskSpace(freeDiskSpace);</span>
+            }
+<span class="nc bnc" id="L72" title="All 2 branches missed.">            if ((requested &amp; GetBookieInfoRequest.Flags.TOTAL_DISK_CAPACITY_VALUE) != 0) {</span>
+<span class="nc" id="L73">                totalDiskSpace = requestProcessor.getBookie().getTotalDiskSpace();</span>
+<span class="nc" id="L74">                getBookieInfoResponse.setTotalDiskCapacity(totalDiskSpace);</span>
+            }
+<span class="nc" id="L76">            LOG.debug(&quot;FreeDiskSpace info is &quot; + freeDiskSpace + &quot; totalDiskSpace is: &quot; + totalDiskSpace);</span>
+<span class="nc" id="L77">        } catch (IOException e) {</span>
+<span class="nc" id="L78">            status = StatusCode.EIO;</span>
+<span class="nc" id="L79">            LOG.error(&quot;IOException while getting  freespace/totalspace&quot;, e);</span>
+<span class="nc" id="L80">        }</span>
+
+<span class="nc" id="L82">        getBookieInfoResponse.setStatus(status);</span>
+<span class="nc" id="L83">        requestProcessor.getRequestStats().getGetBookieInfoStats()</span>
+<span class="nc" id="L84">            .registerSuccessfulEvent(MathUtils.elapsedNanos(startTimeNanos), TimeUnit.NANOSECONDS);</span>
+<span class="nc" id="L85">        return getBookieInfoResponse.build();</span>
+    }
+
+    @Override
+    public void safeRun() {
+<span class="nc" id="L90">        GetBookieInfoResponse getBookieInfoResponse = getGetBookieInfoResponse();</span>
+<span class="nc" id="L91">        sendResponse(getBookieInfoResponse);</span>
+<span class="nc" id="L92">    }</span>
+
+    private void sendResponse(GetBookieInfoResponse getBookieInfoResponse) {
+<span class="nc" id="L95">        Response.Builder response = Response.newBuilder()</span>
+<span class="nc" id="L96">                .setHeader(getHeader())</span>
+<span class="nc" id="L97">                .setStatus(getBookieInfoResponse.getStatus())</span>
+<span class="nc" id="L98">                .setGetBookieInfoResponse(getBookieInfoResponse);</span>
+<span class="nc" id="L99">        sendResponse(response.getStatus(),</span>
+<span class="nc" id="L100">                     response.build(),</span>
+<span class="nc" id="L101">                     requestProcessor.getRequestStats().getGetBookieInfoRequestStats());</span>
+<span class="nc" id="L102">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>InterleavedStorageRegenerateIndexOp.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">InterleavedStorageRegenerateIndexOp.java</span></div><h1>InterleavedStorageRegenerateIndexOp.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+package org.apache.bookkeeper.bookie;
+
+import io.netty.buffer.ByteBuf;
+
+import java.io.IOException;
+import java.security.NoSuchAlgorithmException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.PrimitiveIterator.OfLong;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.bookkeeper.bookie.EntryLogger.EntryLogScanner;
+import org.apache.bookkeeper.common.util.Watcher;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.proto.checksum.DigestManager;
+import org.apache.bookkeeper.stats.NullStatsLogger;
+import org.apache.bookkeeper.util.DiskChecker;
+import org.apache.bookkeeper.util.SnapshotMap;
+import org.apache.commons.lang.time.DurationFormatUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Scan all entries in the entry log and rebuild the index file for one ledger.
+ */
+public class InterleavedStorageRegenerateIndexOp {
+<span class="nc" id="L48">    private static final Logger LOG = LoggerFactory.getLogger(InterleavedStorageRegenerateIndexOp.class);</span>
+
+    private final ServerConfiguration conf;
+    private final Set&lt;Long&gt; ledgerIds;
+    private final byte[] masterKey;
+
+    public InterleavedStorageRegenerateIndexOp(ServerConfiguration conf, Set&lt;Long&gt; ledgerIds, byte[] password)
+<span class="nc" id="L55">            throws NoSuchAlgorithmException {</span>
+<span class="nc" id="L56">        this.conf = conf;</span>
+<span class="nc" id="L57">        this.ledgerIds = ledgerIds;</span>
+<span class="nc" id="L58">        this.masterKey = DigestManager.generateMasterKey(password);</span>
+<span class="nc" id="L59">    }</span>
+
+<span class="nc" id="L61">    static class RecoveryStats {</span>
+<span class="nc" id="L62">        long firstEntry = Long.MAX_VALUE;</span>
+<span class="nc" id="L63">        long lastEntry = Long.MIN_VALUE;</span>
+<span class="nc" id="L64">        long numEntries = 0;</span>
+
+        void registerEntry(long entryId) {
+<span class="nc" id="L67">            numEntries++;</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">            if (entryId &lt; firstEntry) {</span>
+<span class="nc" id="L69">                firstEntry = entryId;</span>
+            }
+<span class="nc bnc" id="L71" title="All 2 branches missed.">            if (entryId &gt; lastEntry) {</span>
+<span class="nc" id="L72">                lastEntry = entryId;</span>
+            }
+<span class="nc" id="L74">        }</span>
+
+        long getNumEntries() {
+<span class="nc" id="L77">            return numEntries;</span>
+        }
+
+        long getFirstEntry() {
+<span class="nc" id="L81">            return firstEntry;</span>
+        }
+
+        long getLastEntry() {
+<span class="nc" id="L85">            return lastEntry;</span>
+        }
+    }
+
+    public void initiate(boolean dryRun) throws IOException {
+<span class="nc" id="L90">        LOG.info(&quot;Starting index rebuilding&quot;);</span>
+
+<span class="nc" id="L92">        DiskChecker diskChecker = Bookie.createDiskChecker(conf);</span>
+<span class="nc" id="L93">        LedgerDirsManager ledgerDirsManager = Bookie.createLedgerDirsManager(</span>
+                conf, diskChecker, NullStatsLogger.INSTANCE);
+<span class="nc" id="L95">        LedgerDirsManager indexDirsManager = Bookie.createIndexDirsManager(</span>
+                conf, diskChecker,  NullStatsLogger.INSTANCE, ledgerDirsManager);
+<span class="nc" id="L97">        EntryLogger entryLogger = new EntryLogger(conf, ledgerDirsManager);</span>
+        final LedgerCache ledgerCache;
+<span class="nc bnc" id="L99" title="All 2 branches missed.">        if (dryRun) {</span>
+<span class="nc" id="L100">            ledgerCache = new DryRunLedgerCache();</span>
+        } else {
+<span class="nc" id="L102">            ledgerCache = new LedgerCacheImpl(conf, new SnapshotMap&lt;Long, Boolean&gt;(),</span>
+                                              indexDirsManager, NullStatsLogger.INSTANCE);
+        }
+
+<span class="nc" id="L106">        Set&lt;Long&gt; entryLogs = entryLogger.getEntryLogsSet();</span>
+
+<span class="nc" id="L108">        int totalEntryLogs = entryLogs.size();</span>
+<span class="nc" id="L109">        int completedEntryLogs = 0;</span>
+<span class="nc" id="L110">        long startTime = System.nanoTime();</span>
+
+<span class="nc" id="L112">        LOG.info(&quot;Scanning {} entry logs&quot;, totalEntryLogs);</span>
+
+<span class="nc" id="L114">        Map&lt;Long, RecoveryStats&gt; stats = new HashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">        for (long entryLogId : entryLogs) {</span>
+<span class="nc" id="L116">            LOG.info(&quot;Scanning {}&quot;, entryLogId);</span>
+<span class="nc" id="L117">            entryLogger.scanEntryLog(entryLogId, new EntryLogScanner() {</span>
+                @Override
+                public void process(long ledgerId, long offset, ByteBuf entry) throws IOException {
+<span class="nc" id="L120">                    long entryId = entry.getLong(8);</span>
+
+<span class="nc" id="L122">                    stats.computeIfAbsent(ledgerId, (ignore) -&gt; new RecoveryStats()).registerEntry(entryId);</span>
+
+                    // Actual location indexed is pointing past the entry size
+<span class="nc" id="L125">                    long location = (entryLogId &lt;&lt; 32L) | (offset + 4);</span>
+
+<span class="nc bnc" id="L127" title="All 2 branches missed.">                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L128">                        LOG.debug(&quot;Rebuilding {}:{} at location {} / {}&quot;, ledgerId, entryId, location &gt;&gt; 32,</span>
+<span class="nc" id="L129">                                location &amp; (Integer.MAX_VALUE - 1));</span>
+                    }
+
+<span class="nc bnc" id="L132" title="All 2 branches missed.">                    if (!ledgerCache.ledgerExists(ledgerId)) {</span>
+<span class="nc" id="L133">                        ledgerCache.setMasterKey(ledgerId, masterKey);</span>
+<span class="nc" id="L134">                        ledgerCache.setFenced(ledgerId);</span>
+                    }
+<span class="nc" id="L136">                    ledgerCache.putEntryOffset(ledgerId, entryId, location);</span>
+<span class="nc" id="L137">                }</span>
+
+                @Override
+                public boolean accept(long ledgerId) {
+<span class="nc" id="L141">                    return ledgerIds.contains(ledgerId);</span>
+                }
+            });
+
+<span class="nc" id="L145">            ledgerCache.flushLedger(true);</span>
+
+<span class="nc" id="L147">            ++completedEntryLogs;</span>
+<span class="nc" id="L148">            LOG.info(&quot;Completed scanning of log {}.log -- {} / {}&quot;, Long.toHexString(entryLogId), completedEntryLogs,</span>
+<span class="nc" id="L149">                    totalEntryLogs);</span>
+<span class="nc" id="L150">        }</span>
+
+<span class="nc" id="L152">        LOG.info(&quot;Rebuilding indices done&quot;);</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        for (long ledgerId : ledgerIds) {</span>
+<span class="nc" id="L154">            RecoveryStats ledgerStats = stats.get(ledgerId);</span>
+<span class="nc bnc" id="L155" title="All 4 branches missed.">            if (ledgerStats == null || ledgerStats.getNumEntries() == 0) {</span>
+<span class="nc" id="L156">                LOG.info(&quot; {} - No entries found&quot;, ledgerId);</span>
+            } else {
+<span class="nc" id="L158">                LOG.info(&quot; {} - Found {} entries, from {} to {}&quot;, ledgerId,</span>
+<span class="nc" id="L159">                         ledgerStats.getNumEntries(), ledgerStats.getFirstEntry(), ledgerStats.getLastEntry());</span>
+            }
+<span class="nc" id="L161">        }</span>
+<span class="nc" id="L162">        LOG.info(&quot;Total time: {}&quot;, DurationFormatUtils.formatDurationHMS(</span>
+<span class="nc" id="L163">                         TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime)));</span>
+<span class="nc" id="L164">    }</span>
+
+
+<span class="nc" id="L167">    static class DryRunLedgerCache implements LedgerCache {</span>
+        @Override
+        public void close() {
+<span class="nc" id="L170">        }</span>
+        @Override
+        public boolean setFenced(long ledgerId) throws IOException {
+<span class="nc" id="L173">            return false;</span>
+        }
+        @Override
+        public boolean isFenced(long ledgerId) throws IOException {
+<span class="nc" id="L177">            throw new UnsupportedOperationException();</span>
+        }
+        @Override
+        public void setMasterKey(long ledgerId, byte[] masterKey) throws IOException {
+<span class="nc" id="L181">        }</span>
+        @Override
+        public byte[] readMasterKey(long ledgerId) throws IOException, BookieException {
+<span class="nc" id="L184">            throw new UnsupportedOperationException();</span>
+        }
+        @Override
+        public boolean ledgerExists(long ledgerId) throws IOException {
+<span class="nc" id="L188">            return false;</span>
+        }
+        @Override
+        public void putEntryOffset(long ledger, long entry, long offset) throws IOException {
+<span class="nc" id="L192">        }</span>
+        @Override
+        public long getEntryOffset(long ledger, long entry) throws IOException {
+<span class="nc" id="L195">            throw new UnsupportedOperationException();</span>
+        }
+        @Override
+        public void flushLedger(boolean doAll) throws IOException {
+<span class="nc" id="L199">        }</span>
+        @Override
+        public long getLastEntry(long ledgerId) throws IOException {
+<span class="nc" id="L202">            throw new UnsupportedOperationException();</span>
+        }
+
+        @Override
+        public Long getLastAddConfirmed(long ledgerId) throws IOException {
+<span class="nc" id="L207">            throw new UnsupportedOperationException();</span>
+        }
+        @Override
+        public long updateLastAddConfirmed(long ledgerId, long lac) throws IOException {
+<span class="nc" id="L211">            throw new UnsupportedOperationException();</span>
+        }
+        @Override
+        public boolean waitForLastAddConfirmedUpdate(long ledgerId,
+                                                     long previousLAC,
+                                                     Watcher&lt;LastAddConfirmedUpdateNotification&gt; watcher)
+                throws IOException {
+<span class="nc" id="L218">            throw new UnsupportedOperationException();</span>
+        }
+        @Override
+        public void cancelWaitForLastAddConfirmedUpdate(long ledgerId,
+                                                        Watcher&lt;LastAddConfirmedUpdateNotification&gt; watcher)
+                throws IOException {
+<span class="nc" id="L224">            throw new UnsupportedOperationException();</span>
+        }
+        @Override
+        public void deleteLedger(long ledgerId) throws IOException {
+<span class="nc" id="L228">        }</span>
+        @Override
+        public void setExplicitLac(long ledgerId, ByteBuf lac) throws IOException {
+<span class="nc" id="L231">        }</span>
+        @Override
+        public ByteBuf getExplicitLac(long ledgerId) {
+<span class="nc" id="L234">            throw new UnsupportedOperationException();</span>
+        }
+        @Override
+        public PageEntriesIterable listEntries(long ledgerId) throws IOException {
+<span class="nc" id="L238">            throw new UnsupportedOperationException();</span>
+        }
+        @Override
+        public LedgerIndexMetadata readLedgerIndexMetadata(long ledgerId) throws IOException {
+<span class="nc" id="L242">            throw new UnsupportedOperationException();</span>
+        }
+        @Override
+        public OfLong getEntriesIterator(long ledgerId) throws IOException {
+<span class="nc" id="L246">            throw new UnsupportedOperationException();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

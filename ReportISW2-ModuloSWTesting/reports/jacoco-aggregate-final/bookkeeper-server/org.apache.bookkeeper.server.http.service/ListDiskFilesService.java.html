@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ListDiskFilesService.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.server.http.service</a> &gt; <span class="el_source">ListDiskFilesService.java</span></div><h1>ListDiskFilesService.java</h1><pre class="source lang-java linenums">/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.bookkeeper.server.http.service;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.bookkeeper.bookie.BookieShell.listFilesAndSort;
+
+import com.google.common.collect.Maps;
+
+import java.io.File;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.bookkeeper.common.util.JsonUtil;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.http.HttpServer;
+import org.apache.bookkeeper.http.service.HttpEndpointService;
+import org.apache.bookkeeper.http.service.HttpServiceRequest;
+import org.apache.bookkeeper.http.service.HttpServiceResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * HttpEndpointService that handle Bookkeeper list disk files related http request.
+ *
+ * &lt;p&gt;The GET method will list all bookie files of type journal|entrylog|index in this bookie.
+ * The output would be like this:
+ *  {
+ *    &quot;journal files&quot; : &quot;filename1 \t ...&quot;,
+ *    &quot;entrylog files&quot; : &quot;filename1 \t ...&quot;,
+ *    &quot;index files&quot; : &quot;filename1 \t ...&quot;
+ *  }
+ */
+public class ListDiskFilesService implements HttpEndpointService {
+
+<span class="nc" id="L52">    static final Logger LOG = LoggerFactory.getLogger(ListDiskFilesService.class);</span>
+
+    protected ServerConfiguration conf;
+
+<span class="nc" id="L56">    public ListDiskFilesService(ServerConfiguration conf) {</span>
+<span class="nc" id="L57">        checkNotNull(conf);</span>
+<span class="nc" id="L58">        this.conf = conf;</span>
+<span class="nc" id="L59">    }</span>
+
+    @Override
+    public HttpServiceResponse handle(HttpServiceRequest request) throws Exception {
+<span class="nc" id="L63">        HttpServiceResponse response = new HttpServiceResponse();</span>
+<span class="nc" id="L64">        Map&lt;String, String&gt; params = request.getParams();</span>
+
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        if (HttpServer.Method.GET == request.getMethod()) {</span>
+            /**
+             * output:
+             *  {
+             *    &quot;journal files&quot; : &quot;filename \t ...&quot;,
+             *    &quot;entrylog files&quot; : &quot;filename \t ...&quot;,
+             *    &quot;index files&quot; : &quot;filename \t ...&quot;
+             *  }
+             */
+<span class="nc" id="L75">            Map&lt;String, String&gt; output = Maps.newHashMap();</span>
+
+<span class="nc bnc" id="L77" title="All 2 branches missed.">            boolean journal = params != null</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">                &amp;&amp; params.containsKey(&quot;file_type&quot;)</span>
+<span class="nc bnc" id="L79" title="All 2 branches missed.">                &amp;&amp; params.get(&quot;file_type&quot;).equals(&quot;journal&quot;);</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">            boolean entrylog = params != null</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">                &amp;&amp; params.containsKey(&quot;file_type&quot;)</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">                &amp;&amp; params.get(&quot;file_type&quot;).equals(&quot;entrylog&quot;);</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">            boolean index = params != null</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">                &amp;&amp; params.containsKey(&quot;file_type&quot;)</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">                &amp;&amp; params.get(&quot;file_type&quot;).equals(&quot;index&quot;);</span>
+<span class="nc" id="L86">            boolean all = false;</span>
+
+<span class="nc bnc" id="L88" title="All 8 branches missed.">            if (!journal &amp;&amp; !entrylog &amp;&amp; !index &amp;&amp; !all) {</span>
+<span class="nc" id="L89">                all = true;</span>
+            }
+
+<span class="nc bnc" id="L92" title="All 4 branches missed.">            if (all || journal) {</span>
+<span class="nc" id="L93">                File[] journalDirs = conf.getJournalDirs();</span>
+<span class="nc" id="L94">                List&lt;File&gt; journalFiles = listFilesAndSort(journalDirs, &quot;txn&quot;);</span>
+<span class="nc" id="L95">                StringBuilder files = new StringBuilder();</span>
+<span class="nc bnc" id="L96" title="All 2 branches missed.">                for (File journalFile : journalFiles) {</span>
+<span class="nc" id="L97">                    files.append(journalFile.getName()).append(&quot;\t&quot;);</span>
+<span class="nc" id="L98">                }</span>
+<span class="nc" id="L99">                output.put(&quot;journal files&quot;, files.toString());</span>
+            }
+
+<span class="nc bnc" id="L102" title="All 4 branches missed.">            if (all || entrylog) {</span>
+<span class="nc" id="L103">                File[] ledgerDirs = conf.getLedgerDirs();</span>
+<span class="nc" id="L104">                List&lt;File&gt; ledgerFiles = listFilesAndSort(ledgerDirs, &quot;log&quot;);</span>
+<span class="nc" id="L105">                StringBuilder files = new StringBuilder();</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">                for (File ledgerFile : ledgerFiles) {</span>
+<span class="nc" id="L107">                    files.append(ledgerFile.getName()).append(&quot;\t&quot;);</span>
+<span class="nc" id="L108">                }</span>
+<span class="nc" id="L109">                output.put(&quot;entrylog files&quot;, files.toString());</span>
+            }
+
+<span class="nc bnc" id="L112" title="All 4 branches missed.">            if (all || index) {</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">                File[] indexDirs = (conf.getIndexDirs() == null) ? conf.getLedgerDirs() : conf.getIndexDirs();</span>
+<span class="nc" id="L114">                List&lt;File&gt; indexFiles = listFilesAndSort(indexDirs, &quot;idx&quot;);</span>
+<span class="nc" id="L115">                StringBuilder files = new StringBuilder();</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">                for (File indexFile : indexFiles) {</span>
+<span class="nc" id="L117">                    files.append(indexFile.getName()).append(&quot;\t&quot;);</span>
+<span class="nc" id="L118">                }</span>
+<span class="nc" id="L119">                output.put(&quot;index files&quot;, files.toString());</span>
+            }
+
+<span class="nc" id="L122">            String jsonResponse = JsonUtil.toJson(output);</span>
+<span class="nc" id="L123">            LOG.debug(&quot;output body:&quot; + jsonResponse);</span>
+<span class="nc" id="L124">            response.setBody(jsonResponse);</span>
+<span class="nc" id="L125">            response.setCode(HttpServer.StatusCode.OK);</span>
+<span class="nc" id="L126">            return response;</span>
+        } else {
+<span class="nc" id="L128">            response.setCode(HttpServer.StatusCode.NOT_FOUND);</span>
+<span class="nc" id="L129">            response.setBody(&quot;Not found method. Should be GET method&quot;);</span>
+<span class="nc" id="L130">            return response;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

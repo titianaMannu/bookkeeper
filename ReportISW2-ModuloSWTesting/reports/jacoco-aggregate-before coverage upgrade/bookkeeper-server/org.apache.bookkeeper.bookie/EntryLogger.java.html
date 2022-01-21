@@ -1,0 +1,1255 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>EntryLogger.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">EntryLogger.java</span></div><h1>EntryLogger.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.MoreObjects;
+import com.google.common.collect.MapMaker;
+import com.google.common.collect.Sets;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.Unpooled;
+import io.netty.util.concurrent.FastThreadLocal;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FilenameFilter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.channels.AsynchronousCloseException;
+import java.nio.channels.FileChannel;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.SortedMap;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.stats.NullStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.util.DiskChecker;
+import org.apache.bookkeeper.util.IOUtils;
+import org.apache.bookkeeper.util.collections.ConcurrentLongLongHashMap;
+import org.apache.bookkeeper.util.collections.ConcurrentLongLongHashMap.BiConsumerLong;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * This class manages the writing of the bookkeeper entries. All the new
+ * entries are written to a common log. The LedgerCache will have pointers
+ * into files created by this class with offsets into the files to find
+ * the actual ledger entry. The entry log files created by this class are
+ * identified by a long.
+ */
+public class EntryLogger {
+<span class="fc" id="L76">    private static final Logger LOG = LoggerFactory.getLogger(EntryLogger.class);</span>
+    static final long UNASSIGNED_LEDGERID = -1L;
+    // log file suffix
+    static final String LOG_FILE_SUFFIX = &quot;.log&quot;;
+
+    @VisibleForTesting
+    static final int UNINITIALIZED_LOG_ID = -0xDEAD;
+
+    static class BufferedLogChannel extends BufferedChannel {
+        private final long logId;
+        private final EntryLogMetadata entryLogMetadata;
+        private final File logFile;
+<span class="fc" id="L88">        private long ledgerIdAssigned = UNASSIGNED_LEDGERID;</span>
+
+        public BufferedLogChannel(ByteBufAllocator allocator, FileChannel fc, int writeCapacity, int readCapacity,
+                long logId, File logFile, long unpersistedBytesBound) throws IOException {
+<span class="fc" id="L92">            super(allocator, fc, writeCapacity, readCapacity, unpersistedBytesBound);</span>
+<span class="fc" id="L93">            this.logId = logId;</span>
+<span class="fc" id="L94">            this.entryLogMetadata = new EntryLogMetadata(logId);</span>
+<span class="fc" id="L95">            this.logFile = logFile;</span>
+<span class="fc" id="L96">        }</span>
+        public long getLogId() {
+<span class="fc" id="L98">            return logId;</span>
+        }
+
+        public File getLogFile() {
+<span class="nc" id="L102">            return logFile;</span>
+        }
+
+        public void registerWrittenEntry(long ledgerId, long entrySize) {
+<span class="fc" id="L106">            entryLogMetadata.addLedgerSize(ledgerId, entrySize);</span>
+<span class="fc" id="L107">        }</span>
+
+        public ConcurrentLongLongHashMap getLedgersMap() {
+<span class="nc" id="L110">            return entryLogMetadata.getLedgersMap();</span>
+        }
+
+        public Long getLedgerIdAssigned() {
+<span class="nc" id="L114">            return ledgerIdAssigned;</span>
+        }
+
+        public void setLedgerIdAssigned(Long ledgerId) {
+<span class="nc" id="L118">            this.ledgerIdAssigned = ledgerId;</span>
+<span class="nc" id="L119">        }</span>
+
+        @Override
+        public String toString() {
+<span class="nc" id="L123">            return MoreObjects.toStringHelper(BufferedChannel.class)</span>
+<span class="nc" id="L124">                .add(&quot;logId&quot;, logId)</span>
+<span class="nc" id="L125">                .add(&quot;logFile&quot;, logFile)</span>
+<span class="nc" id="L126">                .add(&quot;ledgerIdAssigned&quot;, ledgerIdAssigned)</span>
+<span class="nc" id="L127">                .toString();</span>
+        }
+
+        /**
+         * Append the ledger map at the end of the entry log.
+         * Updates the entry log file header with the offset and size of the map.
+         */
+        void appendLedgersMap() throws IOException {
+
+<span class="nc" id="L136">            long ledgerMapOffset = this.position();</span>
+
+<span class="nc" id="L138">            ConcurrentLongLongHashMap ledgersMap = this.getLedgersMap();</span>
+<span class="nc" id="L139">            int numberOfLedgers = (int) ledgersMap.size();</span>
+
+            // Write the ledgers map into several batches
+
+<span class="nc" id="L143">            final int maxMapSize = LEDGERS_MAP_HEADER_SIZE + LEDGERS_MAP_ENTRY_SIZE * LEDGERS_MAP_MAX_BATCH_SIZE;</span>
+<span class="nc" id="L144">            final ByteBuf serializedMap = ByteBufAllocator.DEFAULT.buffer(maxMapSize);</span>
+
+            try {
+<span class="nc" id="L147">                ledgersMap.forEach(new BiConsumerLong() {</span>
+<span class="nc" id="L148">                    int remainingLedgers = numberOfLedgers;</span>
+<span class="nc" id="L149">                    boolean startNewBatch = true;</span>
+<span class="nc" id="L150">                    int remainingInBatch = 0;</span>
+
+                    @Override
+                    public void accept(long ledgerId, long size) {
+<span class="nc bnc" id="L154" title="All 2 branches missed.">                        if (startNewBatch) {</span>
+<span class="nc" id="L155">                            int batchSize = Math.min(remainingLedgers, LEDGERS_MAP_MAX_BATCH_SIZE);</span>
+<span class="nc" id="L156">                            int ledgerMapSize = LEDGERS_MAP_HEADER_SIZE + LEDGERS_MAP_ENTRY_SIZE * batchSize;</span>
+
+<span class="nc" id="L158">                            serializedMap.clear();</span>
+<span class="nc" id="L159">                            serializedMap.writeInt(ledgerMapSize - 4);</span>
+<span class="nc" id="L160">                            serializedMap.writeLong(INVALID_LID);</span>
+<span class="nc" id="L161">                            serializedMap.writeLong(LEDGERS_MAP_ENTRY_ID);</span>
+<span class="nc" id="L162">                            serializedMap.writeInt(batchSize);</span>
+
+<span class="nc" id="L164">                            startNewBatch = false;</span>
+<span class="nc" id="L165">                            remainingInBatch = batchSize;</span>
+                        }
+                        // Dump the ledger in the current batch
+<span class="nc" id="L168">                        serializedMap.writeLong(ledgerId);</span>
+<span class="nc" id="L169">                        serializedMap.writeLong(size);</span>
+<span class="nc" id="L170">                        --remainingLedgers;</span>
+
+<span class="nc bnc" id="L172" title="All 2 branches missed.">                        if (--remainingInBatch == 0) {</span>
+                            // Close current batch
+                            try {
+<span class="nc" id="L175">                                write(serializedMap);</span>
+<span class="nc" id="L176">                            } catch (IOException e) {</span>
+<span class="nc" id="L177">                                throw new RuntimeException(e);</span>
+<span class="nc" id="L178">                            }</span>
+
+<span class="nc" id="L180">                            startNewBatch = true;</span>
+                        }
+<span class="nc" id="L182">                    }</span>
+                });
+<span class="nc" id="L184">            } catch (RuntimeException e) {</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">                if (e.getCause() instanceof IOException) {</span>
+<span class="nc" id="L186">                    throw (IOException) e.getCause();</span>
+                } else {
+<span class="nc" id="L188">                    throw e;</span>
+                }
+            } finally {
+<span class="nc" id="L191">                serializedMap.release();</span>
+            }
+            // Flush the ledger's map out before we write the header.
+            // Otherwise the header might point to something that is not fully
+            // written
+<span class="nc" id="L196">            super.flush();</span>
+
+            // Update the headers with the map offset and count of ledgers
+<span class="nc" id="L199">            ByteBuffer mapInfo = ByteBuffer.allocate(8 + 4);</span>
+<span class="nc" id="L200">            mapInfo.putLong(ledgerMapOffset);</span>
+<span class="nc" id="L201">            mapInfo.putInt(numberOfLedgers);</span>
+<span class="nc" id="L202">            mapInfo.flip();</span>
+<span class="nc" id="L203">            this.fileChannel.write(mapInfo, LEDGERS_MAP_OFFSET_POSITION);</span>
+<span class="nc" id="L204">        }</span>
+    }
+
+    private final LedgerDirsManager ledgerDirsManager;
+    private final boolean entryLogPerLedgerEnabled;
+
+    final RecentEntryLogsStatus recentlyCreatedEntryLogsStatus;
+
+    /**
+     * locks for compaction log.
+     */
+<span class="fc" id="L215">    private final Object compactionLogLock = new Object();</span>
+
+    private volatile BufferedLogChannel compactionLogChannel;
+
+    final EntryLoggerAllocator entryLoggerAllocator;
+    private final EntryLogManager entryLogManager;
+
+<span class="fc" id="L222">    private final CopyOnWriteArrayList&lt;EntryLogListener&gt; listeners = new CopyOnWriteArrayList&lt;EntryLogListener&gt;();</span>
+
+    private static final int HEADER_V0 = 0; // Old log file format (no ledgers map index)
+    private static final int HEADER_V1 = 1; // Introduced ledger map index
+    static final int HEADER_CURRENT_VERSION = HEADER_V1;
+
+    private static class Header {
+        final int version;
+        final long ledgersMapOffset;
+        final int ledgersCount;
+
+<span class="nc" id="L233">        Header(int version, long ledgersMapOffset, int ledgersCount) {</span>
+<span class="nc" id="L234">            this.version = version;</span>
+<span class="nc" id="L235">            this.ledgersMapOffset = ledgersMapOffset;</span>
+<span class="nc" id="L236">            this.ledgersCount = ledgersCount;</span>
+<span class="nc" id="L237">        }</span>
+    }
+
+    /**
+     * The 1K block at the head of the entry logger file
+     * that contains the fingerprint and meta-data.
+     *
+     * &lt;pre&gt;
+     * Header is composed of:
+     * Fingerprint: 4 bytes &quot;BKLO&quot;
+     * Log file HeaderVersion enum: 4 bytes
+     * Ledger map offset: 8 bytes
+     * Ledgers Count: 4 bytes
+     * &lt;/pre&gt;
+     */
+    static final int LOGFILE_HEADER_SIZE = 1024;
+<span class="fc" id="L253">    final ByteBuf logfileHeader = Unpooled.buffer(LOGFILE_HEADER_SIZE);</span>
+
+    static final int HEADER_VERSION_POSITION = 4;
+    static final int LEDGERS_MAP_OFFSET_POSITION = HEADER_VERSION_POSITION + 4;
+
+    /**
+     * Ledgers map is composed of multiple parts that can be split into separated entries. Each of them is composed of:
+     *
+     * &lt;pre&gt;
+     * length: (4 bytes) [0-3]
+     * ledger id (-1): (8 bytes) [4 - 11]
+     * entry id: (8 bytes) [12-19]
+     * num ledgers stored in current metadata entry: (4 bytes) [20 - 23]
+     * ledger entries: sequence of (ledgerid, size) (8 + 8 bytes each) [24..]
+     * &lt;/pre&gt;
+     */
+    static final int LEDGERS_MAP_HEADER_SIZE = 4 + 8 + 8 + 4;
+    static final int LEDGERS_MAP_ENTRY_SIZE = 8 + 8;
+
+    // Break the ledgers map into multiple batches, each of which can contain up to 10K ledgers
+    static final int LEDGERS_MAP_MAX_BATCH_SIZE = 10000;
+
+    static final long INVALID_LID = -1L;
+
+    // EntryId used to mark an entry (belonging to INVALID_ID) as a component of the serialized ledgers map
+    static final long LEDGERS_MAP_ENTRY_ID = -2L;
+
+    static final int MIN_SANE_ENTRY_SIZE = 8 + 8;
+    static final long MB = 1024 * 1024;
+
+    private final int maxSaneEntrySize;
+
+    private final ByteBufAllocator allocator;
+
+    final ServerConfiguration conf;
+    /**
+     * Scan entries in a entry log file.
+     */
+    public interface EntryLogScanner {
+        /**
+         * Tests whether or not the entries belongs to the specified ledger
+         * should be processed.
+         *
+         * @param ledgerId
+         *          Ledger ID.
+         * @return true if and only the entries of the ledger should be scanned.
+         */
+        boolean accept(long ledgerId);
+
+        /**
+         * Process an entry.
+         *
+         * @param ledgerId
+         *          Ledger ID.
+         * @param offset
+         *          File offset of this entry.
+         * @param entry
+         *          Entry ByteBuf
+         * @throws IOException
+         */
+        void process(long ledgerId, long offset, ByteBuf entry) throws IOException;
+    }
+
+    /**
+     * Entry Log Listener.
+     */
+    interface EntryLogListener {
+        /**
+         * Rotate a new entry log to write.
+         */
+        void onRotateEntryLog();
+    }
+
+    public EntryLogger(ServerConfiguration conf) throws IOException {
+<span class="nc" id="L327">        this(conf, new LedgerDirsManager(conf, conf.getLedgerDirs(),</span>
+<span class="nc" id="L328">                new DiskChecker(conf.getDiskUsageThreshold(), conf.getDiskUsageWarnThreshold())));</span>
+<span class="nc" id="L329">    }</span>
+
+    /**
+     * Create an EntryLogger that stores it's log files in the given directories.
+     */
+    public EntryLogger(ServerConfiguration conf,
+            LedgerDirsManager ledgerDirsManager) throws IOException {
+<span class="nc" id="L336">        this(conf, ledgerDirsManager, null, NullStatsLogger.INSTANCE, PooledByteBufAllocator.DEFAULT);</span>
+<span class="nc" id="L337">    }</span>
+
+    public EntryLogger(ServerConfiguration conf,
+            LedgerDirsManager ledgerDirsManager, EntryLogListener listener, StatsLogger statsLogger,
+<span class="fc" id="L341">            ByteBufAllocator allocator) throws IOException {</span>
+        //We reserve 500 bytes as overhead for the protocol.  This is not 100% accurate
+        // but the protocol varies so an exact value is difficult to determine
+<span class="fc" id="L344">        this.maxSaneEntrySize = conf.getNettyMaxFrameSizeBytes() - 500;</span>
+<span class="fc" id="L345">        this.allocator = allocator;</span>
+<span class="fc" id="L346">        this.ledgerDirsManager = ledgerDirsManager;</span>
+<span class="fc" id="L347">        this.conf = conf;</span>
+<span class="fc" id="L348">        entryLogPerLedgerEnabled = conf.isEntryLogPerLedgerEnabled();</span>
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">        if (listener != null) {</span>
+<span class="nc" id="L350">            addListener(listener);</span>
+        }
+
+        // Initialize the entry log header buffer. This cannot be a static object
+        // since in our unit tests, we run multiple Bookies and thus EntryLoggers
+        // within the same JVM. All of these Bookie instances access this header
+        // so there can be race conditions when entry logs are rolled over and
+        // this header buffer is cleared before writing it into the new logChannel.
+<span class="fc" id="L358">        logfileHeader.writeBytes(&quot;BKLO&quot;.getBytes(UTF_8));</span>
+<span class="fc" id="L359">        logfileHeader.writeInt(HEADER_CURRENT_VERSION);</span>
+<span class="fc" id="L360">        logfileHeader.writerIndex(LOGFILE_HEADER_SIZE);</span>
+
+        // Find the largest logId
+<span class="fc" id="L363">        long logId = INVALID_LID;</span>
+<span class="fc bfc" id="L364" title="All 2 branches covered.">        for (File dir : ledgerDirsManager.getAllLedgerDirs()) {</span>
+<span class="pc bpc" id="L365" title="1 of 2 branches missed.">            if (!dir.exists()) {</span>
+<span class="nc" id="L366">                throw new FileNotFoundException(</span>
+                        &quot;Entry log directory '&quot; + dir + &quot;' does not exist&quot;);
+            }
+<span class="fc" id="L369">            long lastLogId = getLastLogId(dir);</span>
+<span class="pc bpc" id="L370" title="1 of 2 branches missed.">            if (lastLogId &gt; logId) {</span>
+<span class="nc" id="L371">                logId = lastLogId;</span>
+            }
+<span class="fc" id="L373">        }</span>
+<span class="fc" id="L374">        this.recentlyCreatedEntryLogsStatus = new RecentEntryLogsStatus(logId + 1);</span>
+<span class="fc" id="L375">        this.entryLoggerAllocator = new EntryLoggerAllocator(conf, ledgerDirsManager, recentlyCreatedEntryLogsStatus,</span>
+                logId, allocator);
+<span class="pc bpc" id="L377" title="1 of 2 branches missed.">        if (entryLogPerLedgerEnabled) {</span>
+<span class="nc" id="L378">            this.entryLogManager = new EntryLogManagerForEntryLogPerLedger(conf, ledgerDirsManager,</span>
+                    entryLoggerAllocator, listeners, recentlyCreatedEntryLogsStatus, statsLogger);
+        } else {
+<span class="fc" id="L381">            this.entryLogManager = new EntryLogManagerForSingleEntryLog(conf, ledgerDirsManager, entryLoggerAllocator,</span>
+                    listeners, recentlyCreatedEntryLogsStatus);
+        }
+<span class="fc" id="L384">    }</span>
+
+    EntryLogManager getEntryLogManager() {
+<span class="nc" id="L387">        return entryLogManager;</span>
+    }
+
+    void addListener(EntryLogListener listener) {
+<span class="nc bnc" id="L391" title="All 2 branches missed.">        if (null != listener) {</span>
+<span class="nc" id="L392">            listeners.add(listener);</span>
+        }
+<span class="nc" id="L394">    }</span>
+
+    /**
+     * If the log id of current writable channel is the same as entryLogId and the position
+     * we want to read might end up reading from a position in the write buffer of the
+     * buffered channel, route this read to the current logChannel. Else,
+     * read from the BufferedReadChannel that is provided.
+     * @param entryLogId
+     * @param channel
+     * @param buff remaining() on this bytebuffer tells us the last position that we
+     *             expect to read.
+     * @param pos The starting position from where we want to read.
+     * @return
+     */
+    private int readFromLogChannel(long entryLogId, BufferedReadChannel channel, ByteBuf buff, long pos)
+            throws IOException {
+<span class="fc" id="L410">        BufferedLogChannel bc = entryLogManager.getCurrentLogIfPresent(entryLogId);</span>
+<span class="pc bpc" id="L411" title="1 of 2 branches missed.">        if (null != bc) {</span>
+<span class="fc" id="L412">            synchronized (bc) {</span>
+<span class="fc bfc" id="L413" title="All 2 branches covered.">                if (pos + buff.writableBytes() &gt;= bc.getFileChannelPosition()) {</span>
+<span class="fc" id="L414">                    return bc.read(buff, pos);</span>
+                }
+<span class="fc" id="L416">            }</span>
+        }
+<span class="fc" id="L418">        return channel.read(buff, pos);</span>
+    }
+
+    /**
+     * A thread-local variable that wraps a mapping of log ids to bufferedchannels
+     * These channels should be used only for reading. logChannel is the one
+     * that is used for writes.
+     */
+<span class="fc" id="L426">    private final ThreadLocal&lt;Map&lt;Long, BufferedReadChannel&gt;&gt; logid2Channel =</span>
+<span class="fc" id="L427">            new ThreadLocal&lt;Map&lt;Long, BufferedReadChannel&gt;&gt;() {</span>
+        @Override
+        public Map&lt;Long, BufferedReadChannel&gt; initialValue() {
+            // Since this is thread local there only one modifier
+            // We dont really need the concurrency, but we need to use
+            // the weak values. Therefore using the concurrency level of 1
+<span class="fc" id="L433">            return new MapMaker().concurrencyLevel(1)</span>
+<span class="fc" id="L434">                .weakValues()</span>
+<span class="fc" id="L435">                .makeMap();</span>
+        }
+    };
+
+    /**
+     * Each thread local buffered read channel can share the same file handle because reads are not relative
+     * and don't cause a change in the channel's position. We use this map to store the file channels. Each
+     * file channel is mapped to a log id which represents an open log file.
+     */
+<span class="fc" id="L444">    private final ConcurrentMap&lt;Long, FileChannel&gt; logid2FileChannel = new ConcurrentHashMap&lt;Long, FileChannel&gt;();</span>
+
+    /**
+     * Put the logId, bc pair in the map responsible for the current thread.
+     * @param logId
+     * @param bc
+     */
+    public BufferedReadChannel putInReadChannels(long logId, BufferedReadChannel bc) {
+<span class="fc" id="L452">        Map&lt;Long, BufferedReadChannel&gt; threadMap = logid2Channel.get();</span>
+<span class="fc" id="L453">        return threadMap.put(logId, bc);</span>
+    }
+
+    /**
+     * Remove all entries for this log file in each thread's cache.
+     * @param logId
+     */
+    public void removeFromChannelsAndClose(long logId) {
+<span class="nc" id="L461">        FileChannel fileChannel = logid2FileChannel.remove(logId);</span>
+<span class="nc bnc" id="L462" title="All 2 branches missed.">        if (null != fileChannel) {</span>
+            try {
+<span class="nc" id="L464">                fileChannel.close();</span>
+<span class="nc" id="L465">            } catch (IOException e) {</span>
+<span class="nc" id="L466">                LOG.warn(&quot;Exception while closing channel for log file:&quot; + logId);</span>
+<span class="nc" id="L467">            }</span>
+        }
+<span class="nc" id="L469">    }</span>
+
+    public BufferedReadChannel getFromChannels(long logId) {
+<span class="fc" id="L472">        return logid2Channel.get().get(logId);</span>
+    }
+
+    /**
+     * Get the least unflushed log id. Garbage collector thread should not process
+     * unflushed entry log file.
+     *
+     * @return least unflushed log id.
+     */
+    long getLeastUnflushedLogId() {
+<span class="nc" id="L482">        return recentlyCreatedEntryLogsStatus.getLeastUnflushedLogId();</span>
+    }
+
+    long getPreviousAllocatedEntryLogId() {
+<span class="nc" id="L486">        return entryLoggerAllocator.getPreallocatedLogId();</span>
+    }
+
+    /**
+     * Get the current log file for compaction.
+     */
+    File getCurCompactionLogFile() {
+<span class="nc" id="L493">        synchronized (compactionLogLock) {</span>
+<span class="nc bnc" id="L494" title="All 2 branches missed.">            if (compactionLogChannel == null) {</span>
+<span class="nc" id="L495">                return null;</span>
+            }
+<span class="nc" id="L497">            return compactionLogChannel.getLogFile();</span>
+        }
+    }
+
+    void prepareSortedLedgerStorageCheckpoint(long numBytesFlushed) throws IOException {
+<span class="nc" id="L502">        entryLogManager.prepareSortedLedgerStorageCheckpoint(numBytesFlushed);</span>
+<span class="nc" id="L503">    }</span>
+
+    void prepareEntryMemTableFlush() {
+<span class="nc" id="L506">        entryLogManager.prepareEntryMemTableFlush();</span>
+<span class="nc" id="L507">    }</span>
+
+    boolean commitEntryMemTableFlush() throws IOException {
+<span class="nc" id="L510">        return entryLogManager.commitEntryMemTableFlush();</span>
+    }
+
+    /**
+     * get EntryLoggerAllocator, Just for tests.
+     */
+    EntryLoggerAllocator getEntryLoggerAllocator() {
+<span class="nc" id="L517">        return entryLoggerAllocator;</span>
+    }
+
+    /**
+     * Remove entry log.
+     *
+     * @param entryLogId
+     *          Entry Log File Id
+     */
+    protected boolean removeEntryLog(long entryLogId) {
+<span class="nc" id="L527">        removeFromChannelsAndClose(entryLogId);</span>
+        File entryLogFile;
+        try {
+<span class="nc" id="L530">            entryLogFile = findFile(entryLogId);</span>
+<span class="nc" id="L531">        } catch (FileNotFoundException e) {</span>
+<span class="nc" id="L532">            LOG.error(&quot;Trying to delete an entryLog file that could not be found: &quot;</span>
+                    + entryLogId + &quot;.log&quot;);
+<span class="nc" id="L534">            return false;</span>
+<span class="nc" id="L535">        }</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">        if (!entryLogFile.delete()) {</span>
+<span class="nc" id="L537">            LOG.warn(&quot;Could not delete entry log file {}&quot;, entryLogFile);</span>
+        }
+<span class="nc" id="L539">        return true;</span>
+    }
+
+    private long getLastLogId(File dir) {
+<span class="fc" id="L543">        long id = readLastLogId(dir);</span>
+        // read success
+<span class="pc bpc" id="L545" title="1 of 2 branches missed.">        if (id &gt; 0) {</span>
+<span class="nc" id="L546">            return id;</span>
+        }
+        // read failed, scan the ledger directories to find biggest log id
+<span class="fc" id="L549">        File[] logFiles = dir.listFiles(file -&gt; file.getName().endsWith(&quot;.log&quot;));</span>
+<span class="fc" id="L550">        List&lt;Long&gt; logs = new ArrayList&lt;Long&gt;();</span>
+<span class="pc bpc" id="L551" title="1 of 2 branches missed.">        if (logFiles != null) {</span>
+<span class="pc bpc" id="L552" title="1 of 2 branches missed.">            for (File lf : logFiles) {</span>
+<span class="nc" id="L553">                long logId = fileName2LogId(lf.getName());</span>
+<span class="nc" id="L554">                logs.add(logId);</span>
+            }
+        }
+        // no log file found in this directory
+<span class="pc bpc" id="L558" title="1 of 2 branches missed.">        if (0 == logs.size()) {</span>
+<span class="fc" id="L559">            return INVALID_LID;</span>
+        }
+        // order the collections
+<span class="nc" id="L562">        Collections.sort(logs);</span>
+<span class="nc" id="L563">        return logs.get(logs.size() - 1);</span>
+    }
+
+    /**
+     * reads id from the &quot;lastId&quot; file in the given directory.
+     */
+    private long readLastLogId(File f) {
+        FileInputStream fis;
+        try {
+<span class="nc" id="L572">            fis = new FileInputStream(new File(f, &quot;lastId&quot;));</span>
+<span class="fc" id="L573">        } catch (FileNotFoundException e) {</span>
+<span class="fc" id="L574">            return INVALID_LID;</span>
+<span class="nc" id="L575">        }</span>
+<span class="nc" id="L576">        try (BufferedReader br = new BufferedReader(new InputStreamReader(fis, UTF_8))) {</span>
+<span class="nc" id="L577">            String lastIdString = br.readLine();</span>
+<span class="nc" id="L578">            return Long.parseLong(lastIdString, 16);</span>
+<span class="nc" id="L579">        } catch (IOException | NumberFormatException e) {</span>
+<span class="nc" id="L580">            return INVALID_LID;</span>
+        }
+    }
+
+    /**
+     * Flushes all rotated log channels. After log channels are flushed,
+     * move leastUnflushedLogId ptr to current logId.
+     */
+    void checkpoint() throws IOException {
+<span class="nc" id="L589">        entryLogManager.checkpoint();</span>
+<span class="nc" id="L590">    }</span>
+
+    public void flush() throws IOException {
+<span class="fc" id="L593">        entryLogManager.flush();</span>
+<span class="fc" id="L594">    }</span>
+
+    long addEntry(long ledger, ByteBuffer entry) throws IOException {
+<span class="nc" id="L597">        return entryLogManager.addEntry(ledger, Unpooled.wrappedBuffer(entry), true);</span>
+    }
+
+    long addEntry(long ledger, ByteBuf entry) throws IOException {
+<span class="nc" id="L601">        return entryLogManager.addEntry(ledger, entry, true);</span>
+    }
+
+    public long addEntry(long ledger, ByteBuf entry, boolean rollLog) throws IOException {
+<span class="fc" id="L605">        return entryLogManager.addEntry(ledger, entry, rollLog);</span>
+    }
+
+<span class="fc" id="L608">    private final FastThreadLocal&lt;ByteBuf&gt; sizeBuffer = new FastThreadLocal&lt;ByteBuf&gt;() {</span>
+        @Override
+        protected ByteBuf initialValue() throws Exception {
+            // Max usage is size (4 bytes) + ledgerId (8 bytes) + entryid (8 bytes)
+<span class="fc" id="L612">            return Unpooled.buffer(4 + 8 + 8);</span>
+        }
+    };
+
+    long addEntryForCompaction(long ledgerId, ByteBuf entry) throws IOException {
+<span class="nc" id="L617">        synchronized (compactionLogLock) {</span>
+<span class="nc" id="L618">            int entrySize = entry.readableBytes() + 4;</span>
+<span class="nc bnc" id="L619" title="All 2 branches missed.">            if (compactionLogChannel == null) {</span>
+<span class="nc" id="L620">                createNewCompactionLog();</span>
+            }
+
+<span class="nc" id="L623">            ByteBuf sizeBuffer = this.sizeBuffer.get();</span>
+<span class="nc" id="L624">            sizeBuffer.clear();</span>
+<span class="nc" id="L625">            sizeBuffer.writeInt(entry.readableBytes());</span>
+<span class="nc" id="L626">            compactionLogChannel.write(sizeBuffer);</span>
+
+<span class="nc" id="L628">            long pos = compactionLogChannel.position();</span>
+<span class="nc" id="L629">            compactionLogChannel.write(entry);</span>
+<span class="nc" id="L630">            compactionLogChannel.registerWrittenEntry(ledgerId, entrySize);</span>
+<span class="nc" id="L631">            return (compactionLogChannel.getLogId() &lt;&lt; 32L) | pos;</span>
+        }
+    }
+
+    void flushCompactionLog() throws IOException {
+<span class="nc" id="L636">        synchronized (compactionLogLock) {</span>
+<span class="nc bnc" id="L637" title="All 2 branches missed.">            if (compactionLogChannel != null) {</span>
+<span class="nc" id="L638">                compactionLogChannel.appendLedgersMap();</span>
+<span class="nc" id="L639">                compactionLogChannel.flushAndForceWrite(false);</span>
+<span class="nc" id="L640">                LOG.info(&quot;Flushed compaction log file {} with logId {}.&quot;,</span>
+<span class="nc" id="L641">                    compactionLogChannel.getLogFile(),</span>
+<span class="nc" id="L642">                    compactionLogChannel.getLogId());</span>
+                // since this channel is only used for writing, after flushing the channel,
+                // we had to close the underlying file channel. Otherwise, we might end up
+                // leaking fds which cause the disk spaces could not be reclaimed.
+<span class="nc" id="L646">                compactionLogChannel.close();</span>
+            } else {
+<span class="nc" id="L648">                throw new IOException(&quot;Failed to flush compaction log which has already been removed.&quot;);</span>
+            }
+<span class="nc" id="L650">        }</span>
+<span class="nc" id="L651">    }</span>
+
+    void createNewCompactionLog() throws IOException {
+<span class="nc" id="L654">        synchronized (compactionLogLock) {</span>
+<span class="nc bnc" id="L655" title="All 2 branches missed.">            if (compactionLogChannel == null) {</span>
+<span class="nc" id="L656">                compactionLogChannel = entryLogManager.createNewLogForCompaction();</span>
+            }
+<span class="nc" id="L658">        }</span>
+<span class="nc" id="L659">    }</span>
+
+    /**
+     * Remove the current compaction log, usually invoked when compaction failed and
+     * we need to do some clean up to remove the compaction log file.
+     */
+    void removeCurCompactionLog() {
+<span class="nc" id="L666">        synchronized (compactionLogLock) {</span>
+<span class="nc bnc" id="L667" title="All 2 branches missed.">            if (compactionLogChannel != null) {</span>
+<span class="nc bnc" id="L668" title="All 2 branches missed.">                if (!compactionLogChannel.getLogFile().delete()) {</span>
+<span class="nc" id="L669">                    LOG.warn(&quot;Could not delete compaction log file {}&quot;, compactionLogChannel.getLogFile());</span>
+                }
+
+                try {
+<span class="nc" id="L673">                    compactionLogChannel.close();</span>
+<span class="nc" id="L674">                } catch (IOException e) {</span>
+<span class="nc" id="L675">                    LOG.error(&quot;Failed to close file channel for compaction log {}&quot;, compactionLogChannel.getLogId(),</span>
+                            e);
+<span class="nc" id="L677">                }</span>
+<span class="nc" id="L678">                compactionLogChannel = null;</span>
+            }
+<span class="nc" id="L680">        }</span>
+<span class="nc" id="L681">    }</span>
+
+    static long logIdForOffset(long offset) {
+<span class="fc" id="L684">        return offset &gt;&gt; 32L;</span>
+    }
+
+
+    static long posForOffset(long location) {
+<span class="fc" id="L689">        return location &amp; 0xffffffffL;</span>
+    }
+
+
+    /**
+     * Exception type for representing lookup errors.  Useful for disambiguating different error
+     * conditions for reporting purposes.
+     */
+    static class EntryLookupException extends Exception {
+        EntryLookupException(String message) {
+<span class="nc" id="L699">            super(message);</span>
+<span class="nc" id="L700">        }</span>
+
+        /**
+         * Represents case where log file is missing.
+         */
+        static class MissingLogFileException extends EntryLookupException {
+            MissingLogFileException(long ledgerId, long entryId, long entryLogId, long pos) {
+<span class="nc" id="L707">                super(String.format(&quot;Missing entryLog %d for ledgerId %d, entry %d at offset %d&quot;,</span>
+<span class="nc" id="L708">                        entryLogId,</span>
+<span class="nc" id="L709">                        ledgerId,</span>
+<span class="nc" id="L710">                        entryId,</span>
+<span class="nc" id="L711">                        pos));</span>
+<span class="nc" id="L712">            }</span>
+        }
+
+        /**
+         * Represents case where entry log is present, but does not contain the specified entry.
+         */
+        static class MissingEntryException extends EntryLookupException {
+            MissingEntryException(long ledgerId, long entryId, long entryLogId, long pos) {
+<span class="nc" id="L720">                super(String.format(&quot;pos %d (entry %d for ledgerId %d) past end of entryLog %d&quot;,</span>
+<span class="nc" id="L721">                        pos,</span>
+<span class="nc" id="L722">                        entryId,</span>
+<span class="nc" id="L723">                        ledgerId,</span>
+<span class="nc" id="L724">                        entryLogId));</span>
+<span class="nc" id="L725">            }</span>
+        }
+
+        /**
+         * Represents case where log is present, but encoded entry length header is invalid.
+         */
+        static class InvalidEntryLengthException extends EntryLookupException {
+            InvalidEntryLengthException(long ledgerId, long entryId, long entryLogId, long pos) {
+<span class="nc" id="L733">                super(String.format(&quot;Invalid entry length at pos %d (entry %d for ledgerId %d) for entryLog %d&quot;,</span>
+<span class="nc" id="L734">                        pos,</span>
+<span class="nc" id="L735">                        entryId,</span>
+<span class="nc" id="L736">                        ledgerId,</span>
+<span class="nc" id="L737">                        entryLogId));</span>
+<span class="nc" id="L738">            }</span>
+        }
+
+        /**
+         * Represents case where the entry at pos is wrong.
+         */
+        static class WrongEntryException extends EntryLookupException {
+            WrongEntryException(long foundEntryId, long foundLedgerId, long ledgerId,
+                                long entryId, long entryLogId, long pos) {
+<span class="nc" id="L747">                super(String.format(</span>
+                        &quot;Found entry %d, ledger %d at pos %d entryLog %d, should have found entry %d for ledgerId %d&quot;,
+<span class="nc" id="L749">                        foundEntryId,</span>
+<span class="nc" id="L750">                        foundLedgerId,</span>
+<span class="nc" id="L751">                        pos,</span>
+<span class="nc" id="L752">                        entryLogId,</span>
+<span class="nc" id="L753">                        entryId,</span>
+<span class="nc" id="L754">                        ledgerId));</span>
+<span class="nc" id="L755">            }</span>
+        }
+    }
+
+    private BufferedReadChannel getFCForEntryInternal(
+            long ledgerId, long entryId, long entryLogId, long pos)
+            throws EntryLookupException, IOException {
+        try {
+<span class="fc" id="L763">            return getChannelForLogId(entryLogId);</span>
+<span class="nc" id="L764">        } catch (FileNotFoundException e) {</span>
+<span class="nc" id="L765">            throw new EntryLookupException.MissingLogFileException(ledgerId, entryId, entryLogId, pos);</span>
+        }
+    }
+
+    private ByteBuf readEntrySize(long ledgerId, long entryId, long entryLogId, long pos, BufferedReadChannel fc)
+            throws EntryLookupException, IOException {
+<span class="fc" id="L771">        ByteBuf sizeBuff = sizeBuffer.get();</span>
+<span class="fc" id="L772">        sizeBuff.clear();</span>
+
+<span class="fc" id="L774">        long entrySizePos = pos - 4; // we want to get the entrySize as well as the ledgerId and entryId</span>
+
+        try {
+<span class="pc bpc" id="L777" title="1 of 2 branches missed.">            if (readFromLogChannel(entryLogId, fc, sizeBuff, entrySizePos) != sizeBuff.capacity()) {</span>
+<span class="nc" id="L778">                throw new EntryLookupException.MissingEntryException(ledgerId, entryId, entryLogId, entrySizePos);</span>
+            }
+<span class="nc" id="L780">        } catch (BufferedChannelBase.BufferedChannelClosedException | AsynchronousCloseException e) {</span>
+<span class="nc" id="L781">            throw new EntryLookupException.MissingLogFileException(ledgerId, entryId, entryLogId, entrySizePos);</span>
+<span class="fc" id="L782">        }</span>
+<span class="fc" id="L783">        return sizeBuff;</span>
+    }
+
+    void checkEntry(long ledgerId, long entryId, long location) throws EntryLookupException, IOException {
+<span class="nc" id="L787">        long entryLogId = logIdForOffset(location);</span>
+<span class="nc" id="L788">        long pos = posForOffset(location);</span>
+<span class="nc" id="L789">        BufferedReadChannel fc = getFCForEntryInternal(ledgerId, entryId, entryLogId, pos);</span>
+<span class="nc" id="L790">        ByteBuf sizeBuf = readEntrySize(ledgerId, entryId, entryLogId, pos, fc);</span>
+<span class="nc" id="L791">        validateEntry(ledgerId, entryId, entryLogId, pos, sizeBuf);</span>
+<span class="nc" id="L792">    }</span>
+
+    private void validateEntry(long ledgerId, long entryId, long entryLogId, long pos, ByteBuf sizeBuff)
+            throws IOException, EntryLookupException {
+<span class="fc" id="L796">        int entrySize = sizeBuff.readInt();</span>
+
+        // entrySize does not include the ledgerId
+<span class="pc bpc" id="L799" title="1 of 2 branches missed.">        if (entrySize &gt; maxSaneEntrySize) {</span>
+<span class="nc" id="L800">            LOG.warn(&quot;Sanity check failed for entry size of &quot; + entrySize + &quot; at location &quot; + pos + &quot; in &quot;</span>
+                    + entryLogId);
+        }
+<span class="pc bpc" id="L803" title="1 of 2 branches missed.">        if (entrySize &lt; MIN_SANE_ENTRY_SIZE) {</span>
+<span class="nc" id="L804">            LOG.error(&quot;Read invalid entry length {}&quot;, entrySize);</span>
+<span class="nc" id="L805">            throw new EntryLookupException.InvalidEntryLengthException(ledgerId, entryId, entryLogId, pos);</span>
+        }
+
+<span class="fc" id="L808">        long thisLedgerId = sizeBuff.getLong(4);</span>
+<span class="fc" id="L809">        long thisEntryId = sizeBuff.getLong(12);</span>
+<span class="pc bpc" id="L810" title="2 of 4 branches missed.">        if (thisLedgerId != ledgerId || thisEntryId != entryId) {</span>
+<span class="nc" id="L811">            throw new EntryLookupException.WrongEntryException(</span>
+                    thisEntryId, thisLedgerId, ledgerId, entryId, entryLogId, pos);
+        }
+<span class="fc" id="L814">    }</span>
+
+    public ByteBuf internalReadEntry(long ledgerId, long entryId, long location, boolean validateEntry)
+            throws IOException, Bookie.NoEntryException {
+<span class="fc" id="L818">        long entryLogId = logIdForOffset(location);</span>
+<span class="fc" id="L819">        long pos = posForOffset(location);</span>
+
+
+<span class="fc" id="L822">        BufferedReadChannel fc = null;</span>
+<span class="fc" id="L823">        int entrySize = -1;</span>
+        try {
+<span class="fc" id="L825">            fc = getFCForEntryInternal(ledgerId, entryId, entryLogId, pos);</span>
+
+<span class="fc" id="L827">            ByteBuf sizeBuff = readEntrySize(ledgerId, entryId, entryLogId, pos, fc);</span>
+<span class="fc" id="L828">            entrySize = sizeBuff.getInt(0);</span>
+<span class="fc bfc" id="L829" title="All 2 branches covered.">            if (validateEntry) {</span>
+<span class="fc" id="L830">                validateEntry(ledgerId, entryId, entryLogId, pos, sizeBuff);</span>
+            }
+<span class="nc" id="L832">        } catch (EntryLookupException.MissingEntryException entryLookupError) {</span>
+<span class="nc" id="L833">            throw new Bookie.NoEntryException(&quot;Short read from entrylog &quot; + entryLogId,</span>
+                    ledgerId, entryId);
+<span class="nc" id="L835">        } catch (EntryLookupException e) {</span>
+<span class="nc" id="L836">            throw new IOException(e.toString());</span>
+<span class="fc" id="L837">        }</span>
+
+<span class="fc" id="L839">        ByteBuf data = allocator.buffer(entrySize, entrySize);</span>
+<span class="fc" id="L840">        int rc = readFromLogChannel(entryLogId, fc, data, pos);</span>
+<span class="pc bpc" id="L841" title="1 of 2 branches missed.">        if (rc != entrySize) {</span>
+            // Note that throwing NoEntryException here instead of IOException is not
+            // without risk. If all bookies in a quorum throw this same exception
+            // the client will assume that it has reached the end of the ledger.
+            // However, this may not be the case, as a very specific error condition
+            // could have occurred, where the length of the entry was corrupted on all
+            // replicas. However, the chance of this happening is very very low, so
+            // returning NoEntryException is mostly safe.
+<span class="nc" id="L849">            data.release();</span>
+<span class="nc" id="L850">            throw new Bookie.NoEntryException(&quot;Short read for &quot; + ledgerId + &quot;@&quot;</span>
+                                              + entryId + &quot; in &quot; + entryLogId + &quot;@&quot;
+                                              + pos + &quot;(&quot; + rc + &quot;!=&quot; + entrySize + &quot;)&quot;, ledgerId, entryId);
+        }
+<span class="fc" id="L854">        data.writerIndex(entrySize);</span>
+
+<span class="fc" id="L856">        return data;</span>
+    }
+
+    public ByteBuf readEntry(long ledgerId, long entryId, long location) throws IOException, Bookie.NoEntryException {
+<span class="fc" id="L860">        return internalReadEntry(ledgerId, entryId, location, true /* validateEntry */);</span>
+    }
+
+    /**
+     * Read the header of an entry log.
+     */
+    private Header getHeaderForLogId(long entryLogId) throws IOException {
+<span class="nc" id="L867">        BufferedReadChannel bc = getChannelForLogId(entryLogId);</span>
+
+        // Allocate buffer to read (version, ledgersMapOffset, ledgerCount)
+<span class="nc" id="L870">        ByteBuf headers = allocator.directBuffer(LOGFILE_HEADER_SIZE);</span>
+        try {
+<span class="nc" id="L872">            bc.read(headers, 0);</span>
+
+            // Skip marker string &quot;BKLO&quot;
+<span class="nc" id="L875">            headers.readInt();</span>
+
+<span class="nc" id="L877">            int headerVersion = headers.readInt();</span>
+<span class="nc bnc" id="L878" title="All 4 branches missed.">            if (headerVersion &lt; HEADER_V0 || headerVersion &gt; HEADER_CURRENT_VERSION) {</span>
+<span class="nc" id="L879">                LOG.info(&quot;Unknown entry log header version for log {}: {}&quot;, entryLogId, headerVersion);</span>
+            }
+
+<span class="nc" id="L882">            long ledgersMapOffset = headers.readLong();</span>
+<span class="nc" id="L883">            int ledgersCount = headers.readInt();</span>
+<span class="nc" id="L884">            return new Header(headerVersion, ledgersMapOffset, ledgersCount);</span>
+        } finally {
+<span class="nc" id="L886">            headers.release();</span>
+        }
+    }
+
+    private BufferedReadChannel getChannelForLogId(long entryLogId) throws IOException {
+<span class="fc" id="L891">        BufferedReadChannel fc = getFromChannels(entryLogId);</span>
+<span class="fc bfc" id="L892" title="All 2 branches covered.">        if (fc != null) {</span>
+<span class="fc" id="L893">            return fc;</span>
+        }
+<span class="fc" id="L895">        File file = findFile(entryLogId);</span>
+        // get channel is used to open an existing entry log file
+        // it would be better to open using read mode
+<span class="fc" id="L898">        FileChannel newFc = new RandomAccessFile(file, &quot;r&quot;).getChannel();</span>
+<span class="fc" id="L899">        FileChannel oldFc = logid2FileChannel.putIfAbsent(entryLogId, newFc);</span>
+<span class="pc bpc" id="L900" title="1 of 2 branches missed.">        if (null != oldFc) {</span>
+<span class="nc" id="L901">            newFc.close();</span>
+<span class="nc" id="L902">            newFc = oldFc;</span>
+        }
+        // We set the position of the write buffer of this buffered channel to Long.MAX_VALUE
+        // so that there are no overlaps with the write buffer while reading
+<span class="fc" id="L906">        fc = new BufferedReadChannel(newFc, conf.getReadBufferBytes());</span>
+<span class="fc" id="L907">        putInReadChannels(entryLogId, fc);</span>
+<span class="fc" id="L908">        return fc;</span>
+    }
+
+    /**
+     * Whether the log file exists or not.
+     */
+    boolean logExists(long logId) {
+<span class="nc bnc" id="L915" title="All 2 branches missed.">        for (File d : ledgerDirsManager.getAllLedgerDirs()) {</span>
+<span class="nc" id="L916">            File f = new File(d, Long.toHexString(logId) + &quot;.log&quot;);</span>
+<span class="nc bnc" id="L917" title="All 2 branches missed.">            if (f.exists()) {</span>
+<span class="nc" id="L918">                return true;</span>
+            }
+<span class="nc" id="L920">        }</span>
+<span class="nc" id="L921">        return false;</span>
+    }
+
+    /**
+     * Returns a set with the ids of all the entry log files.
+     *
+     * @throws IOException
+     */
+    public Set&lt;Long&gt; getEntryLogsSet() throws IOException {
+<span class="nc" id="L930">        Set&lt;Long&gt; entryLogs = Sets.newTreeSet();</span>
+
+<span class="nc" id="L932">        final FilenameFilter logFileFilter = new FilenameFilter() {</span>
+            @Override
+            public boolean accept(File dir, String name) {
+<span class="nc" id="L935">                return name.endsWith(&quot;.log&quot;);</span>
+            }
+        };
+
+<span class="nc bnc" id="L939" title="All 2 branches missed.">        for (File d : ledgerDirsManager.getAllLedgerDirs()) {</span>
+<span class="nc" id="L940">            File[] files = d.listFiles(logFileFilter);</span>
+<span class="nc bnc" id="L941" title="All 2 branches missed.">            if (files == null) {</span>
+<span class="nc" id="L942">                throw new IOException(&quot;Failed to get list of files in directory &quot; + d);</span>
+            }
+
+<span class="nc bnc" id="L945" title="All 2 branches missed.">            for (File f : files) {</span>
+<span class="nc" id="L946">                Long entryLogId = Long.parseLong(f.getName().split(&quot;.log&quot;)[0], 16);</span>
+<span class="nc" id="L947">                entryLogs.add(entryLogId);</span>
+            }
+<span class="nc" id="L949">        }</span>
+<span class="nc" id="L950">        return entryLogs;</span>
+    }
+
+    private File findFile(long logId) throws FileNotFoundException {
+<span class="pc bpc" id="L954" title="1 of 2 branches missed.">        for (File d : ledgerDirsManager.getAllLedgerDirs()) {</span>
+<span class="fc" id="L955">            File f = new File(d, Long.toHexString(logId) + &quot;.log&quot;);</span>
+<span class="pc bpc" id="L956" title="1 of 2 branches missed.">            if (f.exists()) {</span>
+<span class="fc" id="L957">                return f;</span>
+            }
+<span class="nc" id="L959">        }</span>
+<span class="nc" id="L960">        throw new FileNotFoundException(&quot;No file for log &quot; + Long.toHexString(logId));</span>
+    }
+
+    /**
+     * Scan entry log.
+     *
+     * @param entryLogId Entry Log Id
+     * @param scanner Entry Log Scanner
+     * @throws IOException
+     */
+    public void scanEntryLog(long entryLogId, EntryLogScanner scanner) throws IOException {
+        // Buffer where to read the entrySize (4 bytes) and the ledgerId (8 bytes)
+<span class="nc" id="L972">        ByteBuf headerBuffer = Unpooled.buffer(4 + 8);</span>
+        BufferedReadChannel bc;
+        // Get the BufferedChannel for the current entry log file
+        try {
+<span class="nc" id="L976">            bc = getChannelForLogId(entryLogId);</span>
+<span class="nc" id="L977">        } catch (IOException e) {</span>
+<span class="nc" id="L978">            LOG.warn(&quot;Failed to get channel to scan entry log: &quot; + entryLogId + &quot;.log&quot;);</span>
+<span class="nc" id="L979">            throw e;</span>
+<span class="nc" id="L980">        }</span>
+        // Start the read position in the current entry log file to be after
+        // the header where all of the ledger entries are.
+<span class="nc" id="L983">        long pos = LOGFILE_HEADER_SIZE;</span>
+
+        // Start with a reasonably sized buffer size
+<span class="nc" id="L986">        ByteBuf data = allocator.directBuffer(1024 * 1024);</span>
+
+        try {
+
+            // Read through the entry log file and extract the ledger ID's.
+            while (true) {
+                // Check if we've finished reading the entry log file.
+<span class="nc bnc" id="L993" title="All 2 branches missed.">                if (pos &gt;= bc.size()) {</span>
+<span class="nc" id="L994">                    break;</span>
+                }
+<span class="nc bnc" id="L996" title="All 2 branches missed.">                if (readFromLogChannel(entryLogId, bc, headerBuffer, pos) != headerBuffer.capacity()) {</span>
+<span class="nc" id="L997">                    LOG.warn(&quot;Short read for entry size from entrylog {}&quot;, entryLogId);</span>
+<span class="nc" id="L998">                    return;</span>
+                }
+<span class="nc" id="L1000">                long offset = pos;</span>
+<span class="nc" id="L1001">                pos += 4;</span>
+<span class="nc" id="L1002">                int entrySize = headerBuffer.readInt();</span>
+<span class="nc" id="L1003">                long ledgerId = headerBuffer.readLong();</span>
+<span class="nc" id="L1004">                headerBuffer.clear();</span>
+
+<span class="nc bnc" id="L1006" title="All 4 branches missed.">                if (ledgerId == INVALID_LID || !scanner.accept(ledgerId)) {</span>
+                    // skip this entry
+<span class="nc" id="L1008">                    pos += entrySize;</span>
+<span class="nc" id="L1009">                    continue;</span>
+                }
+                // read the entry
+
+<span class="nc" id="L1013">                data.clear();</span>
+<span class="nc bnc" id="L1014" title="All 2 branches missed.">                if (entrySize &lt; 0) {</span>
+<span class="nc" id="L1015">                    LOG.warn(&quot;bad read for ledger entry from entryLog {}@{} (entry size {})&quot;,</span>
+<span class="nc" id="L1016">                            entryLogId, pos, entrySize);</span>
+<span class="nc" id="L1017">                    return;</span>
+                }
+<span class="nc" id="L1019">                data.capacity(entrySize);</span>
+<span class="nc" id="L1020">                int rc = readFromLogChannel(entryLogId, bc, data, pos);</span>
+<span class="nc bnc" id="L1021" title="All 2 branches missed.">                if (rc != entrySize) {</span>
+<span class="nc" id="L1022">                    LOG.warn(&quot;Short read for ledger entry from entryLog {}@{} ({} != {})&quot;,</span>
+<span class="nc" id="L1023">                            entryLogId, pos, rc, entrySize);</span>
+<span class="nc" id="L1024">                    return;</span>
+                }
+                // process the entry
+<span class="nc" id="L1027">                scanner.process(ledgerId, offset, data);</span>
+
+                // Advance position to the next entry
+<span class="nc" id="L1030">                pos += entrySize;</span>
+<span class="nc" id="L1031">            }</span>
+        } finally {
+<span class="nc" id="L1033">            data.release();</span>
+        }
+<span class="nc" id="L1035">    }</span>
+
+    public EntryLogMetadata getEntryLogMetadata(long entryLogId) throws IOException {
+        // First try to extract the EntryLogMetada from the index, if there's no index then fallback to scanning the
+        // entry log
+        try {
+<span class="nc" id="L1041">            return extractEntryLogMetadataFromIndex(entryLogId);</span>
+<span class="nc" id="L1042">        } catch (Exception e) {</span>
+<span class="nc" id="L1043">            LOG.info(&quot;Failed to get ledgers map index from: {}.log : {}&quot;, entryLogId, e.getMessage());</span>
+
+            // Fall-back to scanning
+<span class="nc" id="L1046">            return extractEntryLogMetadataByScanning(entryLogId);</span>
+        }
+    }
+
+    EntryLogMetadata extractEntryLogMetadataFromIndex(long entryLogId) throws IOException {
+<span class="nc" id="L1051">        Header header = getHeaderForLogId(entryLogId);</span>
+
+<span class="nc bnc" id="L1053" title="All 2 branches missed.">        if (header.version &lt; HEADER_V1) {</span>
+<span class="nc" id="L1054">            throw new IOException(&quot;Old log file header without ledgers map on entryLogId &quot; + entryLogId);</span>
+        }
+
+<span class="nc bnc" id="L1057" title="All 2 branches missed.">        if (header.ledgersMapOffset == 0L) {</span>
+            // The index was not stored in the log file (possibly because the bookie crashed before flushing it)
+<span class="nc" id="L1059">            throw new IOException(&quot;No ledgers map index found on entryLogId &quot; + entryLogId);</span>
+        }
+
+<span class="nc bnc" id="L1062" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L1063">            LOG.debug(&quot;Recovering ledgers maps for log {} at offset: {}&quot;, entryLogId, header.ledgersMapOffset);</span>
+        }
+
+<span class="nc" id="L1066">        BufferedReadChannel bc = getChannelForLogId(entryLogId);</span>
+
+        // There can be multiple entries containing the various components of the serialized ledgers map
+<span class="nc" id="L1069">        long offset = header.ledgersMapOffset;</span>
+<span class="nc" id="L1070">        EntryLogMetadata meta = new EntryLogMetadata(entryLogId);</span>
+
+<span class="nc" id="L1072">        final int maxMapSize = LEDGERS_MAP_HEADER_SIZE + LEDGERS_MAP_ENTRY_SIZE * LEDGERS_MAP_MAX_BATCH_SIZE;</span>
+<span class="nc" id="L1073">        ByteBuf ledgersMap = allocator.directBuffer(maxMapSize);</span>
+
+        try {
+<span class="nc bnc" id="L1076" title="All 2 branches missed.">            while (offset &lt; bc.size()) {</span>
+                // Read ledgers map size
+<span class="nc" id="L1078">                sizeBuffer.get().clear();</span>
+<span class="nc" id="L1079">                bc.read(sizeBuffer.get(), offset);</span>
+
+<span class="nc" id="L1081">                int ledgersMapSize = sizeBuffer.get().readInt();</span>
+
+                // Read the index into a buffer
+<span class="nc" id="L1084">                ledgersMap.clear();</span>
+<span class="nc" id="L1085">                bc.read(ledgersMap, offset + 4, ledgersMapSize);</span>
+
+                // Discard ledgerId and entryId
+<span class="nc" id="L1088">                long lid = ledgersMap.readLong();</span>
+<span class="nc bnc" id="L1089" title="All 2 branches missed.">                if (lid != INVALID_LID) {</span>
+<span class="nc" id="L1090">                    throw new IOException(&quot;Cannot deserialize ledgers map from ledger &quot; + lid);</span>
+                }
+
+<span class="nc" id="L1093">                long entryId = ledgersMap.readLong();</span>
+<span class="nc bnc" id="L1094" title="All 2 branches missed.">                if (entryId != LEDGERS_MAP_ENTRY_ID) {</span>
+<span class="nc" id="L1095">                    throw new IOException(&quot;Cannot deserialize ledgers map from entryId &quot; + entryId);</span>
+                }
+
+                // Read the number of ledgers in the current entry batch
+<span class="nc" id="L1099">                int ledgersCount = ledgersMap.readInt();</span>
+
+                // Extract all (ledger,size) tuples from buffer
+<span class="nc bnc" id="L1102" title="All 2 branches missed.">                for (int i = 0; i &lt; ledgersCount; i++) {</span>
+<span class="nc" id="L1103">                    long ledgerId = ledgersMap.readLong();</span>
+<span class="nc" id="L1104">                    long size = ledgersMap.readLong();</span>
+
+<span class="nc bnc" id="L1106" title="All 2 branches missed.">                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L1107">                        LOG.debug(&quot;Recovering ledgers maps for log {} -- Found ledger: {} with size: {}&quot;,</span>
+<span class="nc" id="L1108">                                entryLogId, ledgerId, size);</span>
+                    }
+<span class="nc" id="L1110">                    meta.addLedgerSize(ledgerId, size);</span>
+                }
+<span class="nc bnc" id="L1112" title="All 2 branches missed.">                if (ledgersMap.isReadable()) {</span>
+<span class="nc" id="L1113">                    throw new IOException(&quot;Invalid entry size when reading ledgers map&quot;);</span>
+                }
+
+                // Move to next entry, if any
+<span class="nc" id="L1117">                offset += ledgersMapSize + 4;</span>
+<span class="nc" id="L1118">            }</span>
+<span class="nc" id="L1119">        } catch (IndexOutOfBoundsException e) {</span>
+<span class="nc" id="L1120">            throw new IOException(e);</span>
+        } finally {
+<span class="nc" id="L1122">            ledgersMap.release();</span>
+        }
+
+<span class="nc bnc" id="L1125" title="All 2 branches missed.">        if (meta.getLedgersMap().size() != header.ledgersCount) {</span>
+<span class="nc" id="L1126">            throw new IOException(&quot;Not all ledgers were found in ledgers map index. expected: &quot; + header.ledgersCount</span>
+<span class="nc" id="L1127">                    + &quot; -- found: &quot; + meta.getLedgersMap().size() + &quot; -- entryLogId: &quot; + entryLogId);</span>
+        }
+
+<span class="nc" id="L1130">        return meta;</span>
+    }
+
+    private EntryLogMetadata extractEntryLogMetadataByScanning(long entryLogId) throws IOException {
+<span class="nc" id="L1134">        final EntryLogMetadata meta = new EntryLogMetadata(entryLogId);</span>
+
+        // Read through the entry log file and extract the entry log meta
+<span class="nc" id="L1137">        scanEntryLog(entryLogId, new EntryLogScanner() {</span>
+            @Override
+            public void process(long ledgerId, long offset, ByteBuf entry) throws IOException {
+                // add new entry size of a ledger to entry log meta
+<span class="nc" id="L1141">                meta.addLedgerSize(ledgerId, entry.readableBytes() + 4);</span>
+<span class="nc" id="L1142">            }</span>
+
+            @Override
+            public boolean accept(long ledgerId) {
+<span class="nc bnc" id="L1146" title="All 2 branches missed.">                return ledgerId &gt;= 0;</span>
+            }
+        });
+
+<span class="nc bnc" id="L1150" title="All 2 branches missed.">        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L1151">            LOG.debug(&quot;Retrieved entry log meta data entryLogId: {}, meta: {}&quot;, entryLogId, meta);</span>
+        }
+<span class="nc" id="L1153">        return meta;</span>
+    }
+
+    /**
+     * Shutdown method to gracefully stop entry logger.
+     */
+    public void shutdown() {
+        // since logChannel is buffered channel, do flush when shutting down
+<span class="fc" id="L1161">        LOG.info(&quot;Stopping EntryLogger&quot;);</span>
+        try {
+<span class="fc" id="L1163">            flush();</span>
+<span class="fc bfc" id="L1164" title="All 2 branches covered.">            for (FileChannel fc : logid2FileChannel.values()) {</span>
+<span class="fc" id="L1165">                fc.close();</span>
+<span class="fc" id="L1166">            }</span>
+            // clear the mapping, so we don't need to go through the channels again in finally block in normal case.
+<span class="fc" id="L1168">            logid2FileChannel.clear();</span>
+<span class="fc" id="L1169">            entryLogManager.close();</span>
+<span class="fc" id="L1170">            synchronized (compactionLogLock) {</span>
+<span class="pc bpc" id="L1171" title="1 of 2 branches missed.">                if (compactionLogChannel != null) {</span>
+<span class="nc" id="L1172">                    compactionLogChannel.close();</span>
+<span class="nc" id="L1173">                    compactionLogChannel = null;</span>
+                }
+<span class="fc" id="L1175">            }</span>
+<span class="nc" id="L1176">        } catch (IOException ie) {</span>
+            // we have no idea how to avoid io exception during shutting down, so just ignore it
+<span class="nc" id="L1178">            LOG.error(&quot;Error flush entry log during shutting down, which may cause entry log corrupted.&quot;, ie);</span>
+        } finally {
+<span class="pc bpc" id="L1180" title="1 of 2 branches missed.">            for (FileChannel fc : logid2FileChannel.values()) {</span>
+<span class="nc" id="L1181">                IOUtils.close(LOG, fc);</span>
+<span class="nc" id="L1182">            }</span>
+
+<span class="fc" id="L1184">            entryLogManager.forceClose();</span>
+<span class="fc" id="L1185">            synchronized (compactionLogLock) {</span>
+<span class="fc" id="L1186">                IOUtils.close(LOG, compactionLogChannel);</span>
+<span class="fc" id="L1187">            }</span>
+        }
+        // shutdown the pre-allocation thread
+<span class="fc" id="L1190">        entryLoggerAllocator.stop();</span>
+<span class="fc" id="L1191">    }</span>
+
+    protected LedgerDirsManager getLedgerDirsManager() {
+<span class="nc" id="L1194">        return ledgerDirsManager;</span>
+    }
+
+    /**
+     * Convert log filename (hex format with suffix) to logId in long.
+     */
+    static long fileName2LogId(String fileName) {
+<span class="nc bnc" id="L1201" title="All 4 branches missed.">        if (fileName != null &amp;&amp; fileName.contains(&quot;.&quot;)) {</span>
+<span class="nc" id="L1202">            fileName = fileName.split(&quot;\\.&quot;)[0];</span>
+        }
+        try {
+<span class="nc" id="L1205">            return Long.parseLong(fileName, 16);</span>
+<span class="nc" id="L1206">        } catch (Exception nfe) {</span>
+<span class="nc" id="L1207">            LOG.error(&quot;Invalid log file name {} found when trying to convert to logId.&quot;, fileName, nfe);</span>
+        }
+<span class="nc" id="L1209">        return INVALID_LID;</span>
+    }
+
+    /**
+     * Convert log Id to hex string.
+     */
+    static String logId2HexString(long logId) {
+<span class="nc" id="L1216">        return Long.toHexString(logId);</span>
+    }
+
+    /**
+     * Datastructure which maintains the status of logchannels. When a
+     * logChannel is created entry of &lt; entryLogId, false &gt; will be made to this
+     * sortedmap and when logChannel is rotated and flushed then the entry is
+     * updated to &lt; entryLogId, true &gt; and all the lowest entries with
+     * &lt; entryLogId, true &gt; status will be removed from the sortedmap. So that way
+     * we could get least unflushed LogId.
+     *
+     */
+    static class RecentEntryLogsStatus {
+        private final SortedMap&lt;Long, Boolean&gt; entryLogsStatusMap;
+        private long leastUnflushedLogId;
+
+<span class="fc" id="L1232">        RecentEntryLogsStatus(long leastUnflushedLogId) {</span>
+<span class="fc" id="L1233">            entryLogsStatusMap = new TreeMap&lt;Long, Boolean&gt;();</span>
+<span class="fc" id="L1234">            this.leastUnflushedLogId = leastUnflushedLogId;</span>
+<span class="fc" id="L1235">        }</span>
+
+        synchronized void createdEntryLog(Long entryLogId) {
+<span class="fc" id="L1238">            entryLogsStatusMap.put(entryLogId, false);</span>
+<span class="fc" id="L1239">        }</span>
+
+        synchronized void flushRotatedEntryLog(Long entryLogId) {
+<span class="nc" id="L1242">            entryLogsStatusMap.replace(entryLogId, true);</span>
+<span class="nc bnc" id="L1243" title="All 4 branches missed.">            while ((!entryLogsStatusMap.isEmpty()) &amp;&amp; (entryLogsStatusMap.get(entryLogsStatusMap.firstKey()))) {</span>
+<span class="nc" id="L1244">                long leastFlushedLogId = entryLogsStatusMap.firstKey();</span>
+<span class="nc" id="L1245">                entryLogsStatusMap.remove(leastFlushedLogId);</span>
+<span class="nc" id="L1246">                leastUnflushedLogId = leastFlushedLogId + 1;</span>
+<span class="nc" id="L1247">            }</span>
+<span class="nc" id="L1248">        }</span>
+
+        synchronized long getLeastUnflushedLogId() {
+<span class="nc" id="L1251">            return leastUnflushedLogId;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

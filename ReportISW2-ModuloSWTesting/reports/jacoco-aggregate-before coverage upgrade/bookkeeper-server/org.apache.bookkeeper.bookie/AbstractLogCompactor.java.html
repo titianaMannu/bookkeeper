@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>AbstractLogCompactor.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">AbstractLogCompactor.java</span></div><h1>AbstractLogCompactor.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import com.google.common.util.concurrent.RateLimiter;
+
+import org.apache.bookkeeper.conf.ServerConfiguration;
+
+/**
+ * Abstract entry log compactor used for compaction.
+ */
+public abstract class AbstractLogCompactor {
+
+    protected final ServerConfiguration conf;
+    protected final Throttler throttler;
+
+    interface LogRemovalListener {
+        void removeEntryLog(long logToRemove);
+    }
+
+    protected final LogRemovalListener logRemovalListener;
+
+<span class="fc" id="L42">    public AbstractLogCompactor(ServerConfiguration conf, LogRemovalListener logRemovalListener) {</span>
+<span class="fc" id="L43">        this.conf = conf;</span>
+<span class="fc" id="L44">        this.throttler = new Throttler(conf);</span>
+<span class="fc" id="L45">        this.logRemovalListener = logRemovalListener;</span>
+<span class="fc" id="L46">    }</span>
+
+    /**
+     * Compact entry log file.
+     * @param entryLogMeta log metadata for the entry log to be compacted
+     * @return true for succeed
+     */
+    public abstract boolean compact(EntryLogMetadata entryLogMeta);
+
+    /**
+     * Do nothing by default. Intended for subclass to override this method.
+     */
+<span class="nc" id="L58">    public void cleanUpAndRecover() {}</span>
+
+    static class Throttler {
+        private final RateLimiter rateLimiter;
+        private final boolean isThrottleByBytes;
+
+<span class="fc" id="L64">        Throttler(ServerConfiguration conf) {</span>
+<span class="fc" id="L65">            this.isThrottleByBytes  = conf.getIsThrottleByBytes();</span>
+<span class="pc bpc" id="L66" title="1 of 2 branches missed.">            this.rateLimiter = RateLimiter.create(this.isThrottleByBytes</span>
+<span class="pc" id="L67">                ? conf.getCompactionRateByBytes() : conf.getCompactionRateByEntries());</span>
+<span class="fc" id="L68">        }</span>
+
+        // acquire. if bybytes: bytes of this entry; if byentries: 1.
+        void acquire(int permits) {
+<span class="nc bnc" id="L72" title="All 2 branches missed.">            rateLimiter.acquire(this.isThrottleByBytes ? permits : 1);</span>
+<span class="nc" id="L73">        }</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

@@ -1,0 +1,819 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>MSLedgerManagerFactory.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.meta</a> &gt; <span class="el_source">MSLedgerManagerFactory.java</span></div><h1>MSLedgerManagerFactory.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.meta;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static org.apache.bookkeeper.metastore.MetastoreTable.ALL_FIELDS;
+import static org.apache.bookkeeper.metastore.MetastoreTable.NON_FIELDS;
+
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import java.io.IOException;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
+import org.apache.bookkeeper.conf.AbstractConfiguration;
+import org.apache.bookkeeper.meta.zk.ZKMetadataDriverBase;
+import org.apache.bookkeeper.metastore.MSException;
+import org.apache.bookkeeper.metastore.MSWatchedEvent;
+import org.apache.bookkeeper.metastore.MetaStore;
+import org.apache.bookkeeper.metastore.MetastoreCallback;
+import org.apache.bookkeeper.metastore.MetastoreCursor;
+import org.apache.bookkeeper.metastore.MetastoreCursor.ReadEntriesCallback;
+import org.apache.bookkeeper.metastore.MetastoreException;
+import org.apache.bookkeeper.metastore.MetastoreFactory;
+import org.apache.bookkeeper.metastore.MetastoreScannableTable;
+import org.apache.bookkeeper.metastore.MetastoreTable;
+import org.apache.bookkeeper.metastore.MetastoreTableItem;
+import org.apache.bookkeeper.metastore.MetastoreUtils;
+import org.apache.bookkeeper.metastore.MetastoreWatcher;
+import org.apache.bookkeeper.metastore.Value;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.LedgerMetadataListener;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.Processor;
+import org.apache.bookkeeper.replication.ReplicationException;
+import org.apache.bookkeeper.util.BookKeeperConstants;
+import org.apache.bookkeeper.util.StringUtils;
+import org.apache.bookkeeper.util.ZkUtils;
+import org.apache.bookkeeper.versioning.Version;
+import org.apache.bookkeeper.versioning.Versioned;
+import org.apache.commons.configuration.ConfigurationException;
+import org.apache.zookeeper.AsyncCallback;
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.ZKUtil;
+import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.data.ACL;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * MetaStore Based Ledger Manager Factory.
+ *
+ * &lt;p&gt;MSLedgerManagerFactory is a legacy abstraction that mixing zookeeper with a metadata store
+ * interface. It is not used by any production systems. It should be deprecated soon.
+ *
+ * @deprecated since 4.7.0
+ */
+<span class="nc" id="L85">@Slf4j</span>
+<span class="nc" id="L86">public class MSLedgerManagerFactory extends AbstractZkLedgerManagerFactory {</span>
+
+<span class="nc" id="L88">    private static final Logger LOG = LoggerFactory.getLogger(MSLedgerManagerFactory.class);</span>
+
+    private static final int MS_CONNECT_BACKOFF_MS = 200;
+
+    public static final int CUR_VERSION = 1;
+    public static final String NAME = &quot;ms&quot;;
+
+    public static final String TABLE_NAME = &quot;LEDGER&quot;;
+    public static final String META_FIELD = &quot;.META&quot;;
+
+    AbstractConfiguration conf;
+    MetaStore metastore;
+
+    @Override
+    public int getCurrentVersion() {
+<span class="nc" id="L103">        return CUR_VERSION;</span>
+    }
+
+    @Override
+    public LedgerManagerFactory initialize(final AbstractConfiguration conf,
+                                           final LayoutManager layoutManager,
+                                           final int factoryVersion) throws IOException {
+<span class="nc" id="L110">        checkArgument(layoutManager instanceof ZkLayoutManager);</span>
+<span class="nc" id="L111">        ZkLayoutManager zkLayoutManager = (ZkLayoutManager) layoutManager;</span>
+
+<span class="nc bnc" id="L113" title="All 2 branches missed.">        if (CUR_VERSION != factoryVersion) {</span>
+<span class="nc" id="L114">            throw new IOException(&quot;Incompatible layout version found : &quot; + factoryVersion);</span>
+        }
+<span class="nc" id="L116">        this.conf = conf;</span>
+<span class="nc" id="L117">        this.zk = zkLayoutManager.getZk();</span>
+
+        // load metadata store
+<span class="nc" id="L120">        String msName = conf.getMetastoreImplClass();</span>
+        try {
+<span class="nc" id="L122">            metastore = MetastoreFactory.createMetaStore(msName);</span>
+
+            // TODO: should record version in somewhere. e.g. ZooKeeper
+            // {@link https://github.com/apache/bookkeeper/issues/282}
+<span class="nc" id="L126">            int msVersion = metastore.getVersion();</span>
+<span class="nc" id="L127">            metastore.init(conf, msVersion);</span>
+<span class="nc" id="L128">        } catch (Throwable t) {</span>
+<span class="nc" id="L129">            throw new IOException(&quot;Failed to initialize metastore &quot; + msName + &quot; : &quot;, t);</span>
+<span class="nc" id="L130">        }</span>
+
+<span class="nc" id="L132">        return this;</span>
+    }
+
+    @Override
+    public void close() throws IOException {
+<span class="nc" id="L137">        metastore.close();</span>
+<span class="nc" id="L138">    }</span>
+
+    static Long key2LedgerId(String key) {
+<span class="nc bnc" id="L141" title="All 2 branches missed.">        return null == key ? null : Long.parseLong(key, 10);</span>
+    }
+
+    static String ledgerId2Key(Long lid) {
+<span class="nc bnc" id="L145" title="All 2 branches missed.">        return null == lid ? null : StringUtils.getZKStringId(lid);</span>
+    }
+
+    static String rangeToString(Long firstLedger, boolean firstInclusive, Long lastLedger, boolean lastInclusive) {
+<span class="nc" id="L149">        StringBuilder sb = new StringBuilder();</span>
+<span class="nc bnc" id="L150" title="All 4 branches missed.">        sb.append(firstInclusive ? &quot;[ &quot; : &quot;( &quot;).append(firstLedger).append(&quot; ~ &quot;).append(lastLedger)</span>
+<span class="nc" id="L151">                .append(lastInclusive ? &quot; ]&quot; : &quot; )&quot;);</span>
+<span class="nc" id="L152">        return sb.toString();</span>
+    }
+
+    static SortedSet&lt;Long&gt; entries2Ledgers(Iterator&lt;MetastoreTableItem&gt; entries) {
+<span class="nc" id="L156">        SortedSet&lt;Long&gt; ledgers = new TreeSet&lt;Long&gt;();</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">        while (entries.hasNext()) {</span>
+<span class="nc" id="L158">            MetastoreTableItem item = entries.next();</span>
+            try {
+<span class="nc" id="L160">                ledgers.add(key2LedgerId(item.getKey()));</span>
+<span class="nc" id="L161">            } catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L162">                LOG.warn(&quot;Found invalid ledger key {}&quot;, item.getKey());</span>
+<span class="nc" id="L163">            }</span>
+<span class="nc" id="L164">        }</span>
+<span class="nc" id="L165">        return ledgers;</span>
+    }
+
+<span class="nc" id="L168">    static class SyncResult&lt;T&gt; {</span>
+        T value;
+        int rc;
+<span class="nc" id="L171">        boolean finished = false;</span>
+
+        public synchronized void complete(int rc, T value) {
+<span class="nc" id="L174">            this.rc = rc;</span>
+<span class="nc" id="L175">            this.value = value;</span>
+<span class="nc" id="L176">            finished = true;</span>
+
+<span class="nc" id="L178">            notify();</span>
+<span class="nc" id="L179">        }</span>
+
+        public synchronized void block() {
+            try {
+<span class="nc bnc" id="L183" title="All 2 branches missed.">                while (!finished) {</span>
+<span class="nc" id="L184">                    wait();</span>
+                }
+<span class="nc" id="L186">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L187">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L188">            }</span>
+<span class="nc" id="L189">        }</span>
+
+        public synchronized int getRetCode() {
+<span class="nc" id="L192">            return rc;</span>
+        }
+
+        public synchronized T getResult() {
+<span class="nc" id="L196">            return value;</span>
+        }
+    }
+
+    @Override
+    public LedgerIdGenerator newLedgerIdGenerator() {
+<span class="nc" id="L202">        List&lt;ACL&gt; zkAcls = ZkUtils.getACLs(conf);</span>
+<span class="nc" id="L203">        return new ZkLedgerIdGenerator(</span>
+            zk,
+<span class="nc" id="L205">            ZKMetadataDriverBase.resolveZkLedgersRootPath(conf),</span>
+            MsLedgerManager.IDGEN_ZNODE,
+            zkAcls);
+    }
+
+    static class MsLedgerManager implements LedgerManager, MetastoreWatcher {
+        final ZooKeeper zk;
+        final AbstractConfiguration conf;
+        private final LedgerMetadataSerDe serDe;
+        final MetaStore metastore;
+        final MetastoreScannableTable ledgerTable;
+        final int maxEntriesPerScan;
+
+        static final String IDGEN_ZNODE = &quot;ms-idgen&quot;;
+
+        // ledger metadata listeners
+<span class="nc" id="L221">        protected final ConcurrentMap&lt;Long, Set&lt;LedgerMetadataListener&gt;&gt; listeners =</span>
+                new ConcurrentHashMap&lt;Long, Set&lt;LedgerMetadataListener&gt;&gt;();
+
+        // we use this to prevent long stack chains from building up in
+        // callbacks
+        ScheduledExecutorService scheduler;
+
+        protected class ReadLedgerMetadataTask implements Runnable {
+
+            final long ledgerId;
+
+<span class="nc" id="L232">            ReadLedgerMetadataTask(long ledgerId) {</span>
+<span class="nc" id="L233">                this.ledgerId = ledgerId;</span>
+<span class="nc" id="L234">            }</span>
+
+            @Override
+            public void run() {
+<span class="nc bnc" id="L238" title="All 2 branches missed.">                if (null != listeners.get(ledgerId)) {</span>
+<span class="nc bnc" id="L239" title="All 2 branches missed.">                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L240">                        LOG.debug(&quot;Re-read ledger metadata for {}.&quot;, ledgerId);</span>
+                    }
+<span class="nc" id="L242">                    readLedgerMetadata(ledgerId).whenComplete(</span>
+<span class="nc" id="L243">                            (metadata, exception) -&gt; handleMetadata(metadata, exception));</span>
+                } else {
+<span class="nc bnc" id="L245" title="All 2 branches missed.">                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L246">                        LOG.debug(&quot;Ledger metadata listener for ledger {} is already removed.&quot;, ledgerId);</span>
+                    }
+                }
+<span class="nc" id="L249">            }</span>
+
+            private void handleMetadata(Versioned&lt;LedgerMetadata&gt; metadata, Throwable exception) {
+<span class="nc bnc" id="L252" title="All 2 branches missed.">                if (exception == null) {</span>
+<span class="nc" id="L253">                    final Set&lt;LedgerMetadataListener&gt; listenerSet = listeners.get(ledgerId);</span>
+<span class="nc bnc" id="L254" title="All 2 branches missed.">                    if (null != listenerSet) {</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L256">                            LOG.debug(&quot;Ledger metadata is changed for {} : {}.&quot;, ledgerId, metadata.getValue());</span>
+                        }
+<span class="nc" id="L258">                        scheduler.submit(() -&gt; {</span>
+<span class="nc" id="L259">                                synchronized (listenerSet) {</span>
+<span class="nc bnc" id="L260" title="All 2 branches missed.">                                    for (LedgerMetadataListener listener : listenerSet) {</span>
+<span class="nc" id="L261">                                        listener.onChanged(ledgerId, metadata);</span>
+<span class="nc" id="L262">                                    }</span>
+<span class="nc" id="L263">                                }</span>
+<span class="nc" id="L264">                            });</span>
+                    }
+<span class="nc bnc" id="L266" title="All 2 branches missed.">                } else if (BKException.getExceptionCode(exception)</span>
+                        == BKException.Code.NoSuchLedgerExistsOnMetadataServerException) {
+                    // the ledger is removed, do nothing
+<span class="nc" id="L269">                    Set&lt;LedgerMetadataListener&gt; listenerSet = listeners.remove(ledgerId);</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">                    if (null != listenerSet) {</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L272">                            LOG.debug(&quot;Removed ledger metadata listener set on ledger {} as its ledger is deleted : {}&quot;,</span>
+<span class="nc" id="L273">                                    ledgerId, listenerSet.size());</span>
+                        }
+                    }
+<span class="nc" id="L276">                } else {</span>
+<span class="nc" id="L277">                    LOG.warn(&quot;Failed on read ledger metadata of ledger {}: {}&quot;,</span>
+<span class="nc" id="L278">                             ledgerId, BKException.getExceptionCode(exception));</span>
+<span class="nc" id="L279">                    scheduler.schedule(this, MS_CONNECT_BACKOFF_MS, TimeUnit.MILLISECONDS);</span>
+                }
+<span class="nc" id="L281">            }</span>
+        }
+
+<span class="nc" id="L284">        MsLedgerManager(final AbstractConfiguration conf, final ZooKeeper zk, final MetaStore metastore) {</span>
+<span class="nc" id="L285">            this.conf = conf;</span>
+<span class="nc" id="L286">            this.zk = zk;</span>
+<span class="nc" id="L287">            this.metastore = metastore;</span>
+<span class="nc" id="L288">            this.serDe = new LedgerMetadataSerDe();</span>
+
+            try {
+<span class="nc" id="L291">                ledgerTable = metastore.createScannableTable(TABLE_NAME);</span>
+<span class="nc" id="L292">            } catch (MetastoreException mse) {</span>
+<span class="nc" id="L293">                LOG.error(&quot;Failed to instantiate table &quot; + TABLE_NAME + &quot; in metastore &quot; + metastore.getName());</span>
+<span class="nc" id="L294">                throw new RuntimeException(&quot;Failed to instantiate table &quot; + TABLE_NAME + &quot; in metastore &quot;</span>
+<span class="nc" id="L295">                        + metastore.getName());</span>
+<span class="nc" id="L296">            }</span>
+            // configuration settings
+<span class="nc" id="L298">            maxEntriesPerScan = conf.getMetastoreMaxEntriesPerScan();</span>
+
+<span class="nc" id="L300">            ThreadFactoryBuilder tfb = new ThreadFactoryBuilder()</span>
+<span class="nc" id="L301">                    .setNameFormat(&quot;MSLedgerManagerScheduler-%d&quot;);</span>
+<span class="nc" id="L302">            this.scheduler = Executors.newSingleThreadScheduledExecutor(tfb</span>
+<span class="nc" id="L303">                    .build());</span>
+<span class="nc" id="L304">        }</span>
+
+        @Override
+        public void process(MSWatchedEvent e){
+<span class="nc" id="L308">            long ledgerId = key2LedgerId(e.getKey());</span>
+<span class="nc bnc" id="L309" title="All 3 branches missed.">            switch(e.getType()) {</span>
+            case CHANGED:
+<span class="nc" id="L311">                new ReadLedgerMetadataTask(key2LedgerId(e.getKey())).run();</span>
+
+<span class="nc" id="L313">                break;</span>
+            case REMOVED:
+<span class="nc" id="L315">                Set&lt;LedgerMetadataListener&gt; listenerSet = listeners.get(ledgerId);</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">                if (listenerSet != null) {</span>
+<span class="nc" id="L317">                    synchronized (listenerSet) {</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">                        for (LedgerMetadataListener l : listenerSet){</span>
+<span class="nc" id="L319">                            unregisterLedgerMetadataListener(ledgerId, l);</span>
+<span class="nc" id="L320">                            l.onChanged(ledgerId, null);</span>
+<span class="nc" id="L321">                        }</span>
+<span class="nc" id="L322">                    }</span>
+                }
+
+                break;
+            default:
+<span class="nc" id="L327">                LOG.warn(&quot;Unknown type: {}&quot;, e.getType());</span>
+                break;
+            }
+<span class="nc" id="L330">        }</span>
+
+        @Override
+        public void registerLedgerMetadataListener(long ledgerId, LedgerMetadataListener listener) {
+<span class="nc bnc" id="L334" title="All 2 branches missed.">            if (null != listener) {</span>
+<span class="nc" id="L335">                LOG.info(&quot;Registered ledger metadata listener {} on ledger {}.&quot;, listener, ledgerId);</span>
+<span class="nc" id="L336">                Set&lt;LedgerMetadataListener&gt; listenerSet = listeners.get(ledgerId);</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">                if (listenerSet == null) {</span>
+<span class="nc" id="L338">                    Set&lt;LedgerMetadataListener&gt; newListenerSet = new HashSet&lt;LedgerMetadataListener&gt;();</span>
+<span class="nc" id="L339">                    Set&lt;LedgerMetadataListener&gt; oldListenerSet = listeners.putIfAbsent(ledgerId, newListenerSet);</span>
+<span class="nc bnc" id="L340" title="All 2 branches missed.">                    if (null != oldListenerSet) {</span>
+<span class="nc" id="L341">                        listenerSet = oldListenerSet;</span>
+                    } else {
+<span class="nc" id="L343">                        listenerSet = newListenerSet;</span>
+                    }
+                }
+<span class="nc" id="L346">                synchronized (listenerSet) {</span>
+<span class="nc" id="L347">                    listenerSet.add(listener);</span>
+<span class="nc" id="L348">                }</span>
+<span class="nc" id="L349">                new ReadLedgerMetadataTask(ledgerId).run();</span>
+            }
+<span class="nc" id="L351">        }</span>
+
+        @Override
+        public void unregisterLedgerMetadataListener(long ledgerId, LedgerMetadataListener listener) {
+<span class="nc" id="L355">            Set&lt;LedgerMetadataListener&gt; listenerSet = listeners.get(ledgerId);</span>
+<span class="nc bnc" id="L356" title="All 2 branches missed.">            if (listenerSet != null) {</span>
+<span class="nc" id="L357">                synchronized (listenerSet) {</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">                    if (listenerSet.remove(listener)) {</span>
+<span class="nc" id="L359">                        LOG.info(&quot;Unregistered ledger metadata listener {} on ledger {}.&quot;, listener, ledgerId);</span>
+                    }
+<span class="nc bnc" id="L361" title="All 2 branches missed.">                    if (listenerSet.isEmpty()) {</span>
+<span class="nc" id="L362">                        listeners.remove(ledgerId, listenerSet);</span>
+                    }
+<span class="nc" id="L364">                }</span>
+            }
+<span class="nc" id="L366">        }</span>
+
+        @Override
+        public void close() {
+            try {
+<span class="nc" id="L371">                scheduler.shutdown();</span>
+<span class="nc" id="L372">            } catch (Exception e) {</span>
+<span class="nc" id="L373">                LOG.warn(&quot;Error when closing MsLedgerManager : &quot;, e);</span>
+<span class="nc" id="L374">            }</span>
+<span class="nc" id="L375">            ledgerTable.close();</span>
+<span class="nc" id="L376">        }</span>
+
+        @Override
+        public CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; createLedgerMetadata(long lid, LedgerMetadata metadata) {
+<span class="nc" id="L380">            CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L381">            MetastoreCallback&lt;Version&gt; msCallback = new MetastoreCallback&lt;Version&gt;() {</span>
+                @Override
+                public void complete(int rc, Version version, Object ctx) {
+<span class="nc bnc" id="L384" title="All 2 branches missed.">                    if (MSException.Code.BadVersion.getCode() == rc) {</span>
+<span class="nc" id="L385">                        promise.completeExceptionally(new BKException.BKMetadataVersionException());</span>
+<span class="nc" id="L386">                        return;</span>
+                    }
+<span class="nc bnc" id="L388" title="All 2 branches missed.">                    if (MSException.Code.OK.getCode() != rc) {</span>
+<span class="nc" id="L389">                        promise.completeExceptionally(new BKException.MetaStoreException());</span>
+<span class="nc" id="L390">                        return;</span>
+                    }
+<span class="nc bnc" id="L392" title="All 2 branches missed.">                    if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L393">                        LOG.debug(&quot;Create ledger {} with version {} successfully.&quot;, lid, version);</span>
+                    }
+<span class="nc" id="L395">                    promise.complete(new Versioned&lt;&gt;(metadata, version));</span>
+<span class="nc" id="L396">                }</span>
+            };
+
+            final byte[] bytes;
+            try {
+<span class="nc" id="L401">                bytes = serDe.serialize(metadata);</span>
+<span class="nc" id="L402">            } catch (IOException ioe) {</span>
+<span class="nc" id="L403">                promise.completeExceptionally(new BKException.BKMetadataSerializationException(ioe));</span>
+<span class="nc" id="L404">                return promise;</span>
+<span class="nc" id="L405">            }</span>
+<span class="nc" id="L406">            ledgerTable.put(ledgerId2Key(lid), new Value().setField(META_FIELD, bytes),</span>
+                            Version.NEW, msCallback, null);
+<span class="nc" id="L408">            return promise;</span>
+        }
+
+        @Override
+        public CompletableFuture&lt;Void&gt; removeLedgerMetadata(final long ledgerId, final Version version) {
+<span class="nc" id="L413">            CompletableFuture&lt;Void&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L414">            MetastoreCallback&lt;Void&gt; msCallback = new MetastoreCallback&lt;Void&gt;() {</span>
+                @Override
+                public void complete(int rc, Void value, Object ctx) {
+                    int bkRc;
+<span class="nc bnc" id="L418" title="All 2 branches missed.">                    if (MSException.Code.NoKey.getCode() == rc) {</span>
+<span class="nc" id="L419">                        LOG.warn(&quot;Ledger entry does not exist in meta table: ledgerId={}&quot;, ledgerId);</span>
+<span class="nc" id="L420">                        promise.completeExceptionally(new BKException.BKNoSuchLedgerExistsOnMetadataServerException());</span>
+<span class="nc bnc" id="L421" title="All 2 branches missed.">                    } else if (MSException.Code.OK.getCode() == rc) {</span>
+<span class="nc" id="L422">                        FutureUtils.complete(promise, null);</span>
+                    } else {
+<span class="nc" id="L424">                        promise.completeExceptionally(new BKException.BKMetadataSerializationException());</span>
+                    }
+<span class="nc" id="L426">                }</span>
+            };
+<span class="nc" id="L428">            ledgerTable.remove(ledgerId2Key(ledgerId), version, msCallback, null);</span>
+<span class="nc" id="L429">            return promise;</span>
+        }
+
+        @Override
+        public CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; readLedgerMetadata(final long ledgerId) {
+<span class="nc" id="L434">            final String key = ledgerId2Key(ledgerId);</span>
+<span class="nc" id="L435">            CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise = new CompletableFuture&lt;&gt;();</span>
+<span class="nc" id="L436">            MetastoreCallback&lt;Versioned&lt;Value&gt;&gt; msCallback = new MetastoreCallback&lt;Versioned&lt;Value&gt;&gt;() {</span>
+                @Override
+                public void complete(int rc, Versioned&lt;Value&gt; value, Object ctx) {
+<span class="nc bnc" id="L439" title="All 2 branches missed.">                    if (MSException.Code.NoKey.getCode() == rc) {</span>
+<span class="nc" id="L440">                        LOG.error(&quot;No ledger metadata found for ledger &quot; + ledgerId + &quot; : &quot;,</span>
+<span class="nc" id="L441">                                MSException.create(MSException.Code.get(rc), &quot;No key &quot; + key + &quot; found.&quot;));</span>
+<span class="nc" id="L442">                        promise.completeExceptionally(new BKException.BKNoSuchLedgerExistsOnMetadataServerException());</span>
+<span class="nc" id="L443">                        return;</span>
+                    }
+<span class="nc bnc" id="L445" title="All 2 branches missed.">                    if (MSException.Code.OK.getCode() != rc) {</span>
+<span class="nc" id="L446">                        LOG.error(&quot;Could not read metadata for ledger &quot; + ledgerId + &quot; : &quot;,</span>
+<span class="nc" id="L447">                                MSException.create(MSException.Code.get(rc), &quot;Failed to get key &quot; + key));</span>
+<span class="nc" id="L448">                        promise.completeExceptionally(new BKException.MetaStoreException());</span>
+<span class="nc" id="L449">                        return;</span>
+                    }
+                    try {
+<span class="nc" id="L452">                        LedgerMetadata metadata = serDe.parseConfig(</span>
+<span class="nc" id="L453">                                value.getValue().getField(META_FIELD), ledgerId, Optional.empty());</span>
+<span class="nc" id="L454">                        promise.complete(new Versioned&lt;&gt;(metadata, value.getVersion()));</span>
+<span class="nc" id="L455">                    } catch (IOException e) {</span>
+<span class="nc" id="L456">                        LOG.error(&quot;Could not parse ledger metadata for ledger &quot; + ledgerId + &quot; : &quot;, e);</span>
+<span class="nc" id="L457">                        promise.completeExceptionally(new BKException.MetaStoreException());</span>
+<span class="nc" id="L458">                    }</span>
+<span class="nc" id="L459">                }</span>
+            };
+<span class="nc" id="L461">            ledgerTable.get(key, this, msCallback, ALL_FIELDS);</span>
+<span class="nc" id="L462">            return promise;</span>
+        }
+
+        @Override
+        public CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; writeLedgerMetadata(long ledgerId, LedgerMetadata metadata,
+                                                                                Version currentVersion) {
+
+<span class="nc" id="L469">            CompletableFuture&lt;Versioned&lt;LedgerMetadata&gt;&gt; promise = new CompletableFuture&lt;&gt;();</span>
+            final byte[] bytes;
+            try {
+<span class="nc" id="L472">                bytes = serDe.serialize(metadata);</span>
+<span class="nc" id="L473">            } catch (IOException ioe) {</span>
+<span class="nc" id="L474">                promise.completeExceptionally(new BKException.MetaStoreException(ioe));</span>
+<span class="nc" id="L475">                return promise;</span>
+<span class="nc" id="L476">            }</span>
+
+<span class="nc" id="L478">            Value data = new Value().setField(META_FIELD, bytes);</span>
+
+<span class="nc bnc" id="L480" title="All 2 branches missed.">            if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L481">                LOG.debug(&quot;Writing ledger {} metadata, version {}&quot;, new Object[] { ledgerId, currentVersion });</span>
+            }
+
+<span class="nc" id="L484">            final String key = ledgerId2Key(ledgerId);</span>
+<span class="nc" id="L485">            MetastoreCallback&lt;Version&gt; msCallback = new MetastoreCallback&lt;Version&gt;() {</span>
+                @Override
+                public void complete(int rc, Version version, Object ctx) {
+<span class="nc bnc" id="L488" title="All 2 branches missed.">                    if (MSException.Code.BadVersion.getCode() == rc) {</span>
+<span class="nc" id="L489">                        LOG.info(&quot;Bad version provided to updat metadata for ledger {}&quot;, ledgerId);</span>
+<span class="nc" id="L490">                        promise.completeExceptionally(new BKException.BKMetadataVersionException());</span>
+<span class="nc bnc" id="L491" title="All 2 branches missed.">                    } else if (MSException.Code.NoKey.getCode() == rc) {</span>
+<span class="nc" id="L492">                        LOG.warn(&quot;Ledger {} doesn't exist when writing its ledger metadata.&quot;, ledgerId);</span>
+<span class="nc" id="L493">                        promise.completeExceptionally(new BKException.BKNoSuchLedgerExistsOnMetadataServerException());</span>
+<span class="nc bnc" id="L494" title="All 2 branches missed.">                    } else if (MSException.Code.OK.getCode() == rc) {</span>
+<span class="nc" id="L495">                        promise.complete(new Versioned&lt;&gt;(metadata, version));</span>
+                    } else {
+<span class="nc" id="L497">                        LOG.warn(&quot;Conditional update ledger metadata failed: &quot;,</span>
+<span class="nc" id="L498">                                MSException.create(MSException.Code.get(rc), &quot;Failed to put key &quot; + key));</span>
+<span class="nc" id="L499">                        promise.completeExceptionally(new BKException.MetaStoreException());</span>
+                    }
+<span class="nc" id="L501">                }</span>
+            };
+<span class="nc" id="L503">            ledgerTable.put(key, data, currentVersion, msCallback, null);</span>
+<span class="nc" id="L504">            return promise;</span>
+        }
+
+        @Override
+        public void asyncProcessLedgers(final Processor&lt;Long&gt; processor, final AsyncCallback.VoidCallback finalCb,
+                final Object context, final int successRc, final int failureRc) {
+<span class="nc" id="L510">            MetastoreCallback&lt;MetastoreCursor&gt; openCursorCb = new MetastoreCallback&lt;MetastoreCursor&gt;() {</span>
+                @Override
+                public void complete(int rc, MetastoreCursor cursor, Object ctx) {
+<span class="nc bnc" id="L513" title="All 2 branches missed.">                    if (MSException.Code.OK.getCode() != rc) {</span>
+<span class="nc" id="L514">                        finalCb.processResult(failureRc, null, context);</span>
+<span class="nc" id="L515">                        return;</span>
+                    }
+<span class="nc bnc" id="L517" title="All 2 branches missed.">                    if (!cursor.hasMoreEntries()) {</span>
+<span class="nc" id="L518">                        finalCb.processResult(successRc, null, context);</span>
+<span class="nc" id="L519">                        return;</span>
+                    }
+<span class="nc" id="L521">                    asyncProcessLedgers(cursor, processor, finalCb, context, successRc, failureRc);</span>
+<span class="nc" id="L522">                }</span>
+            };
+<span class="nc" id="L524">            ledgerTable.openCursor(NON_FIELDS, openCursorCb, null);</span>
+<span class="nc" id="L525">        }</span>
+
+        void asyncProcessLedgers(final MetastoreCursor cursor, final Processor&lt;Long&gt; processor,
+                                 final AsyncCallback.VoidCallback finalCb, final Object context,
+                                 final int successRc, final int failureRc) {
+<span class="nc" id="L530">            scheduler.submit(new Runnable() {</span>
+                @Override
+                public void run() {
+<span class="nc" id="L533">                    doAsyncProcessLedgers(cursor, processor, finalCb, context, successRc, failureRc);</span>
+<span class="nc" id="L534">                }</span>
+            });
+<span class="nc" id="L536">        }</span>
+
+        void doAsyncProcessLedgers(final MetastoreCursor cursor, final Processor&lt;Long&gt; processor,
+                                   final AsyncCallback.VoidCallback finalCb, final Object context,
+                                   final int successRc, final int failureRc) {
+            // no entries now
+<span class="nc bnc" id="L542" title="All 2 branches missed.">            if (!cursor.hasMoreEntries()) {</span>
+<span class="nc" id="L543">                finalCb.processResult(successRc, null, context);</span>
+<span class="nc" id="L544">                return;</span>
+            }
+<span class="nc" id="L546">            ReadEntriesCallback msCallback = new ReadEntriesCallback() {</span>
+                @Override
+                public void complete(int rc, Iterator&lt;MetastoreTableItem&gt; entries, Object ctx) {
+<span class="nc bnc" id="L549" title="All 2 branches missed.">                    if (MSException.Code.OK.getCode() != rc) {</span>
+<span class="nc" id="L550">                        finalCb.processResult(failureRc, null, context);</span>
+<span class="nc" id="L551">                        return;</span>
+                    }
+
+<span class="nc" id="L554">                    SortedSet&lt;Long&gt; ledgers = new TreeSet&lt;Long&gt;();</span>
+<span class="nc bnc" id="L555" title="All 2 branches missed.">                    while (entries.hasNext()) {</span>
+<span class="nc" id="L556">                        MetastoreTableItem item = entries.next();</span>
+                        try {
+<span class="nc" id="L558">                            ledgers.add(key2LedgerId(item.getKey()));</span>
+<span class="nc" id="L559">                        } catch (NumberFormatException nfe) {</span>
+<span class="nc" id="L560">                            LOG.warn(&quot;Found invalid ledger key {}&quot;, item.getKey());</span>
+<span class="nc" id="L561">                        }</span>
+<span class="nc" id="L562">                    }</span>
+
+<span class="nc bnc" id="L564" title="All 2 branches missed.">                    if (0 == ledgers.size()) {</span>
+                        // process next batch of ledgers
+<span class="nc" id="L566">                        asyncProcessLedgers(cursor, processor, finalCb, context, successRc, failureRc);</span>
+<span class="nc" id="L567">                        return;</span>
+                    }
+
+<span class="nc" id="L570">                    final long startLedger = ledgers.first();</span>
+<span class="nc" id="L571">                    final long endLedger = ledgers.last();</span>
+
+<span class="nc" id="L573">                    AsyncSetProcessor&lt;Long&gt; setProcessor = new AsyncSetProcessor&lt;Long&gt;(scheduler);</span>
+                    // process set
+<span class="nc" id="L575">                    setProcessor.process(ledgers, processor, new AsyncCallback.VoidCallback() {</span>
+                        @Override
+                        public void processResult(int rc, String path, Object ctx) {
+<span class="nc bnc" id="L578" title="All 2 branches missed.">                            if (successRc != rc) {</span>
+<span class="nc" id="L579">                                LOG.error(&quot;Failed when processing range &quot;</span>
+<span class="nc" id="L580">                                        + rangeToString(startLedger, true, endLedger, true));</span>
+<span class="nc" id="L581">                                finalCb.processResult(failureRc, null, context);</span>
+<span class="nc" id="L582">                                return;</span>
+                            }
+                            // process next batch of ledgers
+<span class="nc" id="L585">                            asyncProcessLedgers(cursor, processor, finalCb, context, successRc, failureRc);</span>
+<span class="nc" id="L586">                        }</span>
+                    }, context, successRc, failureRc);
+<span class="nc" id="L588">                }</span>
+            };
+<span class="nc" id="L590">            cursor.asyncReadEntries(maxEntriesPerScan, msCallback, null);</span>
+<span class="nc" id="L591">        }</span>
+
+        class MSLedgerRangeIterator implements LedgerRangeIterator {
+<span class="nc" id="L594">            final CountDownLatch openCursorLatch = new CountDownLatch(1);</span>
+<span class="nc" id="L595">            MetastoreCursor cursor = null;</span>
+            // last ledger id in previous range
+
+<span class="nc" id="L598">            MSLedgerRangeIterator() {</span>
+<span class="nc" id="L599">                MetastoreCallback&lt;MetastoreCursor&gt; openCursorCb = new MetastoreCallback&lt;MetastoreCursor&gt;() {</span>
+                    @Override
+                    public void complete(int rc, MetastoreCursor newCursor, Object ctx) {
+<span class="nc bnc" id="L602" title="All 2 branches missed.">                        if (MSException.Code.OK.getCode() != rc) {</span>
+<span class="nc" id="L603">                            LOG.error(&quot;Error opening cursor for ledger range iterator {}&quot;, rc);</span>
+                        } else {
+<span class="nc" id="L605">                            cursor = newCursor;</span>
+                        }
+<span class="nc" id="L607">                        openCursorLatch.countDown();</span>
+<span class="nc" id="L608">                    }</span>
+                };
+<span class="nc" id="L610">                ledgerTable.openCursor(NON_FIELDS, openCursorCb, null);</span>
+<span class="nc" id="L611">            }</span>
+
+            @Override
+            public boolean hasNext() throws IOException {
+                try {
+<span class="nc" id="L616">                    openCursorLatch.await();</span>
+<span class="nc" id="L617">                } catch (InterruptedException ie) {</span>
+<span class="nc" id="L618">                    LOG.error(&quot;Interrupted waiting for cursor to open&quot;, ie);</span>
+<span class="nc" id="L619">                    Thread.currentThread().interrupt();</span>
+<span class="nc" id="L620">                    throw new IOException(&quot;Interrupted waiting to read range&quot;, ie);</span>
+<span class="nc" id="L621">                }</span>
+<span class="nc bnc" id="L622" title="All 2 branches missed.">                if (cursor == null) {</span>
+<span class="nc" id="L623">                    throw new IOException(&quot;Failed to open ledger range cursor, check logs&quot;);</span>
+                }
+<span class="nc" id="L625">                return cursor.hasMoreEntries();</span>
+            }
+
+            @Override
+            public LedgerRange next() throws IOException {
+                try {
+<span class="nc" id="L631">                    SortedSet&lt;Long&gt; ledgerIds = new TreeSet&lt;Long&gt;();</span>
+<span class="nc" id="L632">                    Iterator&lt;MetastoreTableItem&gt; iter = cursor.readEntries(maxEntriesPerScan);</span>
+<span class="nc bnc" id="L633" title="All 2 branches missed.">                    while (iter.hasNext()) {</span>
+<span class="nc" id="L634">                        ledgerIds.add(key2LedgerId(iter.next().getKey()));</span>
+                    }
+<span class="nc" id="L636">                    return new LedgerRange(ledgerIds);</span>
+<span class="nc" id="L637">                } catch (MSException mse) {</span>
+<span class="nc" id="L638">                    LOG.error(&quot;Exception occurred reading from metastore&quot;, mse);</span>
+<span class="nc" id="L639">                    throw new IOException(&quot;Couldn't read from metastore&quot;, mse);</span>
+                }
+            }
+        }
+
+        @Override
+        public LedgerRangeIterator getLedgerRanges(long zkOpTimeoutMs) {
+<span class="nc" id="L646">            return new MSLedgerRangeIterator();</span>
+        }
+
+        /**
+         * Whether the znode a special znode.
+         *
+         * @param znode
+         *          Znode Name
+         * @return true  if the znode is a special znode otherwise false
+         */
+        public static boolean isSpecialZnode(String znode) {
+<span class="nc bnc" id="L657" title="All 2 branches missed.">            return BookKeeperConstants.AVAILABLE_NODE.equals(znode)</span>
+<span class="nc bnc" id="L658" title="All 2 branches missed.">                || BookKeeperConstants.COOKIE_NODE.equals(znode)</span>
+<span class="nc bnc" id="L659" title="All 2 branches missed.">                || BookKeeperConstants.LAYOUT_ZNODE.equals(znode)</span>
+<span class="nc bnc" id="L660" title="All 2 branches missed.">                || BookKeeperConstants.INSTANCEID.equals(znode)</span>
+<span class="nc bnc" id="L661" title="All 2 branches missed.">                || BookKeeperConstants.UNDER_REPLICATION_NODE.equals(znode)</span>
+<span class="nc bnc" id="L662" title="All 2 branches missed.">                || MsLedgerManager.IDGEN_ZNODE.equals(znode);</span>
+        }
+    }
+
+    @Override
+    public LedgerManager newLedgerManager() {
+<span class="nc" id="L668">        return new MsLedgerManager(conf, zk, metastore);</span>
+    }
+
+    @Override
+    public LedgerUnderreplicationManager newLedgerUnderreplicationManager() throws KeeperException,
+            InterruptedException, ReplicationException.CompatibilityException {
+        // TODO: currently just use zk ledger underreplication manager
+<span class="nc" id="L675">        return new ZkLedgerUnderreplicationManager(conf, zk);</span>
+    }
+
+    /**
+     * Process set one by one in asynchronize way. Process will be stopped
+     * immediately when error occurred.
+     */
+    private static class AsyncSetProcessor&lt;T&gt; {
+        // use this to prevent long stack chains from building up in callbacks
+        ScheduledExecutorService scheduler;
+
+        /**
+         * Constructor.
+         *
+         * @param scheduler
+         *            Executor used to prevent long stack chains
+         */
+<span class="nc" id="L692">        public AsyncSetProcessor(ScheduledExecutorService scheduler) {</span>
+<span class="nc" id="L693">            this.scheduler = scheduler;</span>
+<span class="nc" id="L694">        }</span>
+
+        /**
+         * Process set of items.
+         *
+         * @param data
+         *            Set of data to process
+         * @param processor
+         *            Callback to process element of list when success
+         * @param finalCb
+         *            Final callback to be called after all elements in the list
+         *            are processed
+         * @param context
+         *            Context of final callback
+         * @param successRc
+         *            RC passed to final callback on success
+         * @param failureRc
+         *            RC passed to final callback on failure
+         */
+        public void process(final Set&lt;T&gt; data, final Processor&lt;T&gt; processor, final AsyncCallback.VoidCallback finalCb,
+                final Object context, final int successRc, final int failureRc) {
+<span class="nc bnc" id="L715" title="All 4 branches missed.">            if (data == null || data.size() == 0) {</span>
+<span class="nc" id="L716">                finalCb.processResult(successRc, null, context);</span>
+<span class="nc" id="L717">                return;</span>
+            }
+<span class="nc" id="L719">            final Iterator&lt;T&gt; iter = data.iterator();</span>
+<span class="nc" id="L720">            AsyncCallback.VoidCallback stubCallback = new AsyncCallback.VoidCallback() {</span>
+                @Override
+                public void processResult(int rc, String path, Object ctx) {
+<span class="nc bnc" id="L723" title="All 2 branches missed.">                    if (rc != successRc) {</span>
+                        // terminal immediately
+<span class="nc" id="L725">                        finalCb.processResult(failureRc, null, context);</span>
+<span class="nc" id="L726">                        return;</span>
+                    }
+<span class="nc bnc" id="L728" title="All 2 branches missed.">                    if (!iter.hasNext()) { // reach the end of list</span>
+<span class="nc" id="L729">                        finalCb.processResult(successRc, null, context);</span>
+<span class="nc" id="L730">                        return;</span>
+                    }
+                    // process next element
+<span class="nc" id="L733">                    final T dataToProcess = iter.next();</span>
+<span class="nc" id="L734">                    final AsyncCallback.VoidCallback stub = this;</span>
+<span class="nc" id="L735">                    scheduler.submit(new Runnable() {</span>
+                        @Override
+                        public void run() {
+<span class="nc" id="L738">                            processor.process(dataToProcess, stub);</span>
+<span class="nc" id="L739">                        }</span>
+                    });
+<span class="nc" id="L741">                }</span>
+            };
+<span class="nc" id="L743">            T firstElement = iter.next();</span>
+<span class="nc" id="L744">            processor.process(firstElement, stubCallback);</span>
+<span class="nc" id="L745">        }</span>
+    }
+
+    @Override
+    public void format(AbstractConfiguration&lt;?&gt; conf, LayoutManager layoutManager)
+        throws InterruptedException, KeeperException, IOException {
+        MetastoreTable ledgerTable;
+        try {
+<span class="nc" id="L753">            ledgerTable = metastore.createScannableTable(TABLE_NAME);</span>
+<span class="nc" id="L754">        } catch (MetastoreException mse) {</span>
+<span class="nc" id="L755">            throw new IOException(&quot;Failed to instantiate table &quot; + TABLE_NAME + &quot; in metastore &quot;</span>
+<span class="nc" id="L756">                    + metastore.getName());</span>
+<span class="nc" id="L757">        }</span>
+        try {
+<span class="nc" id="L759">            MetastoreUtils.cleanTable(ledgerTable, conf.getMetastoreMaxEntriesPerScan());</span>
+<span class="nc" id="L760">        } catch (MSException mse) {</span>
+<span class="nc" id="L761">            throw new IOException(&quot;Exception when cleanning up table &quot; + TABLE_NAME, mse);</span>
+<span class="nc" id="L762">        }</span>
+<span class="nc" id="L763">        LOG.info(&quot;Finished cleaning up table {}.&quot;, TABLE_NAME);</span>
+        // Delete and recreate the LAYOUT information.
+        Class&lt;? extends LedgerManagerFactory&gt; factoryClass;
+        try {
+<span class="nc" id="L767">            factoryClass = conf.getLedgerManagerFactoryClass();</span>
+<span class="nc" id="L768">        } catch (ConfigurationException e) {</span>
+<span class="nc" id="L769">            throw new IOException(&quot;Failed to get ledger manager factory class from configuration : &quot;, e);</span>
+<span class="nc" id="L770">        }</span>
+
+<span class="nc" id="L772">        layoutManager.deleteLedgerLayout();</span>
+        // Create new layout information again.
+<span class="nc" id="L774">        createNewLMFactory(conf, layoutManager, factoryClass);</span>
+<span class="nc" id="L775">    }</span>
+
+    @Override
+    public boolean validateAndNukeExistingCluster(AbstractConfiguration&lt;?&gt; conf, LayoutManager layoutManager)
+            throws InterruptedException, KeeperException, IOException {
+<span class="nc" id="L780">        String zkLedgersRootPath = ZKMetadataDriverBase.resolveZkLedgersRootPath(conf);</span>
+<span class="nc" id="L781">        String zkServers = ZKMetadataDriverBase.resolveZkServers(conf);</span>
+
+        /*
+         * before proceeding with nuking existing cluster, make sure there
+         * are no unexpected znodes under ledgersRootPath
+         */
+<span class="nc" id="L787">        List&lt;String&gt; ledgersRootPathChildrenList = zk.getChildren(zkLedgersRootPath, false);</span>
+<span class="nc bnc" id="L788" title="All 2 branches missed.">        for (String ledgersRootPathChildren : ledgersRootPathChildrenList) {</span>
+<span class="nc bnc" id="L789" title="All 2 branches missed.">            if ((!MsLedgerManager.isSpecialZnode(ledgersRootPathChildren))) {</span>
+<span class="nc" id="L790">                log.error(&quot;Found unexpected znode : {} under ledgersRootPath : {} so exiting nuke operation&quot;,</span>
+                        ledgersRootPathChildren, zkLedgersRootPath);
+<span class="nc" id="L792">                return false;</span>
+            }
+<span class="nc" id="L794">        }</span>
+
+        // formatting ledgermanager deletes ledger znodes
+<span class="nc" id="L797">        format(conf, layoutManager);</span>
+
+        // now delete all the special nodes recursively
+<span class="nc" id="L800">        ledgersRootPathChildrenList = zk.getChildren(zkLedgersRootPath, false);</span>
+<span class="nc bnc" id="L801" title="All 2 branches missed.">        for (String ledgersRootPathChildren : ledgersRootPathChildrenList) {</span>
+<span class="nc bnc" id="L802" title="All 2 branches missed.">            if (MsLedgerManager.isSpecialZnode(ledgersRootPathChildren)) {</span>
+<span class="nc" id="L803">                ZKUtil.deleteRecursive(zk, zkLedgersRootPath + &quot;/&quot; + ledgersRootPathChildren);</span>
+            } else {
+<span class="nc" id="L805">                log.error(&quot;Found unexpected znode : {} under ledgersRootPath : {} so exiting nuke operation&quot;,</span>
+                        ledgersRootPathChildren, zkLedgersRootPath);
+<span class="nc" id="L807">                return false;</span>
+            }
+<span class="nc" id="L809">        }</span>
+
+        // finally deleting the ledgers rootpath
+<span class="nc" id="L812">        zk.delete(zkLedgersRootPath, -1);</span>
+
+<span class="nc" id="L814">        log.info(&quot;Successfully nuked existing cluster, ZKServers: {} ledger root path: {}&quot;,</span>
+                zkServers, zkLedgersRootPath);
+<span class="nc" id="L816">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

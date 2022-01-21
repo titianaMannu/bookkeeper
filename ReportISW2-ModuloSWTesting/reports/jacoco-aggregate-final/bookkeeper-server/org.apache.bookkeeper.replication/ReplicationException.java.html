@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ReplicationException.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.replication</a> &gt; <span class="el_source">ReplicationException.java</span></div><h1>ReplicationException.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.bookkeeper.replication;
+
+import java.util.function.Function;
+
+/**
+ * Exceptions for use within the replication service.
+ */
+public abstract class ReplicationException extends Exception {
+
+<span class="nc" id="L28">    public static final Function&lt;Throwable, ReplicationException&gt; EXCEPTION_HANDLER = cause -&gt; {</span>
+<span class="nc bnc" id="L29" title="All 2 branches missed.">        if (cause instanceof ReplicationException) {</span>
+<span class="nc" id="L30">            return (ReplicationException) cause;</span>
+        } else {
+<span class="nc" id="L32">            return new UnavailableException(cause.getMessage(), cause);</span>
+        }
+    };
+
+    protected ReplicationException(String message, Throwable cause) {
+<span class="nc" id="L37">        super(message, cause);</span>
+<span class="nc" id="L38">    }</span>
+
+    protected ReplicationException(String message) {
+<span class="nc" id="L41">        super(message);</span>
+<span class="nc" id="L42">    }</span>
+
+    /**
+     * The replication service has become unavailable.
+     */
+    public static class UnavailableException extends ReplicationException {
+        private static final long serialVersionUID = 31872209L;
+
+        public UnavailableException(String message, Throwable cause) {
+<span class="nc" id="L51">            super(message, cause);</span>
+<span class="nc" id="L52">        }</span>
+
+        public UnavailableException(String message) {
+<span class="nc" id="L55">            super(message);</span>
+<span class="nc" id="L56">        }</span>
+    }
+
+    /**
+     * Compatibility error. This version of the code, doesn't know how to
+     * deal with the metadata it has found.
+     */
+    public static class CompatibilityException extends ReplicationException {
+        private static final long serialVersionUID = 98551903L;
+
+        public CompatibilityException(String message, Throwable cause) {
+<span class="nc" id="L67">            super(message, cause);</span>
+<span class="nc" id="L68">        }</span>
+
+        public CompatibilityException(String message) {
+<span class="nc" id="L71">            super(message);</span>
+<span class="nc" id="L72">        }</span>
+    }
+
+    /**
+     * Exception while auditing bookie-ledgers.
+    */
+    public static class BKAuditException extends ReplicationException {
+        private static final long serialVersionUID = 95551905L;
+
+        BKAuditException(String message, Throwable cause) {
+<span class="nc" id="L82">            super(message, cause);</span>
+<span class="nc" id="L83">        }</span>
+
+        BKAuditException(String message) {
+<span class="nc" id="L86">            super(message);</span>
+<span class="nc" id="L87">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

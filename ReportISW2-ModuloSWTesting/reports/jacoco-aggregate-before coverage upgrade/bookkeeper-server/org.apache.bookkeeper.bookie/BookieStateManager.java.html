@@ -1,0 +1,366 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>BookieStateManager.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">BookieStateManager.java</span></div><h1>BookieStateManager.java</h1><pre class="source lang-java linenums">/**
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.BOOKIE_SCOPE;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.CATEGORY_SERVER;
+import static org.apache.bookkeeper.bookie.BookKeeperServerStats.SERVER_STATUS;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import java.io.File;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.net.UnknownHostException;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.BookieServiceInfo;
+import org.apache.bookkeeper.discover.RegistrationManager;
+import org.apache.bookkeeper.meta.MetadataBookieDriver;
+import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.stats.Gauge;
+import org.apache.bookkeeper.stats.NullStatsLogger;
+import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.stats.annotations.StatsDoc;
+import org.apache.bookkeeper.util.DiskChecker;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * An implementation of StateManager.
+ */
+<span class="fc" id="L57">@Slf4j</span>
+@StatsDoc(
+    name = BOOKIE_SCOPE,
+    category = CATEGORY_SERVER,
+    help = &quot;Bookie state manager related stats&quot;
+)
+public class BookieStateManager implements StateManager {
+<span class="fc" id="L64">    private static final Logger LOG = LoggerFactory.getLogger(BookieStateManager.class);</span>
+    private final ServerConfiguration conf;
+    private final Supplier&lt;BookieServiceInfo&gt; bookieServiceInfoProvider;
+    private final List&lt;File&gt; statusDirs;
+
+    // use an executor to execute the state changes task
+<span class="fc" id="L70">    final ExecutorService stateService = Executors.newSingleThreadExecutor(</span>
+<span class="fc" id="L71">            new ThreadFactoryBuilder().setNameFormat(&quot;BookieStateManagerService-%d&quot;).build());</span>
+
+    // Running flag
+<span class="fc" id="L74">    private volatile boolean running = false;</span>
+    // Flag identify whether it is in shutting down progress
+<span class="fc" id="L76">    private volatile boolean shuttingdown = false;</span>
+    // Bookie status
+<span class="fc" id="L78">    private final BookieStatus bookieStatus = new BookieStatus();</span>
+<span class="fc" id="L79">    private final AtomicBoolean rmRegistered = new AtomicBoolean(false);</span>
+<span class="fc" id="L80">    private final AtomicBoolean forceReadOnly = new AtomicBoolean(false);</span>
+<span class="fc" id="L81">    private volatile boolean availableForHighPriorityWrites = true;</span>
+
+    private final BookieId bookieId;
+    private ShutdownHandler shutdownHandler;
+    private final Supplier&lt;RegistrationManager&gt; rm;
+    // Expose Stats
+    @StatsDoc(
+        name = SERVER_STATUS,
+        help = &quot;Bookie status (1: up, 0: readonly, -1: unregistered)&quot;
+    )
+    private final Gauge&lt;Number&gt; serverStatusGauge;
+
+    public BookieStateManager(ServerConfiguration conf,
+                              StatsLogger statsLogger,
+                              MetadataBookieDriver metadataDriver,
+                              LedgerDirsManager ledgerDirsManager,
+                              Supplier&lt;BookieServiceInfo&gt; bookieServiceInfoProvider) throws IOException {
+<span class="fc" id="L98">        this(</span>
+            conf,
+            statsLogger,
+<span class="nc bnc" id="L101" title="All 2 branches missed.">            () -&gt; null == metadataDriver ? null : metadataDriver.getRegistrationManager(),</span>
+<span class="fc" id="L102">            ledgerDirsManager.getAllLedgerDirs(),</span>
+            () -&gt; {
+                try {
+<span class="fc" id="L105">                    return Bookie.getBookieId(conf);</span>
+<span class="nc" id="L106">                } catch (UnknownHostException e) {</span>
+<span class="nc" id="L107">                    throw new UncheckedIOException(&quot;Failed to resolve bookie id&quot;, e);</span>
+                }
+            },
+            bookieServiceInfoProvider);
+<span class="fc" id="L111">    }</span>
+    public BookieStateManager(ServerConfiguration conf,
+                              StatsLogger statsLogger,
+                              Supplier&lt;RegistrationManager&gt; rm,
+                              List&lt;File&gt; statusDirs,
+                              Supplier&lt;BookieId&gt; bookieIdSupplier,
+<span class="fc" id="L117">                              Supplier&lt;BookieServiceInfo&gt; bookieServiceInfoProvider) throws IOException {</span>
+<span class="fc" id="L118">        this.conf = conf;</span>
+<span class="fc" id="L119">        this.rm = rm;</span>
+<span class="fc" id="L120">        this.statusDirs = statusDirs;</span>
+        // ZK ephemeral node for this Bookie.
+<span class="fc" id="L122">        this.bookieId = bookieIdSupplier.get();</span>
+<span class="fc" id="L123">        this.bookieServiceInfoProvider = bookieServiceInfoProvider;</span>
+        // 1 : up, 0 : readonly, -1 : unregistered
+<span class="fc" id="L125">        this.serverStatusGauge = new Gauge&lt;Number&gt;() {</span>
+            @Override
+            public Number getDefaultValue() {
+<span class="nc" id="L128">                return 0;</span>
+            }
+
+            @Override
+            public Number getSample() {
+<span class="nc bnc" id="L133" title="All 2 branches missed.">                if (!rmRegistered.get()){</span>
+<span class="nc" id="L134">                    return -1;</span>
+<span class="nc bnc" id="L135" title="All 4 branches missed.">                } else if (forceReadOnly.get() || bookieStatus.isInReadOnlyMode()) {</span>
+<span class="nc" id="L136">                    return 0;</span>
+                } else {
+<span class="nc" id="L138">                    return 1;</span>
+                }
+            }
+        };
+<span class="fc" id="L142">        statsLogger.registerGauge(SERVER_STATUS, serverStatusGauge);</span>
+<span class="fc" id="L143">    }</span>
+
+    private boolean isRegistrationManagerDisabled() {
+<span class="nc bnc" id="L146" title="All 4 branches missed.">        return null == rm || null == rm.get();</span>
+    }
+
+    @VisibleForTesting
+    BookieStateManager(ServerConfiguration conf, MetadataBookieDriver metadataDriver) throws IOException {
+<span class="nc" id="L151">        this(conf, NullStatsLogger.INSTANCE, metadataDriver, new LedgerDirsManager(conf, conf.getLedgerDirs(),</span>
+<span class="nc" id="L152">                new DiskChecker(conf.getDiskUsageThreshold(), conf.getDiskUsageWarnThreshold()),</span>
+                NullStatsLogger.INSTANCE), BookieServiceInfo.NO_INFO);
+<span class="nc" id="L154">    }</span>
+
+    @Override
+    public void initState(){
+<span class="nc bnc" id="L158" title="All 2 branches missed.">        if (forceReadOnly.get()) {</span>
+<span class="nc" id="L159">            this.bookieStatus.setToReadOnlyMode();</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">        } else if (conf.isPersistBookieStatusEnabled()) {</span>
+<span class="nc" id="L161">            this.bookieStatus.readFromDirectories(statusDirs);</span>
+        }
+<span class="nc" id="L163">        running = true;</span>
+<span class="nc" id="L164">    }</span>
+
+    @Override
+    public void forceToShuttingDown(){
+        // mark bookie as in shutting down progress
+<span class="nc" id="L169">        shuttingdown = true;</span>
+<span class="nc" id="L170">    }</span>
+
+    @Override
+    public void forceToReadOnly(){
+<span class="nc" id="L174">        this.forceReadOnly.set(true);</span>
+<span class="nc" id="L175">    }</span>
+
+    @Override
+    public void forceToUnregistered(){
+<span class="nc" id="L179">        this.rmRegistered.set(false);</span>
+<span class="nc" id="L180">    }</span>
+
+    @Override
+    public boolean isReadOnly(){
+<span class="nc bnc" id="L184" title="All 4 branches missed.">        return forceReadOnly.get() || bookieStatus.isInReadOnlyMode();</span>
+    }
+
+    @Override
+    public boolean isAvailableForHighPriorityWrites() {
+<span class="nc" id="L189">        return availableForHighPriorityWrites;</span>
+    }
+
+    @Override
+    public void setHighPriorityWritesAvailability(boolean available) {
+<span class="nc bnc" id="L194" title="All 4 branches missed.">        if (this.availableForHighPriorityWrites &amp;&amp; !available) {</span>
+<span class="nc" id="L195">            log.info(&quot;Disable high priority writes on readonly bookie.&quot;);</span>
+<span class="nc bnc" id="L196" title="All 4 branches missed.">        } else if (!this.availableForHighPriorityWrites &amp;&amp; available) {</span>
+<span class="nc" id="L197">            log.info(&quot;Enable high priority writes on readonly bookie.&quot;);</span>
+        }
+<span class="nc" id="L199">        this.availableForHighPriorityWrites = available;</span>
+<span class="nc" id="L200">    }</span>
+
+    @Override
+    public boolean isRunning(){
+<span class="nc" id="L204">        return running;</span>
+    }
+
+    @Override
+    public boolean isShuttingDown(){
+<span class="nc" id="L209">        return shuttingdown;</span>
+    }
+
+    @Override
+    public void close() {
+<span class="nc" id="L214">        this.running = false;</span>
+<span class="nc" id="L215">        stateService.shutdown();</span>
+<span class="nc" id="L216">    }</span>
+
+    @Override
+    public Future&lt;Void&gt; registerBookie(final boolean throwException) {
+<span class="nc" id="L220">        return stateService.submit(new Callable&lt;Void&gt;() {</span>
+            @Override
+            public Void call() throws IOException {
+                try {
+<span class="nc" id="L224">                    doRegisterBookie();</span>
+<span class="nc" id="L225">                } catch (IOException ioe) {</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                    if (throwException) {</span>
+<span class="nc" id="L227">                        throw ioe;</span>
+                    } else {
+<span class="nc" id="L229">                        LOG.error(&quot;Couldn't register bookie with zookeeper, shutting down : &quot;, ioe);</span>
+<span class="nc" id="L230">                        shutdownHandler.shutdown(ExitCode.ZK_REG_FAIL);</span>
+                    }
+<span class="nc" id="L232">                }</span>
+<span class="nc" id="L233">                return null;</span>
+            }
+        });
+    }
+
+    @Override
+    public Future&lt;Void&gt; transitionToWritableMode() {
+<span class="nc" id="L240">        return stateService.submit(new Callable&lt;Void&gt;() {</span>
+            @Override
+            public Void call() throws Exception{
+<span class="nc" id="L243">                doTransitionToWritableMode();</span>
+<span class="nc" id="L244">                return null;</span>
+            }
+        });
+    }
+
+    @Override
+    public Future&lt;Void&gt; transitionToReadOnlyMode() {
+<span class="nc" id="L251">        return stateService.submit(new Callable&lt;Void&gt;() {</span>
+            @Override
+            public Void call() throws Exception{
+<span class="nc" id="L254">                doTransitionToReadOnlyMode();</span>
+<span class="nc" id="L255">                return null;</span>
+            }
+        });
+    }
+
+    void doRegisterBookie() throws IOException {
+<span class="nc bnc" id="L261" title="All 4 branches missed.">        doRegisterBookie(forceReadOnly.get() || bookieStatus.isInReadOnlyMode());</span>
+<span class="nc" id="L262">    }</span>
+
+    private void doRegisterBookie(boolean isReadOnly) throws IOException {
+<span class="nc bnc" id="L265" title="All 2 branches missed.">        if (isRegistrationManagerDisabled()) {</span>
+            // registration manager is null, means not register itself to metadata store.
+<span class="nc" id="L267">            LOG.info(&quot;null registration manager while do register&quot;);</span>
+<span class="nc" id="L268">            return;</span>
+        }
+
+<span class="nc" id="L271">        rmRegistered.set(false);</span>
+        try {
+<span class="nc" id="L273">            rm.get().registerBookie(bookieId, isReadOnly, bookieServiceInfoProvider.get());</span>
+<span class="nc" id="L274">            rmRegistered.set(true);</span>
+<span class="nc" id="L275">        } catch (BookieException e) {</span>
+<span class="nc" id="L276">            throw new IOException(e);</span>
+<span class="nc" id="L277">        }</span>
+<span class="nc" id="L278">    }</span>
+
+    @VisibleForTesting
+    public void doTransitionToWritableMode() {
+<span class="nc bnc" id="L282" title="All 4 branches missed.">        if (shuttingdown || forceReadOnly.get()) {</span>
+<span class="nc" id="L283">            return;</span>
+        }
+
+<span class="nc bnc" id="L286" title="All 2 branches missed.">        if (!bookieStatus.setToWritableMode()) {</span>
+            // do nothing if already in writable mode
+<span class="nc" id="L288">            return;</span>
+        }
+<span class="nc" id="L290">        LOG.info(&quot;Transitioning Bookie to Writable mode and will serve read/write requests.&quot;);</span>
+<span class="nc bnc" id="L291" title="All 2 branches missed.">        if (conf.isPersistBookieStatusEnabled()) {</span>
+<span class="nc" id="L292">            bookieStatus.writeToDirectories(statusDirs);</span>
+        }
+        // change zookeeper state only when using zookeeper
+<span class="nc bnc" id="L295" title="All 2 branches missed.">        if (isRegistrationManagerDisabled()) {</span>
+<span class="nc" id="L296">            return;</span>
+        }
+        try {
+<span class="nc" id="L299">            doRegisterBookie(false);</span>
+<span class="nc" id="L300">        } catch (IOException e) {</span>
+<span class="nc" id="L301">            LOG.warn(&quot;Error in transitioning back to writable mode : &quot;, e);</span>
+<span class="nc" id="L302">            transitionToReadOnlyMode();</span>
+<span class="nc" id="L303">            return;</span>
+<span class="nc" id="L304">        }</span>
+        // clear the readonly state
+        try {
+<span class="nc" id="L307">            rm.get().unregisterBookie(bookieId, true);</span>
+<span class="nc" id="L308">        } catch (BookieException e) {</span>
+            // if we failed when deleting the readonly flag in zookeeper, it is OK since client would
+            // already see the bookie in writable list. so just log the exception
+<span class="nc" id="L311">            LOG.warn(&quot;Failed to delete bookie readonly state in zookeeper : &quot;, e);</span>
+<span class="nc" id="L312">            return;</span>
+<span class="nc" id="L313">        }</span>
+<span class="nc" id="L314">    }</span>
+
+    @VisibleForTesting
+    public void doTransitionToReadOnlyMode() {
+<span class="nc bnc" id="L318" title="All 2 branches missed.">        if (shuttingdown) {</span>
+<span class="nc" id="L319">            return;</span>
+        }
+<span class="nc bnc" id="L321" title="All 2 branches missed.">        if (!bookieStatus.setToReadOnlyMode()) {</span>
+<span class="nc" id="L322">            return;</span>
+        }
+<span class="nc bnc" id="L324" title="All 2 branches missed.">        if (!conf.isReadOnlyModeEnabled()) {</span>
+<span class="nc" id="L325">            LOG.warn(&quot;ReadOnly mode is not enabled. &quot;</span>
+                    + &quot;Can be enabled by configuring &quot;
+                    + &quot;'readOnlyModeEnabled=true' in configuration.&quot;
+                    + &quot; Shutting down bookie&quot;);
+<span class="nc" id="L329">            shutdownHandler.shutdown(ExitCode.BOOKIE_EXCEPTION);</span>
+<span class="nc" id="L330">            return;</span>
+        }
+<span class="nc" id="L332">        LOG.info(&quot;Transitioning Bookie to ReadOnly mode,&quot;</span>
+                + &quot; and will serve only read requests from clients!&quot;);
+        // persist the bookie status if we enable this
+<span class="nc bnc" id="L335" title="All 2 branches missed.">        if (conf.isPersistBookieStatusEnabled()) {</span>
+<span class="nc" id="L336">            this.bookieStatus.writeToDirectories(statusDirs);</span>
+        }
+        // change zookeeper state only when using zookeeper
+<span class="nc bnc" id="L339" title="All 2 branches missed.">        if (isRegistrationManagerDisabled()) {</span>
+<span class="nc" id="L340">            return;</span>
+        }
+        try {
+<span class="nc" id="L343">            rm.get().registerBookie(bookieId, true, bookieServiceInfoProvider.get());</span>
+<span class="nc" id="L344">        } catch (BookieException e) {</span>
+<span class="nc" id="L345">            LOG.error(&quot;Error in transition to ReadOnly Mode.&quot;</span>
+                    + &quot; Shutting down&quot;, e);
+<span class="nc" id="L347">            shutdownHandler.shutdown(ExitCode.BOOKIE_EXCEPTION);</span>
+<span class="nc" id="L348">            return;</span>
+<span class="nc" id="L349">        }</span>
+<span class="nc" id="L350">    }</span>
+    @Override
+    public void setShutdownHandler(ShutdownHandler handler){
+<span class="fc" id="L353">        shutdownHandler = handler;</span>
+<span class="fc" id="L354">    }</span>
+
+    @VisibleForTesting
+    public ShutdownHandler getShutdownHandler(){
+<span class="nc" id="L358">        return shutdownHandler;</span>
+    }
+    @VisibleForTesting
+    boolean isRegistered(){
+<span class="nc" id="L362">        return rmRegistered.get();</span>
+    }
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

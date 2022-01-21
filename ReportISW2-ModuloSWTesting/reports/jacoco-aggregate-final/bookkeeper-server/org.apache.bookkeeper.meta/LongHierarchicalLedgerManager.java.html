@@ -1,0 +1,316 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>LongHierarchicalLedgerManager.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.meta</a> &gt; <span class="el_source">LongHierarchicalLedgerManager.java</span></div><h1>LongHierarchicalLedgerManager.java</h1><pre class="source lang-java linenums">/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.bookkeeper.meta;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.Set;
+
+import org.apache.bookkeeper.conf.AbstractConfiguration;
+import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.Processor;
+import org.apache.bookkeeper.util.StringUtils;
+import org.apache.bookkeeper.util.ZkUtils;
+import org.apache.zookeeper.AsyncCallback;
+import org.apache.zookeeper.AsyncCallback.VoidCallback;
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.ZooKeeper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * LongHierarchical Ledger Manager which manages ledger meta in zookeeper using 5-level hierarchical znodes.
+ *
+ * &lt;p&gt;LongHierarchicalLedgerManager splits the generated id into 5 parts (3-4-4-4-4):
+ *
+ * &lt;pre&gt;
+ * &amp;lt;level0 (3 digits)&amp;gt;&amp;lt;level1 (4 digits)&amp;gt;&amp;lt;level2 (4 digits)&amp;gt;&amp;lt;level3 (4 digits)&amp;gt;
+ * &amp;lt;level4 (4 digits)&amp;gt;
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;These 5 parts are used to form the actual ledger node path used to store ledger metadata:
+ *
+ * &lt;pre&gt;
+ * (ledgersRootPath) / level0 / level1 / level2 / level3 / L(level4)
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;E.g Ledger 0000000000000000001 is split into 5 parts &lt;i&gt;000&lt;/i&gt;, &lt;i&gt;0000&lt;/i&gt;, &lt;i&gt;0000&lt;/i&gt;, &lt;i&gt;0000&lt;/i&gt;,
+ * &lt;i&gt;0001&lt;/i&gt;, which is stored in &lt;i&gt;(ledgersRootPath)/000/0000/0000/0000/L0001&lt;/i&gt;. So each znode could have at most
+ * 10000 ledgers, which avoids errors during garbage collection due to lists of children that are too long.
+ */
+class LongHierarchicalLedgerManager extends AbstractHierarchicalLedgerManager {
+
+<span class="nc" id="L61">    static final Logger LOG = LoggerFactory.getLogger(LongHierarchicalLedgerManager.class);</span>
+
+    static final String IDGEN_ZNODE = &quot;idgen-long&quot;;
+
+    /**
+     * Constructor.
+     *
+     * @param conf
+     *            Configuration object
+     * @param zk
+     *            ZooKeeper Client Handle
+     */
+    public LongHierarchicalLedgerManager(AbstractConfiguration conf, ZooKeeper zk) {
+<span class="nc" id="L74">        super(conf, zk);</span>
+<span class="nc" id="L75">    }</span>
+
+    @Override
+    public long getLedgerId(String pathName) throws IOException {
+<span class="nc bnc" id="L79" title="All 2 branches missed.">        if (!pathName.startsWith(ledgerRootPath)) {</span>
+<span class="nc" id="L80">            throw new IOException(&quot;it is not a valid hashed path name : &quot; + pathName);</span>
+        }
+<span class="nc" id="L82">        String hierarchicalPath = pathName.substring(ledgerRootPath.length() + 1);</span>
+<span class="nc" id="L83">        return StringUtils.stringToLongHierarchicalLedgerId(hierarchicalPath);</span>
+    }
+
+    @Override
+    public String getLedgerPath(long ledgerId) {
+<span class="nc" id="L88">        return ledgerRootPath + StringUtils.getLongHierarchicalLedgerPath(ledgerId);</span>
+    }
+
+    //
+    // Active Ledger Manager
+    //
+
+    @Override
+    public void asyncProcessLedgers(final Processor&lt;Long&gt; processor, final AsyncCallback.VoidCallback finalCb,
+            final Object context, final int successRc, final int failureRc) {
+
+        // If it succeeds, proceed with our own recursive ledger processing for the 63-bit id ledgers
+<span class="nc" id="L100">        asyncProcessLevelNodes(ledgerRootPath,</span>
+                new RecursiveProcessor(0, ledgerRootPath, processor, context, successRc, failureRc), finalCb, context,
+                successRc, failureRc);
+<span class="nc" id="L103">    }</span>
+
+    private class RecursiveProcessor implements Processor&lt;String&gt; {
+        private final int level;
+        private final String path;
+        private final Processor&lt;Long&gt; processor;
+        private final Object context;
+        private final int successRc;
+        private final int failureRc;
+
+        private RecursiveProcessor(int level, String path, Processor&lt;Long&gt; processor, Object context, int successRc,
+<span class="nc" id="L114">                int failureRc) {</span>
+<span class="nc" id="L115">            this.level = level;</span>
+<span class="nc" id="L116">            this.path = path;</span>
+<span class="nc" id="L117">            this.processor = processor;</span>
+<span class="nc" id="L118">            this.context = context;</span>
+<span class="nc" id="L119">            this.successRc = successRc;</span>
+<span class="nc" id="L120">            this.failureRc = failureRc;</span>
+<span class="nc" id="L121">        }</span>
+
+        @Override
+        public void process(String lNode, VoidCallback cb) {
+<span class="nc" id="L125">            String nodePath = path + &quot;/&quot; + lNode;</span>
+<span class="nc bnc" id="L126" title="All 4 branches missed.">            if ((level == 0) &amp;&amp; !isLedgerParentNode(lNode)) {</span>
+<span class="nc" id="L127">                cb.processResult(successRc, null, context);</span>
+<span class="nc" id="L128">                return;</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">            } else if (level &lt; 3) {</span>
+<span class="nc" id="L130">                asyncProcessLevelNodes(nodePath,</span>
+                        new RecursiveProcessor(level + 1, nodePath, processor, context, successRc, failureRc), cb,
+                        context, successRc, failureRc);
+            } else {
+                // process each ledger after all ledger are processed, cb will be call to continue processing next
+                // level4 node
+<span class="nc" id="L136">                asyncProcessLedgersInSingleNode(nodePath, processor, cb, context, successRc, failureRc);</span>
+            }
+<span class="nc" id="L138">        }</span>
+    }
+
+    @Override
+    public LedgerRangeIterator getLedgerRanges(long zkOpTimeoutMs) {
+<span class="nc" id="L143">        return new LongHierarchicalLedgerRangeIterator(zkOpTimeoutMs);</span>
+    }
+
+
+    /**
+     * Iterates recursively through each metadata bucket.
+     */
+    private class LongHierarchicalLedgerRangeIterator implements LedgerRangeIterator {
+        LedgerRangeIterator rootIterator;
+        final long zkOpTimeoutMs;
+
+        /**
+         * Returns all children with path as a parent.  If path is non-existent,
+         * returns an empty list anyway (after all, there are no children there).
+         * Maps all exceptions (other than NoNode) to IOException in keeping with
+         * LedgerRangeIterator.
+         *
+         * @param path
+         * @return Iterator into set of all children with path as a parent
+         * @throws IOException
+         */
+        List&lt;String&gt; getChildrenAt(String path) throws IOException {
+            try {
+<span class="nc" id="L166">                List&lt;String&gt; children = ZkUtils.getChildrenInSingleNode(zk, path, zkOpTimeoutMs);</span>
+<span class="nc" id="L167">                Collections.sort(children);</span>
+<span class="nc" id="L168">                return children;</span>
+<span class="nc" id="L169">            } catch (KeeperException.NoNodeException e) {</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L171">                    LOG.debug(&quot;NoNodeException at path {}, assumed race with deletion&quot;, path);</span>
+                }
+<span class="nc" id="L173">                return new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L174">            } catch (InterruptedException ie) {</span>
+<span class="nc" id="L175">                Thread.currentThread().interrupt();</span>
+<span class="nc" id="L176">                throw new IOException(&quot;Interrupted while reading ledgers at path &quot; + path, ie);</span>
+            }
+        }
+
+        /**
+         * Represents the ledger range rooted at a leaf node, returns at most one LedgerRange.
+         */
+        class LeafIterator implements LedgerRangeIterator {
+            // Null iff iteration is complete
+            LedgerRange range;
+
+<span class="nc" id="L187">            LeafIterator(String path) throws IOException {</span>
+<span class="nc" id="L188">                List&lt;String&gt; ledgerLeafNodes = getChildrenAt(path);</span>
+<span class="nc" id="L189">                Set&lt;Long&gt; ledgerIds = ledgerListToSet(ledgerLeafNodes, path);</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L191">                    LOG.debug(&quot;All active ledgers from ZK for hash node {}: {}&quot;, path, ledgerIds);</span>
+                }
+<span class="nc bnc" id="L193" title="All 2 branches missed.">                if (!ledgerIds.isEmpty()) {</span>
+<span class="nc" id="L194">                    range = new LedgerRange(ledgerIds);</span>
+                } // else, hasNext() should return false so that advance will skip us and move on
+<span class="nc" id="L196">            }</span>
+
+            @Override
+            public boolean hasNext() throws IOException {
+<span class="nc bnc" id="L200" title="All 2 branches missed.">                return range != null;</span>
+            }
+
+            @Override
+            public LedgerRange next() throws IOException {
+<span class="nc bnc" id="L205" title="All 2 branches missed.">                if (range == null) {</span>
+<span class="nc" id="L206">                    throw new NoSuchElementException(</span>
+                            &quot;next() must only be called if hasNext() is true&quot;);
+                }
+<span class="nc" id="L209">                LedgerRange ret = range;</span>
+<span class="nc" id="L210">                range = null;</span>
+<span class="nc" id="L211">                return ret;</span>
+            }
+        }
+
+
+        /**
+         * The main constraint is that between calls one of two things must be true.
+         * 1) nextLevelIterator is null and thisLevelIterator.hasNext() == false: iteration complete, hasNext()
+         *    returns false
+         * 2) nextLevelIterator is non-null: nextLevelIterator.hasNext() must return true and nextLevelIterator.next()
+         *    must return the next LedgerRange
+         * The above means that nextLevelIterator != null ==&gt; nextLevelIterator.hasNext()
+         * It also means that hasNext() iff nextLevelIterator != null
+         */
+        private class InnerIterator implements LedgerRangeIterator {
+            final String path;
+            final int level;
+
+            // Always non-null
+            final Iterator&lt;String&gt; thisLevelIterator;
+            // non-null iff nextLevelIterator.hasNext() is true
+            LedgerRangeIterator nextLevelIterator;
+
+            /**
+             * Builds InnerIterator.
+             *
+             * @param path Subpath for thisLevelIterator
+             * @param level Level of thisLevelIterator (must be &lt;= 3)
+             * @throws IOException
+             */
+<span class="nc" id="L241">            InnerIterator(String path, int level) throws IOException {</span>
+<span class="nc" id="L242">                this.path = path;</span>
+<span class="nc" id="L243">                this.level = level;</span>
+<span class="nc" id="L244">                thisLevelIterator = getChildrenAt(path).iterator();</span>
+<span class="nc" id="L245">                advance();</span>
+<span class="nc" id="L246">            }</span>
+
+            /**
+             * Resolves the difference between cases 1 and 2 after nextLevelIterator is exhausted.
+             * Pre-condition: nextLevelIterator == null, thisLevelIterator != null
+             * Post-condition: nextLevelIterator == null &amp;&amp; !thisLevelIterator.hasNext() OR
+             *                 nextLevelIterator.hasNext() == true and nextLevelIterator.next()
+             *                 yields the next result of next()
+             * @throws IOException Exception representing error
+             */
+            void advance() throws IOException {
+<span class="nc bnc" id="L257" title="All 2 branches missed.">                while (thisLevelIterator.hasNext()) {</span>
+<span class="nc" id="L258">                    String node = thisLevelIterator.next();</span>
+<span class="nc bnc" id="L259" title="All 4 branches missed.">                    if (level == 0 &amp;&amp; !isLedgerParentNode(node)) {</span>
+<span class="nc" id="L260">                        continue;</span>
+                    }
+<span class="nc bnc" id="L262" title="All 2 branches missed.">                    LedgerRangeIterator nextIterator = level &lt; 3</span>
+                            ? new InnerIterator(path + &quot;/&quot; + node, level + 1)
+                            : new LeafIterator(path + &quot;/&quot; + node);
+<span class="nc bnc" id="L265" title="All 2 branches missed.">                    if (nextIterator.hasNext()) {</span>
+<span class="nc" id="L266">                        nextLevelIterator = nextIterator;</span>
+<span class="nc" id="L267">                        break;</span>
+                    }
+<span class="nc" id="L269">                }</span>
+<span class="nc" id="L270">            }</span>
+
+            @Override
+            public boolean hasNext() throws IOException {
+<span class="nc bnc" id="L274" title="All 2 branches missed.">                return nextLevelIterator != null;</span>
+            }
+
+            @Override
+            public LedgerRange next() throws IOException {
+<span class="nc" id="L279">                LedgerRange ret = nextLevelIterator.next();</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">                if (!nextLevelIterator.hasNext()) {</span>
+<span class="nc" id="L281">                    nextLevelIterator = null;</span>
+<span class="nc" id="L282">                    advance();</span>
+                }
+<span class="nc" id="L284">                return ret;</span>
+            }
+        }
+
+<span class="nc" id="L288">        private LongHierarchicalLedgerRangeIterator(long zkOpTimeoutMs) {</span>
+<span class="nc" id="L289">            this.zkOpTimeoutMs = zkOpTimeoutMs;</span>
+<span class="nc" id="L290">        }</span>
+
+        private void bootstrap() throws IOException {
+<span class="nc bnc" id="L293" title="All 2 branches missed.">            if (rootIterator == null) {</span>
+<span class="nc" id="L294">                rootIterator = new InnerIterator(ledgerRootPath, 0);</span>
+            }
+<span class="nc" id="L296">        }</span>
+
+        @Override
+        public synchronized boolean hasNext() throws IOException {
+<span class="nc" id="L300">            bootstrap();</span>
+<span class="nc" id="L301">            return rootIterator.hasNext();</span>
+        }
+
+        @Override
+        public synchronized LedgerRange next() throws IOException {
+<span class="nc" id="L306">            bootstrap();</span>
+<span class="nc" id="L307">            return rootIterator.next();</span>
+        }
+    }
+
+    @Override
+    protected String getLedgerParentNodeRegex() {
+<span class="nc" id="L313">        return StringUtils.LONGHIERARCHICAL_LEDGER_PARENT_NODE_REGEX;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>

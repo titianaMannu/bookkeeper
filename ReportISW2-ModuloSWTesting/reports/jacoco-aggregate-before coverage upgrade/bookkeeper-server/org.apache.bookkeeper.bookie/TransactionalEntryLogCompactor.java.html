@@ -1,0 +1,393 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="it"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>TransactionalEntryLogCompactor.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Tests</a> &gt; <a href="../index.html" class="el_bundle">bookkeeper-server</a> &gt; <a href="index.source.html" class="el_package">org.apache.bookkeeper.bookie</a> &gt; <span class="el_source">TransactionalEntryLogCompactor.java</span></div><h1>TransactionalEntryLogCompactor.java</h1><pre class="source lang-java linenums">/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * &quot;License&quot;); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
+
+package org.apache.bookkeeper.bookie;
+
+import io.netty.buffer.ByteBuf;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.apache.bookkeeper.bookie.EntryLogger.EntryLogScanner;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.util.HardLink;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * This class is used for compaction. Compaction is done in several transactional phases.
+ * Phase 1: Scan old entry log and compact entries to a new .compacting log file.
+ * Phase 2: Flush .compacting log to disk and it becomes .compacted log file when this completes.
+ * Phase 3: Flush ledger cache and .compacted file becomes .log file when this completes. Remove old
+ * entry log file afterwards.
+ */
+public class TransactionalEntryLogCompactor extends AbstractLogCompactor {
+
+<span class="nc" id="L46">    private static final Logger LOG = LoggerFactory.getLogger(TransactionalEntryLogCompactor.class);</span>
+
+    final EntryLogger entryLogger;
+    final CompactableLedgerStorage ledgerStorage;
+<span class="nc" id="L50">    final List&lt;EntryLocation&gt; offsets = new ArrayList&lt;&gt;();</span>
+
+    // compaction log file suffix
+    static final String COMPACTING_SUFFIX = &quot;.log.compacting&quot;;
+    // flushed compaction log file suffix
+    static final String COMPACTED_SUFFIX = &quot;.compacted&quot;;
+
+    public TransactionalEntryLogCompactor(
+            ServerConfiguration conf,
+            EntryLogger entryLogger,
+            CompactableLedgerStorage ledgerStorage,
+            LogRemovalListener logRemover) {
+<span class="nc" id="L62">        super(conf, logRemover);</span>
+<span class="nc" id="L63">        this.entryLogger = entryLogger;</span>
+<span class="nc" id="L64">        this.ledgerStorage = ledgerStorage;</span>
+<span class="nc" id="L65">    }</span>
+
+    /**
+     * Delete all previously incomplete compacting logs and recover the index for compacted logs.
+     */
+    @Override
+    public void cleanUpAndRecover() {
+        // clean up compacting logs and recover index for already compacted logs
+<span class="nc" id="L73">        List&lt;File&gt; ledgerDirs = entryLogger.getLedgerDirsManager().getAllLedgerDirs();</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">        for (File dir : ledgerDirs) {</span>
+<span class="nc" id="L75">            File[] compactingPhaseFiles = dir.listFiles(file -&gt; file.getName().endsWith(COMPACTING_SUFFIX));</span>
+<span class="nc bnc" id="L76" title="All 2 branches missed.">            if (compactingPhaseFiles != null) {</span>
+<span class="nc bnc" id="L77" title="All 2 branches missed.">                for (File file : compactingPhaseFiles) {</span>
+<span class="nc bnc" id="L78" title="All 2 branches missed.">                    if (file.delete()) {</span>
+<span class="nc" id="L79">                        LOG.info(&quot;Deleted failed compaction file {}&quot;, file);</span>
+                    }
+                }
+            }
+<span class="nc" id="L83">            File[] compactedPhaseFiles = dir.listFiles(file -&gt; file.getName().endsWith(COMPACTED_SUFFIX));</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">            if (compactedPhaseFiles != null) {</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">                for (File compactedFile : compactedPhaseFiles) {</span>
+<span class="nc" id="L86">                    LOG.info(&quot;Found compacted log file {} has partially flushed index, recovering index.&quot;,</span>
+                            compactedFile);
+<span class="nc" id="L88">                    CompactionPhase updateIndex = new UpdateIndexPhase(compactedFile, true);</span>
+<span class="nc" id="L89">                    updateIndex.run();</span>
+                }
+            }
+<span class="nc" id="L92">        }</span>
+<span class="nc" id="L93">    }</span>
+
+    @Override
+    public boolean compact(EntryLogMetadata metadata) {
+<span class="nc bnc" id="L97" title="All 2 branches missed.">        if (metadata != null) {</span>
+<span class="nc" id="L98">            LOG.info(&quot;Compacting entry log {} with usage {}.&quot;,</span>
+<span class="nc" id="L99">                metadata.getEntryLogId(), metadata.getUsage());</span>
+<span class="nc" id="L100">            CompactionPhase scanEntryLog = new ScanEntryLogPhase(metadata);</span>
+<span class="nc bnc" id="L101" title="All 2 branches missed.">            if (!scanEntryLog.run()) {</span>
+<span class="nc" id="L102">                LOG.info(&quot;Compaction for entry log {} end in ScanEntryLogPhase.&quot;, metadata.getEntryLogId());</span>
+<span class="nc" id="L103">                return false;</span>
+            }
+<span class="nc" id="L105">            File compactionLogFile = entryLogger.getCurCompactionLogFile();</span>
+<span class="nc" id="L106">            CompactionPhase flushCompactionLog = new FlushCompactionLogPhase(metadata.getEntryLogId());</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">            if (!flushCompactionLog.run()) {</span>
+<span class="nc" id="L108">                LOG.info(&quot;Compaction for entry log {} end in FlushCompactionLogPhase.&quot;, metadata.getEntryLogId());</span>
+<span class="nc" id="L109">                return false;</span>
+            }
+<span class="nc" id="L111">            File compactedLogFile = getCompactedLogFile(compactionLogFile, metadata.getEntryLogId());</span>
+<span class="nc" id="L112">            CompactionPhase updateIndex = new UpdateIndexPhase(compactedLogFile);</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">            if (!updateIndex.run()) {</span>
+<span class="nc" id="L114">                LOG.info(&quot;Compaction for entry log {} end in UpdateIndexPhase.&quot;, metadata.getEntryLogId());</span>
+<span class="nc" id="L115">                return false;</span>
+            }
+<span class="nc" id="L117">            LOG.info(&quot;Compacted entry log : {}.&quot;, metadata.getEntryLogId());</span>
+<span class="nc" id="L118">            return true;</span>
+        }
+<span class="nc" id="L120">        return false;</span>
+    }
+
+    /**
+     * An abstract class that would be extended to be the actual transactional phases for compaction.
+     */
+    abstract static class CompactionPhase {
+<span class="nc" id="L127">        private String phaseName = &quot;&quot;;</span>
+
+<span class="nc" id="L129">        CompactionPhase(String phaseName) {</span>
+<span class="nc" id="L130">            this.phaseName = phaseName;</span>
+<span class="nc" id="L131">        }</span>
+
+        boolean run() {
+            try {
+<span class="nc" id="L135">                start();</span>
+<span class="nc" id="L136">                return complete();</span>
+<span class="nc" id="L137">            } catch (IOException e) {</span>
+<span class="nc" id="L138">                LOG.error(&quot;Encounter exception in compaction phase {}. Abort current compaction.&quot;, phaseName, e);</span>
+<span class="nc" id="L139">                abort();</span>
+            }
+<span class="nc" id="L141">            return false;</span>
+        }
+
+        abstract void start() throws IOException;
+
+        abstract boolean complete() throws IOException;
+
+        abstract void abort();
+
+    }
+
+    /**
+     * Assume we're compacting entry log 1 to entry log 3.
+     * The first phase is to scan entries in 1.log and copy them to compaction log file &quot;3.log.compacting&quot;.
+     * We'll try to allocate a new compaction log before scanning to make sure we have a log file to write.
+     * If after scanning, there's no data written, it means there's no valid entries to be compacted,
+     * so we can remove 1.log directly, clear the offsets and end the compaction.
+     * Otherwise, we should move on to the next phase.
+     *
+     * &lt;p&gt;If anything failed in this phase, we should delete the compaction log and clean the offsets.
+     */
+    class ScanEntryLogPhase extends CompactionPhase {
+        private final EntryLogMetadata metadata;
+
+<span class="nc" id="L165">        ScanEntryLogPhase(EntryLogMetadata metadata) {</span>
+<span class="nc" id="L166">            super(&quot;ScanEntryLogPhase&quot;);</span>
+<span class="nc" id="L167">            this.metadata = metadata;</span>
+<span class="nc" id="L168">        }</span>
+
+        @Override
+        void start() throws IOException {
+            // scan entry log into compaction log and offset list
+<span class="nc" id="L173">            entryLogger.createNewCompactionLog();</span>
+<span class="nc" id="L174">            entryLogger.scanEntryLog(metadata.getEntryLogId(), new EntryLogScanner() {</span>
+                @Override
+                public boolean accept(long ledgerId) {
+<span class="nc" id="L177">                    return metadata.containsLedger(ledgerId);</span>
+                }
+
+                @Override
+                public void process(long ledgerId, long offset, ByteBuf entry) throws IOException {
+<span class="nc" id="L182">                    throttler.acquire(entry.readableBytes());</span>
+<span class="nc" id="L183">                    synchronized (TransactionalEntryLogCompactor.this) {</span>
+<span class="nc" id="L184">                        long lid = entry.getLong(entry.readerIndex());</span>
+<span class="nc" id="L185">                        long entryId = entry.getLong(entry.readerIndex() + 8);</span>
+<span class="nc bnc" id="L186" title="All 4 branches missed.">                        if (lid != ledgerId || entryId &lt; -1) {</span>
+<span class="nc" id="L187">                            LOG.warn(&quot;Scanning expected ledgerId {}, but found invalid entry &quot;</span>
+                                    + &quot;with ledgerId {} entryId {} at offset {}&quot;,
+<span class="nc" id="L189">                                    ledgerId, lid, entryId, offset);</span>
+<span class="nc" id="L190">                            throw new IOException(&quot;Invalid entry found @ offset &quot; + offset);</span>
+                        }
+<span class="nc" id="L192">                        long newOffset = entryLogger.addEntryForCompaction(ledgerId, entry);</span>
+<span class="nc" id="L193">                        offsets.add(new EntryLocation(ledgerId, entryId, newOffset));</span>
+
+<span class="nc bnc" id="L195" title="All 2 branches missed.">                        if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L196">                            LOG.debug(&quot;Compact add entry : lid = {}, eid = {}, offset = {}&quot;,</span>
+<span class="nc" id="L197">                                    ledgerId, entryId, newOffset);</span>
+                        }
+<span class="nc" id="L199">                    }</span>
+<span class="nc" id="L200">                }</span>
+            });
+<span class="nc" id="L202">        }</span>
+
+        @Override
+        boolean complete() {
+<span class="nc bnc" id="L206" title="All 2 branches missed.">            if (offsets.isEmpty()) {</span>
+                // no valid entries is compacted, delete entry log file
+<span class="nc" id="L208">                LOG.info(&quot;No valid entry is found in entry log after scan, removing entry log now.&quot;);</span>
+<span class="nc" id="L209">                logRemovalListener.removeEntryLog(metadata.getEntryLogId());</span>
+<span class="nc" id="L210">                entryLogger.removeCurCompactionLog();</span>
+<span class="nc" id="L211">                return false;</span>
+            }
+<span class="nc" id="L213">            return true;</span>
+        }
+
+        @Override
+        void abort() {
+<span class="nc" id="L218">            offsets.clear();</span>
+            // since we haven't flushed yet, we only need to delete the unflushed compaction file.
+<span class="nc" id="L220">            entryLogger.removeCurCompactionLog();</span>
+<span class="nc" id="L221">        }</span>
+
+    }
+
+    /**
+     * Assume we're compacting log 1 to log 3.
+     * This phase is to flush the compaction log.
+     * When this phase starts, there should be a compaction log file like &quot;3.log.compacting&quot;
+     * When compaction log is flushed, in order to indicate this phase is completed,
+     * a hardlink file &quot;3.log.1.compacted&quot; should be created, and &quot;3.log.compacting&quot; should be deleted.
+     */
+    class FlushCompactionLogPhase extends CompactionPhase {
+        private final long compactingLogId;
+        private File compactedLogFile;
+
+<span class="nc" id="L236">        FlushCompactionLogPhase(long compactingLogId) {</span>
+<span class="nc" id="L237">            super(&quot;FlushCompactionLogPhase&quot;);</span>
+<span class="nc" id="L238">            this.compactingLogId = compactingLogId;</span>
+<span class="nc" id="L239">        }</span>
+
+        @Override
+        void start() throws IOException {
+            // flush the current compaction log.
+<span class="nc" id="L244">            File compactionLogFile = entryLogger.getCurCompactionLogFile();</span>
+<span class="nc bnc" id="L245" title="All 4 branches missed.">            if (compactionLogFile == null || !compactionLogFile.exists()) {</span>
+<span class="nc" id="L246">                throw new IOException(&quot;Compaction log doesn't exist during flushing&quot;);</span>
+            }
+<span class="nc" id="L248">            entryLogger.flushCompactionLog();</span>
+<span class="nc" id="L249">        }</span>
+
+        @Override
+        boolean complete() throws IOException {
+            // create a hard link file named &quot;x.log.y.compacted&quot; for file &quot;x.log.compacting&quot;.
+            // where x is compactionLogId and y is compactingLogId.
+<span class="nc" id="L255">            File compactionLogFile = entryLogger.getCurCompactionLogFile();</span>
+<span class="nc bnc" id="L256" title="All 4 branches missed.">            if (compactionLogFile == null || !compactionLogFile.exists()) {</span>
+<span class="nc" id="L257">                LOG.warn(&quot;Compaction log doesn't exist any more after flush&quot;);</span>
+<span class="nc" id="L258">                return false;</span>
+            }
+<span class="nc" id="L260">            compactedLogFile = getCompactedLogFile(compactionLogFile, compactingLogId);</span>
+<span class="nc bnc" id="L261" title="All 4 branches missed.">            if (compactedLogFile != null &amp;&amp; !compactedLogFile.exists()) {</span>
+<span class="nc" id="L262">                HardLink.createHardLink(compactionLogFile, compactedLogFile);</span>
+            }
+<span class="nc" id="L264">            entryLogger.removeCurCompactionLog();</span>
+<span class="nc" id="L265">            return true;</span>
+        }
+
+        @Override
+        void abort() {
+<span class="nc" id="L270">            offsets.clear();</span>
+            // remove compaction log file and its hardlink
+<span class="nc" id="L272">            entryLogger.removeCurCompactionLog();</span>
+<span class="nc bnc" id="L273" title="All 4 branches missed.">            if (compactedLogFile != null &amp;&amp; compactedLogFile.exists()) {</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">                if (!compactedLogFile.delete()) {</span>
+<span class="nc" id="L275">                    LOG.warn(&quot;Could not delete compacted log file {}&quot;, compactedLogFile);</span>
+                }
+            }
+<span class="nc" id="L278">        }</span>
+    }
+
+    /**
+     * Assume we're compacting log 1 to log 3.
+     * This phase is to update the entry locations and flush the index.
+     * When the phase start, there should be a compacted file like &quot;3.log.1.compacted&quot;,
+     * where 3 is the new compaction logId and 1 is the old entry logId.
+     * After the index the flushed successfully, a hardlink &quot;3.log&quot; file should be created,
+     * and 3.log.1.compacted file should be deleted to indicate the phase is succeed.
+     *
+     * &lt;p&gt;This phase can also used to recover partially flushed index when we pass isInRecovery=true
+     */
+    class UpdateIndexPhase extends CompactionPhase {
+        File compactedLogFile;
+        File newEntryLogFile;
+        private final boolean isInRecovery;
+
+        public UpdateIndexPhase(File compactedLogFile) {
+<span class="nc" id="L297">            this(compactedLogFile, false);</span>
+<span class="nc" id="L298">        }</span>
+
+<span class="nc" id="L300">        public UpdateIndexPhase(File compactedLogFile, boolean isInRecovery) {</span>
+<span class="nc" id="L301">            super(&quot;UpdateIndexPhase&quot;);</span>
+<span class="nc" id="L302">            this.compactedLogFile = compactedLogFile;</span>
+<span class="nc" id="L303">            this.isInRecovery = isInRecovery;</span>
+<span class="nc" id="L304">        }</span>
+
+        @Override
+        void start() throws IOException {
+<span class="nc bnc" id="L308" title="All 4 branches missed.">            if (compactedLogFile != null &amp;&amp; compactedLogFile.exists()) {</span>
+<span class="nc" id="L309">                File dir = compactedLogFile.getParentFile();</span>
+<span class="nc" id="L310">                String compactedFilename = compactedLogFile.getName();</span>
+                // create a hard link &quot;x.log&quot; for file &quot;x.log.y.compacted&quot;
+<span class="nc" id="L312">                this.newEntryLogFile = new File(dir, compactedFilename.substring(0,</span>
+<span class="nc" id="L313">                            compactedFilename.indexOf(&quot;.log&quot;) + 4));</span>
+<span class="nc bnc" id="L314" title="All 2 branches missed.">                if (!newEntryLogFile.exists()) {</span>
+<span class="nc" id="L315">                    HardLink.createHardLink(compactedLogFile, newEntryLogFile);</span>
+                }
+<span class="nc bnc" id="L317" title="All 2 branches missed.">                if (isInRecovery) {</span>
+<span class="nc" id="L318">                    recoverEntryLocations(EntryLogger.fileName2LogId(newEntryLogFile.getName()));</span>
+                }
+<span class="nc bnc" id="L320" title="All 2 branches missed.">                if (!offsets.isEmpty()) {</span>
+                    // update entry locations and flush index
+<span class="nc" id="L322">                    ledgerStorage.updateEntriesLocations(offsets);</span>
+<span class="nc" id="L323">                    ledgerStorage.flushEntriesLocationsIndex();</span>
+                }
+<span class="nc" id="L325">            } else {</span>
+<span class="nc" id="L326">                throw new IOException(&quot;Failed to find compacted log file in UpdateIndexPhase&quot;);</span>
+            }
+<span class="nc" id="L328">        }</span>
+
+        @Override
+        boolean complete() {
+            // When index is flushed, and entry log is removed,
+            // delete the &quot;.compacted&quot; file to indicate this phase is completed.
+<span class="nc" id="L334">            offsets.clear();</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">            if (compactedLogFile != null) {</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">                if (!compactedLogFile.delete()) {</span>
+<span class="nc" id="L337">                    LOG.warn(&quot;Could not delete compacted log file {}&quot;, compactedLogFile);</span>
+                }
+                // Now delete the old entry log file since it's compacted
+<span class="nc" id="L340">                String compactedFilename = compactedLogFile.getName();</span>
+<span class="nc" id="L341">                String oldEntryLogFilename = compactedFilename.substring(compactedFilename.indexOf(&quot;.log&quot;) + 5);</span>
+<span class="nc" id="L342">                long entryLogId = EntryLogger.fileName2LogId(oldEntryLogFilename);</span>
+<span class="nc" id="L343">                logRemovalListener.removeEntryLog(entryLogId);</span>
+            }
+<span class="nc" id="L345">            return true;</span>
+        }
+
+        @Override
+        void abort() {
+<span class="nc" id="L350">            offsets.clear();</span>
+<span class="nc" id="L351">        }</span>
+
+        /**
+         * Scan entry log to recover entry locations.
+         */
+        private void recoverEntryLocations(long compactedLogId) throws IOException {
+<span class="nc" id="L357">            entryLogger.scanEntryLog(compactedLogId, new EntryLogScanner() {</span>
+                @Override
+                public boolean accept(long ledgerId) {
+<span class="nc" id="L360">                    return true;</span>
+                }
+
+                @Override
+                public void process(long ledgerId, long offset, ByteBuf entry) throws IOException {
+<span class="nc" id="L365">                    long lid = entry.getLong(entry.readerIndex());</span>
+<span class="nc" id="L366">                    long entryId = entry.getLong(entry.readerIndex() + 8);</span>
+<span class="nc bnc" id="L367" title="All 4 branches missed.">                    if (lid != ledgerId || entryId &lt; -1) {</span>
+<span class="nc" id="L368">                        LOG.warn(&quot;Scanning expected ledgerId {}, but found invalid entry &quot;</span>
+                                + &quot;with ledgerId {} entryId {} at offset {}&quot;,
+<span class="nc" id="L370">                                ledgerId, lid, entryId, offset);</span>
+<span class="nc" id="L371">                        throw new IOException(&quot;Invalid entry found @ offset &quot; + offset);</span>
+                    }
+<span class="nc" id="L373">                    long location = (compactedLogId &lt;&lt; 32L) | (offset + 4);</span>
+<span class="nc" id="L374">                    offsets.add(new EntryLocation(lid, entryId, location));</span>
+<span class="nc" id="L375">                }</span>
+            });
+<span class="nc" id="L377">            LOG.info(&quot;Recovered {} entry locations from compacted log {}&quot;, offsets.size(), compactedLogId);</span>
+<span class="nc" id="L378">        }</span>
+    }
+
+    File getCompactedLogFile(File compactionLogFile, long compactingLogId) {
+<span class="nc bnc" id="L382" title="All 2 branches missed.">        if (compactionLogFile == null) {</span>
+<span class="nc" id="L383">            return null;</span>
+        }
+<span class="nc" id="L385">        File dir = compactionLogFile.getParentFile();</span>
+<span class="nc" id="L386">        String filename = compactionLogFile.getName();</span>
+<span class="nc" id="L387">        String newSuffix = &quot;.log.&quot; + EntryLogger.logId2HexString(compactingLogId) + COMPACTED_SUFFIX;</span>
+<span class="nc" id="L388">        String hardLinkFilename = filename.replace(COMPACTING_SUFFIX, newSuffix);</span>
+<span class="nc" id="L389">        return new File(dir, hardLinkFilename);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.4.201905082037</span></div></body></html>
