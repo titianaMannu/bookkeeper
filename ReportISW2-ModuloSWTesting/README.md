@@ -1,7 +1,9 @@
 
 # Usage
 
-    mvn clean verify
+    JAVA_HOME="/usr/lib/jvm/java-8-openjdk-amd64" mvn clean verify
+
+Nella directory: target/site/jacoco-aggregate si trova il report di Jacoco 
 
 Per generare pit-report
 
